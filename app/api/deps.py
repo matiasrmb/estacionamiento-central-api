@@ -57,4 +57,5 @@ def require_role(*allowed_roles: str) -> Callable:
             )
         return user
 
+    _checker.allowed_roles = normalized_allowed
     return _checker

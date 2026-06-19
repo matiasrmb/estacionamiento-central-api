@@ -34,27 +34,37 @@ def _install_optional_dependency_stubs():
 
 _install_optional_dependency_stubs()
 
-from app.api.deps import get_current_user
-from app.api.v1.endpoints import activos, salidas
+from app.api.v1.endpoints import activos, ingresos, salidas
 
 
-def _has_current_user_dependency(function):
+def _role_dependency(function):
     for parameter in inspect.signature(function).parameters.values():
         default = parameter.default
-        if getattr(default, "dependency", None) is get_current_user:
-            return True
-    return False
+        dependency = getattr(default, "dependency", None)
+        if hasattr(dependency, "allowed_roles"):
+            return dependency
+    return None
+
+
+def _allowed_roles(function):
+    dependency = _role_dependency(function)
+    if dependency is None:
+        return set()
+    return set(dependency.allowed_roles)
 
 
 class EndpointAuthTests(unittest.TestCase):
-    def test_activos_requires_current_user(self):
-        self.assertTrue(_has_current_user_dependency(activos.listar_activos))
+    def test_ingresos_allows_operator_and_admin(self):
+        self.assertEqual(_allowed_roles(ingresos.registrar_ingreso), {"operador", "admin"})
 
-    def test_salida_preview_requires_current_user(self):
-        self.assertTrue(_has_current_user_dependency(salidas.preview_salida))
+    def test_activos_allows_operator_and_admin(self):
+        self.assertEqual(_allowed_roles(activos.listar_activos), {"operador", "admin"})
 
-    def test_salida_confirm_requires_current_user(self):
-        self.assertTrue(_has_current_user_dependency(salidas.confirmar_salida))
+    def test_salida_preview_allows_operator_and_admin(self):
+        self.assertEqual(_allowed_roles(salidas.preview_salida), {"operador", "admin"})
+
+    def test_salida_confirm_allows_operator_and_admin(self):
+        self.assertEqual(_allowed_roles(salidas.confirmar_salida), {"operador", "admin"})
 
 
 if __name__ == "__main__":

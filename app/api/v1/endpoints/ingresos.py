@@ -2,7 +2,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
-from app.api.deps import get_current_user
+from app.api.deps import require_role
 from app.repositories.ingresos_repo import find_active_ingreso_by_plate, create_ingreso
 from app.repositories.vehiculos_repo import get_or_create_vehicle_by_plate
 from app.repositories.print_jobs_repo import create_print_job_pc_pdf
@@ -17,7 +17,7 @@ class IngresoRequest(BaseModel):
 
 
 @router.post("/ingresos", tags=["mvp"])
-def registrar_ingreso(payload: IngresoRequest, user=Depends(get_current_user)):
+def registrar_ingreso(payload: IngresoRequest, user=Depends(require_role("operador", "admin"))):
     patente = payload.patente.strip().upper()
 
     # Validación de duplicado

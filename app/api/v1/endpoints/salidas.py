@@ -2,7 +2,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import text
 
-from app.api.deps import get_current_user
+from app.api.deps import require_role
 from app.db.database import db_conn
 from app.schemas.salidas import SalidaPreviewIn, SalidaPreviewOut, SalidaConfirmIn, SalidaConfirmOut
 from app.services.tarifas import calcular_monto_mvp
@@ -26,7 +26,7 @@ def _get_ingreso(conn, id_ingreso: int):
 
 
 @router.post("/preview", response_model=SalidaPreviewOut)
-def preview_salida(payload: SalidaPreviewIn, _user=Depends(get_current_user)):
+def preview_salida(payload: SalidaPreviewIn, _user=Depends(require_role("operador", "admin"))):
     with db_conn() as conn:
         ingreso = _get_ingreso(conn, payload.id_ingreso)
         if not ingreso:
@@ -49,7 +49,7 @@ def preview_salida(payload: SalidaPreviewIn, _user=Depends(get_current_user)):
 
 
 @router.post("/confirm", response_model=SalidaConfirmOut)
-def confirmar_salida(payload: SalidaConfirmIn, _user=Depends(get_current_user)):
+def confirmar_salida(payload: SalidaConfirmIn, _user=Depends(require_role("operador", "admin"))):
     with db_conn() as conn:
         ingreso = _get_ingreso(conn, payload.id_ingreso)
         if not ingreso:

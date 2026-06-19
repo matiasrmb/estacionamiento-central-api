@@ -34,7 +34,7 @@ def _install_optional_dependency_stubs():
 
 _install_optional_dependency_stubs()
 
-from app.api.v1.endpoints import activos, ingresos, salidas
+from app.api.v1.endpoints import activos, configuracion, ingresos, salidas, tarifas
 
 
 def _role_dependency(function):
@@ -65,6 +65,35 @@ class EndpointAuthTests(unittest.TestCase):
 
     def test_salida_confirm_allows_operator_and_admin(self):
         self.assertEqual(_allowed_roles(salidas.confirmar_salida), {"operador", "admin"})
+
+    def test_configuracion_requires_admin(self):
+        self.assertEqual(_allowed_roles(configuracion.obtener_configuracion), {"admin"})
+        self.assertEqual(_allowed_roles(configuracion.actualizar_configuracion), {"admin"})
+
+    def test_tarifas_requires_admin(self):
+        self.assertEqual(_allowed_roles(tarifas.listar_tarifas_personalizadas), {"admin"})
+        self.assertEqual(_allowed_roles(tarifas.crear_tarifa_personalizada), {"admin"})
+        self.assertEqual(_allowed_roles(tarifas.actualizar_tarifa_personalizada), {"admin"})
+        self.assertEqual(_allowed_roles(tarifas.eliminar_tarifa_personalizada), {"admin"})
+
+    def test_crear_tarifa_uses_repository_alias(self):
+        original = tarifas.repo_create_tarifa_personalizada
+        calls = []
+
+        def fake_create_tarifa_personalizada(**kwargs):
+            calls.append(kwargs)
+            return 123
+
+        try:
+            tarifas.repo_create_tarifa_personalizada = fake_create_tarifa_personalizada
+            payload = tarifas.TarifaPersonalizadaIn(minuto_inicio=0, minuto_fin=30, valor=300)
+
+            result = tarifas.crear_tarifa_personalizada(payload)
+        finally:
+            tarifas.repo_create_tarifa_personalizada = original
+
+        self.assertEqual(result, {"id_tarifa": 123})
+        self.assertEqual(calls, [{"minuto_inicio": 0, "minuto_fin": 30, "valor": 300}])
 
 
 if __name__ == "__main__":

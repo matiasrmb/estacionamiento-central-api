@@ -1,13 +1,14 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from sqlalchemy import text
 
+from app.api.deps import get_current_user
 from app.db.database import db_conn
 
 router = APIRouter(tags=["activos"])
 
 
 @router.get("/activos")
-def listar_activos():
+def listar_activos(_user=Depends(get_current_user)):
     """
     Activos = ingresos con fecha_hora_salida NULL.
     Devuelve lista en formato simple para Flutter.

@@ -45,15 +45,31 @@ def _calcular_minutos_lavado(conn, id_ingreso: int, fecha_salida: datetime) -> i
     return total
 
 
+def _calcular_total_lavados(conn, id_ingreso: int) -> int:
+    total = conn.execute(
+        text("""
+            SELECT COALESCE(SUM(valor_lavado), 0)
+            FROM lavados
+            WHERE id_ingreso = :id_ingreso
+        """),
+        {"id_ingreso": id_ingreso},
+    ).scalar()
+    return int(total or 0)
+
+
 def _calcular_monto_con_lavados(conn, id_ingreso: int, fecha_ingreso: datetime, fecha_salida: datetime):
     minutos_totales = max(0, int(math.ceil((fecha_salida - fecha_ingreso).total_seconds() / 60.0)))
     minutos_lavado = _calcular_minutos_lavado(conn, id_ingreso, fecha_salida)
     minutos_cobrables = max(minutos_totales - minutos_lavado, 0)
+    total_lavados = _calcular_total_lavados(conn, id_ingreso)
 
-    minutos, monto, detalle = calcular_monto_desde_minutos(conn, minutos_cobrables, fecha_ingreso, fecha_salida)
+    minutos, monto_estacionamiento, detalle = calcular_monto_desde_minutos(conn, minutos_cobrables, fecha_ingreso, fecha_salida)
+    monto_total = monto_estacionamiento + total_lavados
     if minutos_lavado > 0:
         detalle = f"{detalle} - descuenta {minutos_lavado} min de lavado"
-    return minutos, monto, detalle
+    if total_lavados > 0:
+        detalle = f"{detalle} - lavados ${total_lavados}"
+    return minutos, monto_total, detalle, monto_estacionamiento, total_lavados
 
 
 @router.post("/preview", response_model=SalidaPreviewOut)
@@ -71,7 +87,7 @@ def preview_salida(payload: SalidaPreviewIn, _user=Depends(require_role("operado
 
         fecha_ing = ingreso["fecha_hora_ingreso"]
         ahora = datetime.now()  # hora servidor
-        minutos, monto, detalle = _calcular_monto_con_lavados(conn, int(ingreso["id_ingreso"]), fecha_ing, ahora)
+        minutos, monto, detalle, _monto_estacionamiento, _total_lavados = _calcular_monto_con_lavados(conn, int(ingreso["id_ingreso"]), fecha_ing, ahora)
 
         return {
             "id_ingreso": int(ingreso["id_ingreso"]),
@@ -97,7 +113,7 @@ def confirmar_salida(payload: SalidaConfirmIn, _user=Depends(require_role("opera
 
         fecha_ing = ingreso["fecha_hora_ingreso"]
         ahora = datetime.now()
-        minutos, monto, detalle = _calcular_monto_con_lavados(conn, int(ingreso["id_ingreso"]), fecha_ing, ahora)
+        minutos, monto, detalle, monto_estacionamiento, total_lavados = _calcular_monto_con_lavados(conn, int(ingreso["id_ingreso"]), fecha_ing, ahora)
 
         # Persistir salida + tarifa final (ajusta nombres si tu tabla usa otro campo)
         conn.execute(
@@ -116,14 +132,24 @@ def confirmar_salida(payload: SalidaConfirmIn, _user=Depends(require_role("opera
 
         # PC siempre
         pc_payload = {
+            "kind": "TICKET_SALIDA",
             "tipo": "TICKET_SALIDA",
             "id_ingreso": int(payload.id_ingreso),
             "patente": patente,
+            "hora_ingreso": str(fecha_ing),
+            "hora_salida": str(ahora),
             "fecha_hora_ingreso": str(fecha_ing),
             "fecha_hora_salida": str(ahora),
+            "minutos_cobrados": int(minutos),
             "minutos": int(minutos),
+            "monto_final": int(monto),
             "monto": int(monto),
-            "detalle": detalle,
+            "detalle": {
+                "texto": detalle,
+                "monto_estacionamiento": int(monto_estacionamiento),
+                "total_lavados": int(total_lavados),
+            },
+            "detalle_texto": detalle,
             "destino": "PC_PDF",
         }
 

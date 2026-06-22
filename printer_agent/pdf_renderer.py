@@ -63,6 +63,12 @@ def render_ticket_pdf(payload: Dict[str, Any], out_dir: str) -> str:
         modo = det.get("modo_tarifa") or det.get("modo") or ""
         if modo:
             draw(f"MODO: {modo}")
+        if det.get("monto_estacionamiento") is not None:
+            draw(f"ESTAC: ${det.get('monto_estacionamiento')}")
+        if det.get("total_lavados"):
+            draw(f"LAVADOS: ${det.get('total_lavados')}")
+        if det.get("texto"):
+            draw(str(det.get("texto")))
 
     draw("------------------------------")
     usr = payload.get("usuario") or {}

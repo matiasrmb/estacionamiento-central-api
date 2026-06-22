@@ -13,6 +13,7 @@ logs/
 
 # Tickets
 print_out/
+connect_api_qr.png
 
 # Env
 .env

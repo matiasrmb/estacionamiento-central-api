@@ -92,9 +92,14 @@ def _calcular_minutos_en_subida(
     return int((fin_real - inicio_real).total_seconds() / 60)
 
 
-def calcular_monto_mvp(conn: Connection, fecha_ingreso: datetime, fecha_salida: datetime) -> tuple[int, int, str]:
+def calcular_monto_desde_minutos(
+    conn: Connection,
+    minutos: int,
+    fecha_ingreso: datetime,
+    fecha_salida: datetime,
+) -> tuple[int, int, str]:
     """
-    Retorna (minutos, monto, detalle)
+    Retorna (minutos, monto, detalle) usando minutos ya ajustados.
 
     Replica la lógica principal del escritorio para mantener cobros consistentes:
     - modo minuto: tarifa mínima + valor por minuto adicional
@@ -102,8 +107,7 @@ def calcular_monto_mvp(conn: Connection, fecha_ingreso: datetime, fecha_salida: 
     - modo auto: bloques por hora usando tarifa mínima
     - subida temporal: recargo según el modo
     """
-    diff = (fecha_salida - fecha_ingreso).total_seconds()
-    minutos = max(0, int(math.ceil(diff / 60.0)))
+    minutos = max(0, int(minutos))
 
     config = _get_config(conn)
     modo = config.get("modo_cobro", "minuto")
@@ -195,3 +199,12 @@ def calcular_monto_mvp(conn: Connection, fecha_ingreso: datetime, fecha_salida: 
     extra_horas = int(math.ceil((minutos - 60) / 60.0))
     monto = tarifa_minima + extra_horas * tarifa_hora
     return minutos, monto, f"MVP: mínima + {extra_horas}h extra"
+
+
+def calcular_monto_mvp(conn: Connection, fecha_ingreso: datetime, fecha_salida: datetime) -> tuple[int, int, str]:
+    """
+    Retorna (minutos, monto, detalle) calculando minutos desde las fechas reales.
+    """
+    diff = (fecha_salida - fecha_ingreso).total_seconds()
+    minutos = max(0, int(math.ceil(diff / 60.0)))
+    return calcular_monto_desde_minutos(conn, minutos, fecha_ingreso, fecha_salida)

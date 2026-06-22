@@ -1,3 +1,4 @@
+import math
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import text
@@ -5,7 +6,7 @@ from sqlalchemy import text
 from app.api.deps import require_role
 from app.db.database import db_conn
 from app.schemas.salidas import SalidaPreviewIn, SalidaPreviewOut, SalidaConfirmIn, SalidaConfirmOut
-from app.services.tarifas import calcular_monto_mvp
+from app.services.tarifas import calcular_monto_desde_minutos
 from app.services.print_jobs import crear_print_job
 
 router = APIRouter(prefix="/salidas", tags=["salidas"])
@@ -15,7 +16,7 @@ def _get_ingreso(conn, id_ingreso: int):
     return conn.execute(
         text("""
             SELECT i.id_ingreso, i.id_vehiculo, i.fecha_hora_ingreso, i.fecha_hora_salida,
-                   v.patente
+                   i.en_lavado, v.patente
             FROM ingresos i
             JOIN vehiculos v ON v.id_vehiculo = i.id_vehiculo
             WHERE i.id_ingreso = :id
@@ -23,6 +24,36 @@ def _get_ingreso(conn, id_ingreso: int):
         """),
         {"id": id_ingreso},
     ).mappings().first()
+
+
+def _calcular_minutos_lavado(conn, id_ingreso: int, fecha_salida: datetime) -> int:
+    rows = conn.execute(
+        text("""
+            SELECT fecha_hora_inicio, fecha_hora_fin
+            FROM lavados
+            WHERE id_ingreso = :id_ingreso
+        """),
+        {"id_ingreso": id_ingreso},
+    ).mappings().all()
+
+    total = 0
+    for row in rows:
+        inicio = row["fecha_hora_inicio"]
+        fin = row["fecha_hora_fin"] or fecha_salida
+        if fin > inicio:
+            total += int((fin - inicio).total_seconds() / 60)
+    return total
+
+
+def _calcular_monto_con_lavados(conn, id_ingreso: int, fecha_ingreso: datetime, fecha_salida: datetime):
+    minutos_totales = max(0, int(math.ceil((fecha_salida - fecha_ingreso).total_seconds() / 60.0)))
+    minutos_lavado = _calcular_minutos_lavado(conn, id_ingreso, fecha_salida)
+    minutos_cobrables = max(minutos_totales - minutos_lavado, 0)
+
+    minutos, monto, detalle = calcular_monto_desde_minutos(conn, minutos_cobrables, fecha_ingreso, fecha_salida)
+    if minutos_lavado > 0:
+        detalle = f"{detalle} - descuenta {minutos_lavado} min de lavado"
+    return minutos, monto, detalle
 
 
 @router.post("/preview", response_model=SalidaPreviewOut)
@@ -35,9 +66,12 @@ def preview_salida(payload: SalidaPreviewIn, _user=Depends(require_role("operado
         if ingreso["fecha_hora_salida"] is not None:
             raise HTTPException(status_code=409, detail="INGRESO_YA_SALIO")
 
+        if int(ingreso.get("en_lavado") or 0) == 1:
+            raise HTTPException(status_code=409, detail="VEHICULO_EN_LAVADO")
+
         fecha_ing = ingreso["fecha_hora_ingreso"]
         ahora = datetime.now()  # hora servidor
-        minutos, monto, detalle = calcular_monto_mvp(conn, fecha_ing, ahora)
+        minutos, monto, detalle = _calcular_monto_con_lavados(conn, int(ingreso["id_ingreso"]), fecha_ing, ahora)
 
         return {
             "id_ingreso": int(ingreso["id_ingreso"]),
@@ -58,9 +92,12 @@ def confirmar_salida(payload: SalidaConfirmIn, _user=Depends(require_role("opera
         if ingreso["fecha_hora_salida"] is not None:
             raise HTTPException(status_code=409, detail="INGRESO_YA_SALIO")
 
+        if int(ingreso.get("en_lavado") or 0) == 1:
+            raise HTTPException(status_code=409, detail="VEHICULO_EN_LAVADO")
+
         fecha_ing = ingreso["fecha_hora_ingreso"]
         ahora = datetime.now()
-        minutos, monto, detalle = calcular_monto_mvp(conn, fecha_ing, ahora)
+        minutos, monto, detalle = _calcular_monto_con_lavados(conn, int(ingreso["id_ingreso"]), fecha_ing, ahora)
 
         # Persistir salida + tarifa final (ajusta nombres si tu tabla usa otro campo)
         conn.execute(

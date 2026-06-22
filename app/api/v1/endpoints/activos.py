@@ -20,6 +20,7 @@ def listar_activos(_user=Depends(require_role("operador", "admin"))):
                        v.patente,
                        i.fecha_hora_ingreso,
                        i.en_espera,
+                       i.en_lavado,
                        i.usuario
                 FROM ingresos i
                 JOIN vehiculos v ON v.id_vehiculo = i.id_vehiculo

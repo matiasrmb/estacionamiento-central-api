@@ -34,7 +34,7 @@ def _install_optional_dependency_stubs():
 
 _install_optional_dependency_stubs()
 
-from app.api.v1.endpoints import activos, configuracion, ingresos, mensuales, salidas, tarifas
+from app.api.v1.endpoints import activos, configuracion, ingresos, mensuales, operaciones, salidas, tarifas
 
 
 def _role_dependency(function):
@@ -81,6 +81,13 @@ class EndpointAuthTests(unittest.TestCase):
         self.assertEqual(_allowed_roles(mensuales.crear_mensual), {"admin"})
         self.assertEqual(_allowed_roles(mensuales.actualizar_tarifa_mensual), {"admin"})
         self.assertEqual(_allowed_roles(mensuales.eliminar_mensual), {"admin"})
+
+    def test_operaciones_allows_operator_and_admin(self):
+        allowed = {"operador", "admin"}
+        self.assertEqual(_allowed_roles(operaciones.registrar_bano), allowed)
+        self.assertEqual(_allowed_roles(operaciones.listar_lavado_categorias), allowed)
+        self.assertEqual(_allowed_roles(operaciones.iniciar_lavado_endpoint), allowed)
+        self.assertEqual(_allowed_roles(operaciones.finalizar_lavado_endpoint), allowed)
 
     def test_crear_tarifa_uses_repository_alias(self):
         original = tarifas.repo_create_tarifa_personalizada

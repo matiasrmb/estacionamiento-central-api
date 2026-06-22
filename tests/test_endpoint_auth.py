@@ -111,6 +111,7 @@ class EndpointAuthTests(unittest.TestCase):
 
     def test_asistencias_requires_admin(self):
         self.assertEqual(_allowed_roles(asistencias.listar_asistencias), {"admin"})
+        self.assertEqual(_allowed_roles(asistencias.cerrar_activas), {"admin"})
 
     def test_crear_tarifa_uses_repository_alias(self):
         original = tarifas.repo_create_tarifa_personalizada

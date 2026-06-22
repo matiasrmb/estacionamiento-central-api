@@ -1,8 +1,10 @@
 import logging
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
+from app.api.deps import require_role
 from app.core.security import verify_password, create_access_token
+from app.repositories.asistencias_repo import registrar_asistencia_inicio, registrar_asistencia_salida
 from app.repositories.users_repo import get_user_by_username
 
 router = APIRouter()
@@ -43,6 +45,7 @@ def login(payload: LoginRequest):
         )
 
     rol_api = _map_rol_db_to_api(user["rol"])
+    registrar_asistencia_inicio(user["usuario"])
 
     token = create_access_token(
         subject=user["usuario"],
@@ -58,3 +61,9 @@ def login(payload: LoginRequest):
         usuario=user["usuario"],
         rol=rol_api,
     )
+
+
+@router.post("/auth/logout", tags=["auth"])
+def logout(user=Depends(require_role("operador", "admin"))):
+    resumen = registrar_asistencia_salida(user.get("sub") or "")
+    return {"ok": True, "resumen": resumen}

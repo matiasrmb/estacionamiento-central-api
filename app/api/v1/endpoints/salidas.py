@@ -99,7 +99,7 @@ def preview_salida(payload: SalidaPreviewIn, _user=Depends(require_role("operado
 
 
 @router.post("/confirm", response_model=SalidaConfirmOut)
-def confirmar_salida(payload: SalidaConfirmIn, _user=Depends(require_role("operador", "admin"))):
+def confirmar_salida(payload: SalidaConfirmIn, user=Depends(require_role("operador", "admin"))):
     with db_conn() as conn:
         ingreso = _get_ingreso(conn, payload.id_ingreso)
         if not ingreso:
@@ -120,10 +120,11 @@ def confirmar_salida(payload: SalidaConfirmIn, _user=Depends(require_role("opera
             text("""
                 UPDATE ingresos
                 SET fecha_hora_salida = :salida,
-                    tarifa_aplicada = :monto
+                    tarifa_aplicada = :monto,
+                    usuario = :usuario
                 WHERE id_ingreso = :id
             """),
-            {"salida": ahora, "monto": monto, "id": payload.id_ingreso},
+            {"salida": ahora, "monto": monto, "usuario": user.get("sub") or "", "id": payload.id_ingreso},
         )
 
         patente = str(ingreso["patente"])

@@ -29,12 +29,18 @@ def _install_optional_dependency_stubs():
     if "app.core.security" not in sys.modules:
         security_stub = types.ModuleType("app.core.security")
         security_stub.decode_token = lambda token: {"sub": "tester", "rol": "operador"}
+
+        class PasswordContextStub:
+            def hash(self, value):
+                return f"hashed-{value}"
+
+        security_stub.pwd_context = PasswordContextStub()
         sys.modules["app.core.security"] = security_stub
 
 
 _install_optional_dependency_stubs()
 
-from app.api.v1.endpoints import activos, cierres, configuracion, ingresos, mensuales, operaciones, reportes, salidas, tarifas
+from app.api.v1.endpoints import activos, cierres, configuracion, ingresos, mensuales, operaciones, reportes, salidas, tarifas, usuarios
 
 
 def _role_dependency(function):
@@ -96,6 +102,12 @@ class EndpointAuthTests(unittest.TestCase):
 
     def test_reportes_requires_admin(self):
         self.assertEqual(_allowed_roles(reportes.listar_movimientos), {"admin"})
+
+    def test_usuarios_requires_admin(self):
+        self.assertEqual(_allowed_roles(usuarios.listar_usuarios), {"admin"})
+        self.assertEqual(_allowed_roles(usuarios.crear_usuario), {"admin"})
+        self.assertEqual(_allowed_roles(usuarios.cambiar_password), {"admin"})
+        self.assertEqual(_allowed_roles(usuarios.cambiar_estado), {"admin"})
 
     def test_crear_tarifa_uses_repository_alias(self):
         original = tarifas.repo_create_tarifa_personalizada

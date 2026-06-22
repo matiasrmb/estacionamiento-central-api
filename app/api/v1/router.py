@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 from app.api.v1.endpoints import health, db_ping, auth
-from app.api.v1.endpoints import ingresos, activos, salidas, configuracion, tarifas, mensuales, operaciones
+from app.api.v1.endpoints import ingresos, activos, salidas, configuracion, tarifas, mensuales, operaciones, cierres
 
 api_router = APIRouter()
 
@@ -16,3 +16,4 @@ api_router.include_router(configuracion.router)
 api_router.include_router(tarifas.router)
 api_router.include_router(mensuales.router)
 api_router.include_router(operaciones.router)
+api_router.include_router(cierres.router)

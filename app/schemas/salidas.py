@@ -23,5 +23,9 @@ class SalidaConfirmOut(BaseModel):
     patente: str
     minutos: int
     monto: int
+    fecha_hora_ingreso: str
     fecha_hora_salida: str
+    detalle: str
+    monto_estacionamiento: int
+    total_lavados: int
     print_jobs_creados: int

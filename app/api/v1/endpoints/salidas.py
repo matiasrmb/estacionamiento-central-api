@@ -112,7 +112,7 @@ def confirmar_salida(payload: SalidaConfirmIn, user=Depends(require_role("operad
             raise HTTPException(status_code=409, detail="VEHICULO_EN_LAVADO")
 
         fecha_ing = ingreso["fecha_hora_ingreso"]
-        ahora = datetime.now()
+        ahora = datetime.now().replace(microsecond=0)
         minutos, monto, detalle, monto_estacionamiento, total_lavados = _calcular_monto_con_lavados(conn, int(ingreso["id_ingreso"]), fecha_ing, ahora)
 
         # Persistir salida + tarifa final (ajusta nombres si tu tabla usa otro campo)
@@ -137,10 +137,10 @@ def confirmar_salida(payload: SalidaConfirmIn, user=Depends(require_role("operad
             "tipo": "TICKET_SALIDA",
             "id_ingreso": int(payload.id_ingreso),
             "patente": patente,
-            "hora_ingreso": str(fecha_ing),
-            "hora_salida": str(ahora),
-            "fecha_hora_ingreso": str(fecha_ing),
-            "fecha_hora_salida": str(ahora),
+            "hora_ingreso": fecha_ing.replace(microsecond=0).isoformat(sep=" "),
+            "hora_salida": ahora.isoformat(sep=" "),
+            "fecha_hora_ingreso": fecha_ing.replace(microsecond=0).isoformat(sep=" "),
+            "fecha_hora_salida": ahora.isoformat(sep=" "),
             "minutos_cobrados": int(minutos),
             "minutos": int(minutos),
             "monto_final": int(monto),
@@ -188,6 +188,10 @@ def confirmar_salida(payload: SalidaConfirmIn, user=Depends(require_role("operad
             "patente": patente,
             "minutos": int(minutos),
             "monto": int(monto),
-            "fecha_hora_salida": str(ahora),
+            "fecha_hora_ingreso": fecha_ing.replace(microsecond=0).isoformat(sep=" "),
+            "fecha_hora_salida": ahora.isoformat(sep=" "),
+            "detalle": detalle,
+            "monto_estacionamiento": int(monto_estacionamiento),
+            "total_lavados": int(total_lavados),
             "print_jobs_creados": int(created),
         }

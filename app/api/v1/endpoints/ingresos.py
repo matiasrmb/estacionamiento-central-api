@@ -39,8 +39,8 @@ def registrar_ingreso(payload: IngresoRequest, user=Depends(require_role("operad
     id_ingreso = create_ingreso(id_vehiculo=id_vehiculo, fecha_hora_ingreso=now, usuario=user.get("sub"))
 
     # Crear print job PC (obligatorio)
-    hora_ingreso_iso = now.isoformat()
-    server_time_iso = now.isoformat()
+    hora_ingreso_iso = now.isoformat(timespec="seconds")
+    server_time_iso = now.isoformat(timespec="seconds")
     ticket_payload = build_ticket_ingreso_payload(
         id_ingreso=id_ingreso,
         patente=patente,

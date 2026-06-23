@@ -162,14 +162,26 @@ def calcular_monto_desde_minutos(
         minutos_restantes = minutos % duracion_ciclo
         total = horas_completas * ultimo_tramo["valor"]
 
+        tramo_aplicado = None
         for tramo in tramos:
             if tramo["minuto_inicio"] <= minutos_restantes <= tramo["minuto_fin"]:
                 total += tramo["valor"]
+                tramo_aplicado = tramo
                 break
         else:
             total += ultimo_tramo["valor"]
+            tramo_aplicado = ultimo_tramo
 
-        return minutos, round(total), "Modo personalizado"
+        detalle = "Modo personalizado"
+        if tramo_aplicado:
+            detalle = (
+                f"Modo personalizado - tramo "
+                f"{tramo_aplicado['minuto_inicio']}-{tramo_aplicado['minuto_fin']} min"
+            )
+            if horas_completas:
+                detalle += f" (+{horas_completas} ciclo(s) completo(s))"
+
+        return minutos, round(total), detalle
 
     if modo == "auto":
         bloques = (minutos // 60) + (1 if minutos % 60 > 0 else 0)

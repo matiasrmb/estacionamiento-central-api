@@ -139,7 +139,7 @@ class CalcularMontoMvpTests(unittest.TestCase):
 
         self.assertEqual(minutos, 61)
         self.assertEqual(monto, 900)
-        self.assertEqual(detalle, "Modo personalizado")
+        self.assertEqual(detalle, "Modo personalizado - tramo 0-30 min (+1 ciclo(s) completo(s))")
 
     def test_matches_desktop_minute_mode_with_subida(self):
         conn = _FakeConnection(

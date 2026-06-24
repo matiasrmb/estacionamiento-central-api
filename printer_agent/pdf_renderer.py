@@ -30,8 +30,11 @@ def _ticket_lines(payload: Dict[str, Any]) -> list[str]:
     patente = str(payload.get("patente", "")).upper()
     hora_ingreso = _format_datetime(payload.get("hora_ingreso") or payload.get("fecha_hora_ingreso"))
     hora_salida = _format_datetime(payload.get("hora_salida") or payload.get("fecha_hora_salida"))
+    top_margin = ["------------------------", "------------------------"]
+    bottom_margin = ["------------------------", "------------------------", "------------------------"]
 
     lines = [
+        *top_margin,
         "ESTACIONAMIENTO CENTRAL",
         "------------------------",
         "TICKET DE INGRESO" if kind == "TICKET_INGRESO" else "TICKET DE SALIDA",
@@ -65,11 +68,15 @@ def _ticket_lines(payload: Dict[str, Any]) -> list[str]:
     lines.extend([
         "------------------------",
         "Gracias por su visita.",
+        *bottom_margin,
     ])
     return lines
 
 
 def _wrap_ticket_line(text: str, width: int = 32) -> list[str]:
+    if text == "":
+        return [""]
+
     if len(text) <= width:
         return [text]
 
@@ -108,13 +115,13 @@ def render_ticket_pdf(payload: Dict[str, Any], out_dir: str) -> str:
     fname = f"{_safe_filename(kind)}_{_safe_filename(patente)}_{id_ingreso}_{ts}.pdf"
     path = os.path.abspath(os.path.join(out_dir, fname))
 
-    # Ticket 58mm: ancho 58mm, con alto extra para evitar cortes.
+    # Ticket 58mm: ancho 58mm, con margen extra para facilitar el corte.
     width = 58 * mm
-    height = 180 * mm
+    height = 235 * mm
 
     c = canvas.Canvas(path, pagesize=(width, height))
 
-    y = height - 10 * mm
+    y = height - 8 * mm
     line = 6.5 * mm
 
     def draw(txt: str, bold: bool = False):

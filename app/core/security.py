@@ -12,6 +12,12 @@ logger = logging.getLogger(__name__)
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
+def _ensure_safe_jwt_secret() -> None:
+    jwt_secret = settings.jwt_secret.strip()
+    if settings.env.strip().lower() in {"prod", "production"} and jwt_secret in {"", "CHANGE_ME"}:
+        raise RuntimeError("JWT_SECRET must be configured for production")
+
+
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """
     Verifica una contraseña contra el hash bcrypt almacenado.
@@ -29,6 +35,7 @@ def create_access_token(subject: str, extra_claims: Dict[str, Any]) -> str:
     - subject: normalmente el username
     - extra_claims: ej. rol, id_usuario
     """
+    _ensure_safe_jwt_secret()
     now = datetime.now(timezone.utc)
     expire = now + timedelta(minutes=settings.jwt_access_token_expire_minutes)
 
@@ -47,4 +54,5 @@ def decode_token(token: str) -> Dict[str, Any]:
     """
     Decodifica y valida JWT. Lanza JWTError si es inválido/expirado.
     """
+    _ensure_safe_jwt_secret()
     return jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])

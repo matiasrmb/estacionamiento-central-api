@@ -4,6 +4,7 @@ from typing import Any, Dict, List
 from sqlalchemy import text
 
 from app.db.database import db_conn
+from app.repositories.accounting_contracts import build_report_totals
 
 
 def obtener_reporte(fecha_inicio: date, fecha_fin: date, patente: str = "") -> Dict[str, Any]:
@@ -32,6 +33,8 @@ def obtener_reporte(fecha_inicio: date, fecha_fin: date, patente: str = "") -> D
         rows = conn.execute(text(query), params).mappings().all()
         items = [_serialize_movimiento(row) for row in rows]
 
+        accounting_items = list(items)
+        lavados_solos = []
         if not patente:
             banos = conn.execute(
                 text("""
@@ -54,16 +57,31 @@ def obtener_reporte(fecha_inicio: date, fecha_fin: date, patente: str = "") -> D
                         "usuario": bano.get("usuario"),
                     }
                 )
+            lavados_solos = conn.execute(
+                text("""
+                    SELECT patente, fecha_hora_inicio, fecha_hora_fin,
+                           TIMESTAMPDIFF(MINUTE, fecha_hora_inicio, fecha_hora_fin) AS minutos,
+                           valor_lavado_snapshot, estado, usuario_fin
+                    FROM operaciones_servicio
+                    WHERE estado = 'FINALIZADO_COBRADO'
+                      AND fecha_hora_fin IS NOT NULL
+                      AND DATE(fecha_hora_fin) BETWEEN :fecha_inicio AND :fecha_fin
+                    ORDER BY fecha_hora_fin ASC
+                """),
+                params,
+            ).mappings().all()
+            for lavado in lavados_solos:
+                items.append(_serialize_solo_lavado(lavado))
 
     items.sort(key=lambda item: item["fecha_hora_salida"] or "")
-    total = sum(int(item["tarifa_aplicada"] or 0) for item in items)
+    totals = build_report_totals(accounting_items, lavados_solos)
+    totals["total_movimientos"] = len(items)
     return {
         "fecha_inicio": fecha_inicio.isoformat(),
         "fecha_fin": fecha_fin.isoformat(),
         "patente": patente,
         "items": items,
-        "total_movimientos": len(items),
-        "total_recaudado": total,
+        **totals,
     }
 
 
@@ -75,6 +93,18 @@ def _serialize_movimiento(row) -> Dict[str, Any]:
         "fecha_hora_salida": _iso(row["fecha_hora_salida"]),
         "minutos": int(row["minutos"] or 0),
         "tarifa_aplicada": int(row["tarifa_aplicada"] or 0),
+    }
+
+
+def _serialize_solo_lavado(row) -> Dict[str, Any]:
+    return {
+        "tipo": "lavado_solo",
+        "patente": row["patente"],
+        "fecha_hora_ingreso": _iso(row["fecha_hora_inicio"]),
+        "fecha_hora_salida": _iso(row["fecha_hora_fin"]),
+        "minutos": int(row["minutos"] or 0),
+        "tarifa_aplicada": int(row["valor_lavado_snapshot"] or 0),
+        "usuario": row.get("usuario_fin"),
     }
 
 

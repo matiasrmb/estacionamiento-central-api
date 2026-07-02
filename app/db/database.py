@@ -1,11 +1,17 @@
 import logging
+import time
 from contextlib import contextmanager
 from typing import Any, Generator
 
 from sqlalchemy import create_engine, text
+try:
+    from sqlalchemy import event
+except ImportError:
+    event = None
 from sqlalchemy.engine import Engine, Connection
 
 from app.core.config import settings
+from app.core.slowlog import log_if_slow
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +36,33 @@ engine: Engine = create_engine(
     pool_pre_ping=True,  # detecta conexiones muertas
     future=True,
 )
+
+
+def _statement_operation(statement: str) -> str:
+    return (statement or "").strip().split(maxsplit=1)[0].upper() or "SQL"
+
+
+if event is not None:
+    @event.listens_for(engine, "before_cursor_execute")
+    def _before_cursor_execute(conn, cursor, statement, parameters, context, executemany):
+        context._slowlog_started = time.perf_counter()
+
+
+    @event.listens_for(engine, "after_cursor_execute")
+    def _after_cursor_execute(conn, cursor, statement, parameters, context, executemany):
+        started = getattr(context, "_slowlog_started", None)
+        if started is None:
+            return
+        duration_ms = (time.perf_counter() - started) * 1000
+        log_if_slow(
+            logger,
+            threshold_env="SLOW_API_DB_MS",
+            default_ms=500,
+            area="api_db",
+            operation=_statement_operation(statement),
+            duration_ms=duration_ms,
+            context={"executemany": executemany},
+        )
 
 
 @contextmanager

@@ -2,11 +2,13 @@ import json
 import logging
 import os
 import time
+from contextlib import contextmanager
 from typing import Any, Dict, Optional
 
 from sqlalchemy import text
 
 from app.core.logging import setup_logging
+from app.core.slowlog import log_if_slow
 from app.db.database import engine
 
 from printer_agent.pdf_renderer import render_ticket_pdf
@@ -29,7 +31,7 @@ def _env_str(name: str, default: str) -> str:
 
 
 PRINT_ENGINE = _env_str("PRINT_ENGINE", "SUMATRA").upper()
-SUMATRA_PATH = _env_str("SUMATRA_PATH", r"C:\Users\matia\AppData\Local\SumatraPDF\SumatraPDF.exe")
+SUMATRA_PATH = _env_str("SUMATRA_PATH", "")
 PRINTER_NAME = _env_str("PRINTER_NAME", "POS58 Printer")
 WORKDIR = _env_str("PRINT_WORKDIR", "print_out")
 AGENT_ID = _env_str("AGENT_ID", "PC-PRINT-AGENT-01")
@@ -42,14 +44,33 @@ PRINT_TIMEOUT = _env_int("PRINT_TIMEOUT_SECONDS", 20)
 STALE_LOCK_SECONDS = _env_int("STALE_LOCK_SECONDS", 60)
 
 
+@contextmanager
+def slow_print_step(operation: str, **context: Any):
+    started = time.perf_counter()
+    try:
+        yield
+    finally:
+        duration_ms = (time.perf_counter() - started) * 1000
+        log_if_slow(
+            logger,
+            threshold_env="SLOW_PRINT_JOB_MS",
+            default_ms=3000,
+            area="print_agent",
+            operation=operation,
+            duration_ms=duration_ms,
+            context=context,
+        )
+
+
 def release_stale_locks() -> None:
     """
     Libera jobs atascados en IMPRIMIENDO por más de STALE_LOCK_SECONDS.
     Los pasa a ERROR para reintento.
     """
-    with engine.begin() as conn:
-        conn.execute(
-            text("""
+    with slow_print_step("release_stale_locks"):
+        with engine.begin() as conn:
+            conn.execute(
+                text("""
                 UPDATE print_jobs
                 SET estado='ERROR',
                     next_retry_at=NOW(),
@@ -61,9 +82,9 @@ def release_stale_locks() -> None:
                   AND estado='IMPRIMIENDO'
                   AND locked_at IS NOT NULL
                   AND locked_at < DATE_SUB(NOW(), INTERVAL :sec SECOND)
-            """),
-            {"sec": STALE_LOCK_SECONDS},
-        )
+                """),
+                {"sec": STALE_LOCK_SECONDS},
+            )
 
 
 def claim_next_job() -> Optional[Dict[str, Any]]:
@@ -71,9 +92,10 @@ def claim_next_job() -> Optional[Dict[str, Any]]:
     Reclama 1 job elegible y lo marca IMPRIMIENDO.
     IMPORTANTE: esto se hace y se COMMITTEA antes de imprimir (evita loops).
     """
-    with engine.begin() as conn:
-        row = conn.execute(
-            text("""
+    with slow_print_step("claim_job"):
+        with engine.begin() as conn:
+            row = conn.execute(
+                text("""
                 SELECT id_print_job, tipo, destino, id_ingreso, patente, payload_json, intentos, max_intentos
                 FROM print_jobs
                 WHERE destino='PC_PDF'
@@ -85,32 +107,33 @@ def claim_next_job() -> Optional[Dict[str, Any]]:
                 ORDER BY prioridad ASC, created_at ASC
                 LIMIT 1
                 FOR UPDATE SKIP LOCKED
-            """)
-        ).mappings().first()
+                """)
+            ).mappings().first()
 
-        if not row:
-            return None
+            if not row:
+                return None
 
-        conn.execute(
-            text("""
+            conn.execute(
+                text("""
                 UPDATE print_jobs
                 SET estado='IMPRIMIENDO',
                     locked_at=NOW(),
                     locked_by=:agent,
                     updated_at=NOW()
                 WHERE id_print_job=:id
-            """),
-            {"agent": AGENT_ID, "id": row["id_print_job"]},
-        )
+                """),
+                {"agent": AGENT_ID, "id": row["id_print_job"]},
+            )
 
-        # engine.begin() hace commit automático al salir
-        return dict(row)
+            # engine.begin() hace commit automático al salir
+            return dict(row)
 
 
 def mark_printed(job_id: int) -> None:
-    with engine.begin() as conn:
-        conn.execute(
-            text("""
+    with slow_print_step("mark_printed", job_id=job_id):
+        with engine.begin() as conn:
+            conn.execute(
+                text("""
                 UPDATE print_jobs
                 SET estado='IMPRESO',
                     last_error=NULL,
@@ -118,9 +141,9 @@ def mark_printed(job_id: int) -> None:
                     locked_by=NULL,
                     updated_at=NOW()
                 WHERE id_print_job=:id
-            """),
-            {"id": job_id},
-        )
+                """),
+                {"id": job_id},
+            )
 
 
 def mark_error(job_id: int, err_msg: str) -> None:
@@ -128,17 +151,18 @@ def mark_error(job_id: int, err_msg: str) -> None:
     Backoff lineal simple:
       next_retry_at = NOW() + (intentos+1)*10 segundos
     """
-    with engine.begin() as conn:
-        # Leemos intentos actuales para calcular delay
-        cur = conn.execute(
-            text("SELECT intentos FROM print_jobs WHERE id_print_job=:id LIMIT 1"),
-            {"id": job_id},
-        ).scalar()
-        intentos = int(cur or 0)
-        delay = (intentos + 1) * 10
+    with slow_print_step("mark_error", job_id=job_id):
+        with engine.begin() as conn:
+            # Leemos intentos actuales para calcular delay
+            cur = conn.execute(
+                text("SELECT intentos FROM print_jobs WHERE id_print_job=:id LIMIT 1"),
+                {"id": job_id},
+            ).scalar()
+            intentos = int(cur or 0)
+            delay = (intentos + 1) * 10
 
-        conn.execute(
-            text("""
+            conn.execute(
+                text("""
                 UPDATE print_jobs
                 SET estado='ERROR',
                     intentos=intentos+1,
@@ -148,14 +172,16 @@ def mark_error(job_id: int, err_msg: str) -> None:
                     locked_by=NULL,
                     updated_at=NOW()
                 WHERE id_print_job=:id
-            """),
-            {"id": job_id, "err": err_msg[:500], "delay": delay},
-        )
+                """),
+                {"id": job_id, "err": err_msg[:500], "delay": delay},
+            )
 
 
 def run_loop() -> None:
     if not PRINTER_NAME:
         raise RuntimeError("PRINTER_NAME no está configurado. Define PRINTER_NAME en tu .env o variables de entorno.")
+    if PRINT_ENGINE == "SUMATRA" and not SUMATRA_PATH:
+        raise RuntimeError("SUMATRA_PATH no está configurado. Define SUMATRA_PATH con la ruta a SumatraPDF.exe.")
 
     logger.info("Print Agent starting: agent_id=%s printer=%s", AGENT_ID, PRINTER_NAME)
     logger.info("Sumatra path: %s", SUMATRA_PATH)
@@ -180,18 +206,20 @@ def run_loop() -> None:
                 payload = json.loads(payload)
 
             # 4) Render PDF
-            pdf_path = render_ticket_pdf(payload, WORKDIR)
+            with slow_print_step("render_pdf", job_id=job_id):
+                pdf_path = render_ticket_pdf(payload, WORKDIR)
 
             # 5) Print (Sumatra recomendado para estabilidad post-reinicio)
             if PRINT_ENGINE != "SUMATRA":
                 raise RuntimeError("MVP requiere PRINT_ENGINE=SUMATRA. Acrobat es inestable post-reinicio.")
 
-            print_pdf_with_sumatra(
-                sumatra_path=SUMATRA_PATH,
-                pdf_path=pdf_path,
-                printer_name=PRINTER_NAME,
-                timeout_seconds=PRINT_TIMEOUT,
-            )
+            with slow_print_step("print_pdf", job_id=job_id, printer=PRINTER_NAME):
+                print_pdf_with_sumatra(
+                    sumatra_path=SUMATRA_PATH,
+                    pdf_path=pdf_path,
+                    printer_name=PRINTER_NAME,
+                    timeout_seconds=PRINT_TIMEOUT,
+                )
 
             # 6) Marcar impreso (transacción aparte)
             mark_printed(job_id)

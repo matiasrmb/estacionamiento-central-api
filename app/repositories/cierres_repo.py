@@ -4,6 +4,32 @@ from typing import Any, Dict, List
 from sqlalchemy import text
 
 from app.db.database import db_conn
+from app.repositories.accounting_contracts import build_accounting_summary
+
+
+def build_cierre_summary_from_rows(
+    parking_movements,
+    bathroom_uses,
+    wash_only_operations,
+    fecha_cierre: datetime,
+) -> Dict[str, Any]:
+    summary = build_accounting_summary(parking_movements, bathroom_uses, wash_only_operations)
+    dates = [row["fecha_hora_ingreso"] for row in parking_movements if row.get("fecha_hora_ingreso")]
+    dates.extend(row["fecha_hora_fin"] for row in wash_only_operations if row.get("fecha_hora_fin"))
+    fecha_inicio = min(dates) if dates else None
+
+    return {
+        "hay_pendiente": bool(parking_movements or bathroom_uses or wash_only_operations),
+        "fecha_inicio": fecha_inicio,
+        "fecha_cierre": fecha_cierre,
+        **summary,
+        "ids_ingresos": [int(row["id_ingreso"]) for row in parking_movements if row.get("id_ingreso")],
+        "ids_operaciones_servicio": [
+            int(row["id_operacion_servicio"])
+            for row in wash_only_operations
+            if row.get("id_operacion_servicio")
+        ],
+    }
 
 
 def _build_pending_summary(conn) -> Dict[str, Any]:
@@ -17,7 +43,19 @@ def _build_pending_summary(conn) -> Dict[str, Any]:
         """)
     ).mappings().all()
 
-    if not registros:
+    fecha_cierre = datetime.now()
+    lavados_solos = conn.execute(
+        text("""
+            SELECT id_operacion_servicio, fecha_hora_fin, estado, valor_lavado_snapshot
+            FROM operaciones_servicio
+            WHERE estado = 'FINALIZADO_COBRADO'
+              AND COALESCE(cerrado, FALSE) = FALSE
+              AND fecha_hora_fin IS NOT NULL
+            ORDER BY fecha_hora_fin ASC
+        """)
+    ).mappings().all()
+
+    if not registros and not lavados_solos:
         return {
             "hay_pendiente": False,
             "fecha_inicio": None,
@@ -27,14 +65,16 @@ def _build_pending_summary(conn) -> Dict[str, Any]:
             "total_salidas": 0,
             "total_banos": 0,
             "total_banos_monto": 0,
+            "total_lavados_solos": 0,
+            "total_lavados_solos_monto": 0,
             "total_general": 0,
             "ids_ingresos": [],
+            "ids_operaciones_servicio": [],
         }
 
-    fecha_inicio = min(row["fecha_hora_ingreso"] for row in registros)
-    fecha_cierre = datetime.now()
-    total_recaudado = sum(int(row["tarifa_aplicada"] or 0) for row in registros)
-    total_ingresos = len(registros)
+    fechas_inicio = [row["fecha_hora_ingreso"] for row in registros]
+    fechas_inicio.extend(row["fecha_hora_fin"] for row in lavados_solos)
+    fecha_inicio = min(fechas_inicio)
 
     banos = conn.execute(
         text("""
@@ -46,21 +86,12 @@ def _build_pending_summary(conn) -> Dict[str, Any]:
     ).mappings().first()
 
     total_banos = int((banos or {}).get("cantidad") or 0)
-    total_banos_monto = int((banos or {}).get("total") or 0)
-    total_general = total_recaudado + total_banos_monto
+    bathroom_uses = [{"monto": int((banos or {}).get("total") or 0)}] if total_banos else []
+    summary = build_cierre_summary_from_rows(registros, bathroom_uses, lavados_solos, fecha_cierre)
+    summary["fecha_inicio"] = fecha_inicio
+    summary["total_banos"] = total_banos
 
-    return {
-        "hay_pendiente": True,
-        "fecha_inicio": fecha_inicio,
-        "fecha_cierre": fecha_cierre,
-        "total_recaudado": total_recaudado,
-        "total_ingresos": total_ingresos,
-        "total_salidas": total_ingresos,
-        "total_banos": total_banos,
-        "total_banos_monto": total_banos_monto,
-        "total_general": total_general,
-        "ids_ingresos": [int(row["id_ingreso"]) for row in registros],
-    }
+    return summary
 
 
 def get_cierre_pendiente() -> Dict[str, Any]:
@@ -80,12 +111,14 @@ def realizar_cierre(usuario: str) -> Dict[str, Any]:
                 INSERT INTO cierres_diarios (
                     fecha_inicio, fecha_cierre, total_recaudado,
                     total_ingresos, total_salidas, total_banos,
-                    total_banos_monto, usuario
+                    total_banos_monto, total_lavados_solos,
+                    total_lavados_solos_monto, total_general, usuario
                 )
                 VALUES (
                     :fecha_inicio, :fecha_cierre, :total_recaudado,
                     :total_ingresos, :total_salidas, :total_banos,
-                    :total_banos_monto, :usuario
+                    :total_banos_monto, :total_lavados_solos,
+                    :total_lavados_solos_monto, :total_general, :usuario
                 )
             """),
             {
@@ -104,6 +137,16 @@ def realizar_cierre(usuario: str) -> Dict[str, Any]:
             """),
             {"fecha_cierre": summary["fecha_cierre"]},
         )
+        conn.execute(
+            text("""
+                UPDATE operaciones_servicio
+                SET cerrado = TRUE
+                WHERE estado = 'FINALIZADO_COBRADO'
+                  AND COALESCE(cerrado, FALSE) = FALSE
+                  AND fecha_hora_fin <= :fecha_cierre
+            """),
+            {"fecha_cierre": summary["fecha_cierre"]},
+        )
         conn.commit()
 
     serialized = _serialize_summary(summary)
@@ -117,7 +160,8 @@ def list_cierres(limit: int = 20) -> List[Dict[str, Any]]:
             text("""
                 SELECT id_cierre, fecha_inicio, fecha_cierre, total_recaudado,
                        total_ingresos, total_salidas, total_banos,
-                       total_banos_monto, usuario
+                       total_banos_monto, total_lavados_solos,
+                       total_lavados_solos_monto, total_general, usuario
                 FROM cierres_diarios
                 ORDER BY fecha_cierre DESC
                 LIMIT :limit
@@ -132,7 +176,9 @@ def list_cierres(limit: int = 20) -> List[Dict[str, Any]]:
         item["fecha_cierre"] = _iso(item.get("fecha_cierre"))
         item["total_recaudado"] = int(item.get("total_recaudado") or 0)
         item["total_banos_monto"] = int(item.get("total_banos_monto") or 0)
-        item["total_general"] = item["total_recaudado"] + item["total_banos_monto"]
+        item["total_lavados_solos"] = int(item.get("total_lavados_solos") or 0)
+        item["total_lavados_solos_monto"] = int(item.get("total_lavados_solos_monto") or 0)
+        item["total_general"] = int(item.get("total_general") or 0)
         items.append(item)
     return items
 

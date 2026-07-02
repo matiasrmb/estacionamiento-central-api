@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 from app.api.deps import require_role
 from app.repositories.users_repo import (
     create_user,
+    delete_user_safely as repo_delete_user_safely,
     list_users,
     update_user_password,
     update_user_status,
@@ -61,3 +62,15 @@ def cambiar_estado(usuario: str, payload: EstadoIn, _user=Depends(require_role("
     except LookupError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="USER_NOT_FOUND")
     return {"ok": True}
+
+
+@router.delete("/{usuario}")
+def eliminar_usuario(usuario: str, _user=Depends(require_role("admin"))):
+    try:
+        return repo_delete_user_safely(usuario, current_usuario=_user.get("sub"))
+    except LookupError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="USER_NOT_FOUND")
+    except PermissionError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))

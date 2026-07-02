@@ -108,6 +108,7 @@ class EndpointAuthTests(unittest.TestCase):
         self.assertEqual(_allowed_roles(usuarios.crear_usuario), {"admin"})
         self.assertEqual(_allowed_roles(usuarios.cambiar_password), {"admin"})
         self.assertEqual(_allowed_roles(usuarios.cambiar_estado), {"admin"})
+        self.assertEqual(_allowed_roles(usuarios.eliminar_usuario), {"admin"})
 
     def test_asistencias_requires_admin(self):
         self.assertEqual(_allowed_roles(asistencias.listar_asistencias), {"admin"})

@@ -8,6 +8,10 @@ __pycache__/
 # Virtual env
 .venv/
 
+# Build outputs
+build/
+dist/
+
 # Logs
 logs/
 

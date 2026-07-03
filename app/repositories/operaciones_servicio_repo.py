@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import text
 
 from app.db.database import db_conn
+from app.db.schema_ensure import ensure_operaciones_servicio_schema, ensure_wash_vehicle_type_schema
 
 from app.schemas.operaciones_servicio import OperacionServicioContrato, OperacionServicioState
 
@@ -70,6 +71,8 @@ def _state_value(estado: Any) -> str:
 
 
 def iniciar_solo_lavado(patente: str, id_tipo_vehiculo_lavado: int, usuario: str) -> Dict[str, Any]:
+    ensure_wash_vehicle_type_schema()
+    ensure_operaciones_servicio_schema()
     patente = patente.strip().upper()
     now = datetime.now()
     with db_conn() as conn:
@@ -135,6 +138,7 @@ def iniciar_solo_lavado(patente: str, id_tipo_vehiculo_lavado: int, usuario: str
 
 
 def list_solo_lavados_activos(patente: Optional[str] = None) -> List[Dict[str, Any]]:
+    ensure_operaciones_servicio_schema()
     filters = ["estado = 'ACTIVO'"]
     params: Dict[str, Any] = {}
     if patente:
@@ -168,6 +172,7 @@ def list_solo_lavados_activos(patente: Optional[str] = None) -> List[Dict[str, A
 
 
 def finalizar_solo_lavado_cobrar(id_operacion_servicio: int, usuario: str) -> Dict[str, Any]:
+    ensure_operaciones_servicio_schema()
     now = datetime.now()
     with db_conn() as conn:
         operation = _get_active_operation(conn, id_operacion_servicio)
@@ -184,6 +189,7 @@ def finalizar_solo_lavado_cobrar(id_operacion_servicio: int, usuario: str) -> Di
 
 
 def convertir_solo_lavado_a_estadia(id_operacion_servicio: int, usuario: str) -> Dict[str, Any]:
+    ensure_operaciones_servicio_schema()
     now = datetime.now()
     with db_conn() as conn:
         operation = _get_active_operation(conn, id_operacion_servicio)

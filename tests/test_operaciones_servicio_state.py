@@ -8,6 +8,10 @@ from app.repositories.operaciones_servicio_repo import (
     build_operacion_servicio_inicio,
     transition_operacion_servicio,
 )
+from app.db.schema_ensure import (
+    _ensure_operaciones_servicio_schema_on_connection,
+    _ensure_wash_vehicle_type_schema_on_connection,
+)
 from app.schemas.operaciones_servicio import OperacionServicioState
 
 
@@ -84,6 +88,50 @@ class OperacionesServicioStateTests(unittest.TestCase):
         self.assertIn("estado ENUM('ACTIVO', 'FINALIZADO_COBRADO', 'CONVERTIDO_ESTADIA')", migration)
         self.assertIn("id_ingreso_generado INT NULL", migration)
         self.assertIn("valor_lavado_snapshot INT NOT NULL", migration)
+
+    def test_runtime_ensure_creates_table_and_accounting_columns(self):
+        class FakeConn:
+            def __init__(self):
+                self.statements = []
+
+            def execute(self, statement):
+                self.statements.append(str(statement))
+
+        conn = FakeConn()
+
+        _ensure_operaciones_servicio_schema_on_connection(conn)
+
+        sql = "\n".join(conn.statements)
+        self.assertIn("CREATE TABLE IF NOT EXISTS operaciones_servicio", sql)
+        self.assertIn("cerrado BOOLEAN NOT NULL DEFAULT FALSE", sql)
+        self.assertIn("ALTER TABLE cierres_diarios ADD COLUMN total_lavados_solos", sql)
+        self.assertIn("idx_operaciones_servicio_cierre", sql)
+
+    def test_runtime_ensure_creates_wash_type_table_and_seeds_legacy_prices(self):
+        class FakeResult:
+            def mappings(self):
+                return self
+
+            def all(self):
+                return [{"clave": "lavado_citycar", "valor": "5000"}]
+
+        class FakeConn:
+            def __init__(self):
+                self.statements = []
+
+            def execute(self, statement, params=None):
+                self.statements.append((str(statement), params))
+                return FakeResult()
+
+        conn = FakeConn()
+
+        _ensure_wash_vehicle_type_schema_on_connection(conn)
+
+        sql = "\n".join(statement for statement, _ in conn.statements)
+        self.assertIn("CREATE TABLE IF NOT EXISTS tipos_vehiculo_lavado", sql)
+        self.assertIn("FROM tipos_vehiculos_lavado", sql)
+        self.assertIn("INSERT INTO tipos_vehiculo_lavado", sql)
+        self.assertIn("ON DUPLICATE KEY UPDATE", sql)
 
 
 if __name__ == "__main__":

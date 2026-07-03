@@ -3,6 +3,11 @@ from typing import Any, Dict, List
 from sqlalchemy import text
 
 from app.db.database import db_conn
+from app.db.schema_ensure import (
+    NO_SOLO_LAVADO_PRICE_CONFIG_MESSAGE,
+    ensure_operaciones_servicio_schema,
+    ensure_wash_vehicle_type_schema,
+)
 from app.schemas.wash_pricing import WashPriceSnapshot, WashTypeIn, WashVehicleTypeIn
 
 
@@ -111,9 +116,11 @@ def delete_wash_type(id_tipo_lavado: int) -> str:
     return "deleted"
 
 
-def list_wash_vehicle_types(table_name: str = "tipos_vehiculo_lavado") -> List[Dict[str, Any]]:
+def list_wash_vehicle_types(table_name: str = "tipos_vehiculo_lavado", require_config: bool = False) -> List[Dict[str, Any]]:
     if table_name not in WASH_VEHICLE_TYPE_TABLES:
         raise ValueError("INVALID_WASH_VEHICLE_TYPE_TABLE")
+    if table_name == "tipos_vehiculo_lavado":
+        ensure_wash_vehicle_type_schema()
 
     with db_conn() as conn:
         rows = conn.execute(text(f"""
@@ -121,7 +128,10 @@ def list_wash_vehicle_types(table_name: str = "tipos_vehiculo_lavado") -> List[D
             FROM {table_name}
             ORDER BY nombre ASC
         """)).mappings().all()
-    return [dict(r) for r in rows]
+    items = [dict(r) for r in rows]
+    if table_name == "tipos_vehiculo_lavado" and require_config and not items:
+        raise RuntimeError(NO_SOLO_LAVADO_PRICE_CONFIG_MESSAGE)
+    return items
 
 
 def list_wash_vehicle_types_for_quotes() -> List[Dict[str, Any]]:
@@ -184,6 +194,7 @@ def _looks_like_missing_wash_table(exc: Exception) -> bool:
 
 
 def create_wash_vehicle_type(payload: WashVehicleTypeIn) -> int:
+    ensure_wash_vehicle_type_schema()
     data = build_wash_vehicle_type_payload(payload)
     with db_conn() as conn:
         conn.execute(text("""
@@ -195,6 +206,7 @@ def create_wash_vehicle_type(payload: WashVehicleTypeIn) -> int:
 
 
 def update_wash_vehicle_type(id_tipo_vehiculo_lavado: int, payload: WashVehicleTypeIn) -> None:
+    ensure_wash_vehicle_type_schema()
     data = build_wash_vehicle_type_payload(payload)
     data["id_tipo_vehiculo_lavado"] = id_tipo_vehiculo_lavado
     with db_conn() as conn:
@@ -212,6 +224,8 @@ def update_wash_vehicle_type(id_tipo_vehiculo_lavado: int, payload: WashVehicleT
 
 
 def delete_wash_vehicle_type(id_tipo_vehiculo_lavado: int) -> str:
+    ensure_wash_vehicle_type_schema()
+    ensure_operaciones_servicio_schema()
     with db_conn() as conn:
         refs = conn.execute(text("""
             SELECT

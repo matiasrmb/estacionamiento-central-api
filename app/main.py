@@ -13,6 +13,7 @@ from app.core.errors import (
     unhandled_exception_handler,
 )
 from app.api.v1.router import api_router
+from app.db.schema_ensure import ensure_operaciones_servicio_schema, ensure_wash_vehicle_type_schema
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -56,3 +57,8 @@ app.add_exception_handler(Exception, unhandled_exception_handler)
 @app.on_event("startup")
 def on_startup() -> None:
     logger.info("Starting %s (env=%s)", settings.app_name, settings.env)
+    try:
+        ensure_wash_vehicle_type_schema()
+        ensure_operaciones_servicio_schema()
+    except Exception:
+        logger.exception("Could not ensure Solo lavado schema at startup")

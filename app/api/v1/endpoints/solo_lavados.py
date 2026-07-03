@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
 from app.api.deps import require_role
+from app.db.schema_ensure import NO_SOLO_LAVADO_PRICE_CONFIG_MESSAGE, SoloLavadoSchemaUnavailable
 from app.repositories.operaciones_servicio_repo import (
     convertir_solo_lavado_a_estadia as repo_convertir_solo_lavado_a_estadia,
     finalizar_solo_lavado_cobrar as repo_finalizar_solo_lavado_cobrar,
@@ -20,6 +21,8 @@ class SoloLavadoInicioIn(BaseModel):
 
 
 def _handle_solo_lavado_error(exc: Exception) -> None:
+    if isinstance(exc, SoloLavadoSchemaUnavailable):
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
     if isinstance(exc, LookupError):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
     if isinstance(exc, ValueError):
@@ -46,12 +49,26 @@ def listar_solo_lavados_activos(
     patente: str | None = None,
     _user=Depends(require_role("operador", "admin")),
 ):
-    return {"items": repo_list_solo_lavados_activos(patente)}
+    try:
+        return {"items": repo_list_solo_lavados_activos(patente)}
+    except Exception as exc:
+        _handle_solo_lavado_error(exc)
 
 
 @router.get("/tipos-vehiculo")
 def listar_tipos_vehiculo_para_solo_lavado(_user=Depends(require_role("operador", "admin"))):
-    return {"items": [item for item in repo_list_wash_vehicle_types() if int(item.get("activo") or 0) == 1]}
+    try:
+        active_items = [
+            item for item in repo_list_wash_vehicle_types(require_config=True)
+            if int(item.get("activo") or 0) == 1
+        ]
+        if not active_items:
+            raise RuntimeError(NO_SOLO_LAVADO_PRICE_CONFIG_MESSAGE)
+        return {
+            "items": active_items
+        }
+    except Exception as exc:
+        _handle_solo_lavado_error(exc)
 
 
 @router.post("/{id_operacion_servicio}/cobrar")

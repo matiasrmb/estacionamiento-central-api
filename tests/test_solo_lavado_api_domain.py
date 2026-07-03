@@ -30,6 +30,7 @@ def _install_optional_dependency_stubs():
 _install_optional_dependency_stubs()
 
 from app.api.v1.endpoints import solo_lavados
+from app.db.schema_ensure import NO_SOLO_LAVADO_PRICE_CONFIG_MESSAGE, SoloLavadoSchemaUnavailable
 
 
 def _allowed_roles(function):
@@ -118,6 +119,62 @@ class SoloLavadoApiDomainTests(unittest.TestCase):
 
         self.assertEqual(result["items"][0]["id_operacion_servicio"], 12)
         repo_list.assert_called_once_with("aa111aa")
+
+    def test_list_solo_lavados_schema_failure_returns_clear_http_error(self):
+        message = "Solo lavado no disponible: no se pudo actualizar la base de datos. Contacte soporte / actualice DB."
+        with patch.object(solo_lavados, "repo_list_solo_lavados_activos", side_effect=SoloLavadoSchemaUnavailable(message)):
+            with self.assertRaises(solo_lavados.HTTPException) as raised:
+                solo_lavados.listar_solo_lavados_activos(_user={"sub": "operador"})
+
+        self.assertEqual(raised.exception.status_code, solo_lavados.status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertEqual(raised.exception.detail, message)
+
+    def test_start_solo_lavado_schema_failure_returns_clear_http_error(self):
+        message = "Solo lavado no disponible: no se pudo actualizar la base de datos. Contacte soporte / actualice DB."
+        with patch.object(solo_lavados, "repo_iniciar_solo_lavado", side_effect=SoloLavadoSchemaUnavailable(message)):
+            with self.assertRaises(solo_lavados.HTTPException) as raised:
+                solo_lavados.iniciar_solo_lavado(
+                    solo_lavados.SoloLavadoInicioIn(patente="AA111AA", id_tipo_vehiculo_lavado=7),
+                    user={"sub": "operador"},
+                )
+
+        self.assertEqual(raised.exception.status_code, solo_lavados.status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertEqual(raised.exception.detail, message)
+
+    def test_list_solo_lavado_types_uses_fallback_repo_and_filters_active(self):
+        with patch.object(solo_lavados, "repo_list_wash_vehicle_types") as repo_types:
+            repo_types.return_value = [
+                {"id_tipo_vehiculo_lavado": 1, "nombre": "CityCar", "valor_lavado": 5000, "activo": 1},
+                {"id_tipo_vehiculo_lavado": 2, "nombre": "SUV", "valor_lavado": 8000, "activo": 0},
+            ]
+
+            result = solo_lavados.listar_tipos_vehiculo_para_solo_lavado(_user={"sub": "operador"})
+
+        repo_types.assert_called_once_with(require_config=True)
+        self.assertEqual(len(result["items"]), 1)
+        self.assertEqual(result["items"][0]["nombre"], "CityCar")
+
+    def test_list_solo_lavado_types_no_config_returns_clear_http_error(self):
+        message = NO_SOLO_LAVADO_PRICE_CONFIG_MESSAGE
+        with patch.object(solo_lavados, "repo_list_wash_vehicle_types", side_effect=RuntimeError(message)):
+            with self.assertRaises(solo_lavados.HTTPException) as raised:
+                solo_lavados.listar_tipos_vehiculo_para_solo_lavado(_user={"sub": "operador"})
+
+        self.assertEqual(raised.exception.status_code, solo_lavados.status.HTTP_409_CONFLICT)
+        self.assertEqual(raised.exception.detail, message)
+
+    def test_list_solo_lavado_types_only_inactive_returns_clear_http_error(self):
+        with patch.object(solo_lavados, "repo_list_wash_vehicle_types") as repo_types:
+            repo_types.return_value = [
+                {"id_tipo_vehiculo_lavado": 2, "nombre": "SUV", "valor_lavado": 8000, "activo": 0},
+            ]
+
+            with self.assertRaises(solo_lavados.HTTPException) as raised:
+                solo_lavados.listar_tipos_vehiculo_para_solo_lavado(_user={"sub": "operador"})
+
+        repo_types.assert_called_once_with(require_config=True)
+        self.assertEqual(raised.exception.status_code, solo_lavados.status.HTTP_409_CONFLICT)
+        self.assertEqual(raised.exception.detail, NO_SOLO_LAVADO_PRICE_CONFIG_MESSAGE)
 
 
 if __name__ == "__main__":

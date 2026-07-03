@@ -8,6 +8,16 @@ from app.schemas.wash_pricing import WashPriceSnapshot, WashTypeIn, WashVehicleT
 
 PARKING_TARIFF_FIELDS = {"tarifa_hora", "tarifa_minima", "valor_minuto", "modo_cobro"}
 
+LEGACY_WASH_CATEGORIES = {
+    "lavado_citycar": "CityCar",
+    "lavado_suv": "SUV",
+    "lavado_camioneta": "Camioneta",
+    "lavado_furgon": "Furgón",
+    "lavado_minibus": "Mini bus o vehículos grandes",
+}
+
+WASH_VEHICLE_TYPE_TABLES = ("tipos_vehiculo_lavado", "tipos_vehiculos_lavado")
+
 
 def _as_dict(payload: Any) -> Dict[str, Any]:
     if hasattr(payload, "model_dump"):
@@ -101,14 +111,76 @@ def delete_wash_type(id_tipo_lavado: int) -> str:
     return "deleted"
 
 
-def list_wash_vehicle_types() -> List[Dict[str, Any]]:
+def list_wash_vehicle_types(table_name: str = "tipos_vehiculo_lavado") -> List[Dict[str, Any]]:
+    if table_name not in WASH_VEHICLE_TYPE_TABLES:
+        raise ValueError("INVALID_WASH_VEHICLE_TYPE_TABLE")
+
     with db_conn() as conn:
-        rows = conn.execute(text("""
+        rows = conn.execute(text(f"""
             SELECT id_tipo_vehiculo_lavado, codigo, nombre, valor_lavado, activo
-            FROM tipos_vehiculo_lavado
+            FROM {table_name}
             ORDER BY nombre ASC
         """)).mappings().all()
     return [dict(r) for r in rows]
+
+
+def list_wash_vehicle_types_for_quotes() -> List[Dict[str, Any]]:
+    """Return wash quote options, falling back to legacy configured prices.
+
+    Some deployed databases do not have the newer tipos_vehiculo_lavado table yet.
+    Cotizaciones must remain read-only and resilient, so missing/drifted optional
+    wash tables fall back to the legacy configuracion keys used by lavado flows.
+    """
+    for table_name in WASH_VEHICLE_TYPE_TABLES:
+        try:
+            rows = list_wash_vehicle_types(table_name)
+        except Exception as exc:
+            if not _looks_like_missing_wash_table(exc):
+                raise
+            continue
+        if any(int(row.get("activo") or 0) for row in rows):
+            return rows
+    return list_legacy_wash_quote_options()
+
+
+def list_legacy_wash_quote_options() -> List[Dict[str, Any]]:
+    with db_conn() as conn:
+        rows = conn.execute(text("""
+            SELECT clave, valor
+            FROM configuracion
+            WHERE clave LIKE 'lavado_%'
+        """)).mappings().all()
+
+    configured = {row["clave"]: row["valor"] for row in rows}
+    options = []
+    for clave, nombre in LEGACY_WASH_CATEGORIES.items():
+        monto = _to_positive_int(configured.get(clave))
+        if monto is None:
+            continue
+        options.append({
+            "id_tipo_vehiculo_lavado": None,
+            "codigo": clave,
+            "nombre": nombre,
+            "valor_lavado": monto,
+            "activo": 1,
+            "source": "legacy_configuracion",
+        })
+    return options
+
+
+def _to_positive_int(value: Any) -> int | None:
+    try:
+        amount = int(float(value))
+    except (TypeError, ValueError):
+        return None
+    return amount if amount > 0 else None
+
+
+def _looks_like_missing_wash_table(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return any(table in message for table in WASH_VEHICLE_TYPE_TABLES) and (
+        "doesn't exist" in message or "does not exist" in message or "no such table" in message
+    )
 
 
 def create_wash_vehicle_type(payload: WashVehicleTypeIn) -> int:

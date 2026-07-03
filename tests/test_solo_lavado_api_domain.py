@@ -105,6 +105,20 @@ class SoloLavadoApiDomainTests(unittest.TestCase):
         self.assertEqual(result["fecha_hora_ingreso"], "2026-07-01T11:45:00")
         repo_convert.assert_called_once_with(12, "operador")
 
+    def test_list_solo_lavados_active_is_available_to_operator(self):
+        self.assertEqual(_allowed_roles(solo_lavados.listar_solo_lavados_activos), {"operador", "admin"})
+
+        with patch.object(solo_lavados, "repo_list_solo_lavados_activos") as repo_list:
+            repo_list.return_value = [{"id_operacion_servicio": 12, "patente": "AA111AA"}]
+
+            result = solo_lavados.listar_solo_lavados_activos(
+                patente="aa111aa",
+                _user={"sub": "operador"},
+            )
+
+        self.assertEqual(result["items"][0]["id_operacion_servicio"], 12)
+        repo_list.assert_called_once_with("aa111aa")
+
 
 if __name__ == "__main__":
     unittest.main()

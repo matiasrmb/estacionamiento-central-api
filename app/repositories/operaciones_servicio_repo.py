@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from sqlalchemy import text
 
@@ -132,6 +132,39 @@ def iniciar_solo_lavado(patente: str, id_tipo_vehiculo_lavado: int, usuario: str
         "valor_lavado_snapshot": int(wash_type["valor_lavado"]),
         "fecha_hora_inicio": now.isoformat(),
     }
+
+
+def list_solo_lavados_activos(patente: Optional[str] = None) -> List[Dict[str, Any]]:
+    filters = ["estado = 'ACTIVO'"]
+    params: Dict[str, Any] = {}
+    if patente:
+        filters.append("patente = :patente")
+        params["patente"] = patente.strip().upper()
+
+    with db_conn() as conn:
+        rows = conn.execute(text(f"""
+            SELECT id_operacion_servicio, patente, estado,
+                   id_tipo_vehiculo_lavado, tipo_vehiculo_lavado_snapshot,
+                   valor_lavado_snapshot, fecha_hora_inicio,
+                   TIMESTAMPDIFF(MINUTE, fecha_hora_inicio, NOW()) AS duracion_minutos
+            FROM operaciones_servicio
+            WHERE {' AND '.join(filters)}
+            ORDER BY fecha_hora_inicio DESC
+        """), params).mappings().all()
+
+    return [
+        {
+            "id_operacion_servicio": int(row["id_operacion_servicio"]),
+            "patente": row["patente"],
+            "estado": row["estado"],
+            "id_tipo_vehiculo_lavado": int(row["id_tipo_vehiculo_lavado"]),
+            "tipo_vehiculo_lavado_snapshot": row["tipo_vehiculo_lavado_snapshot"],
+            "valor_lavado_snapshot": int(row["valor_lavado_snapshot"]),
+            "fecha_hora_inicio": row["fecha_hora_inicio"].isoformat(),
+            "duracion_minutos": int(row["duracion_minutos"] or 0),
+        }
+        for row in rows
+    ]
 
 
 def finalizar_solo_lavado_cobrar(id_operacion_servicio: int, usuario: str) -> Dict[str, Any]:

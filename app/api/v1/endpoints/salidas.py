@@ -57,11 +57,26 @@ def _calcular_total_lavados(conn, id_ingreso: int) -> int:
     return int(total or 0)
 
 
+def _calcular_total_lavados_convertidos(conn, id_ingreso: int) -> int:
+    total = conn.execute(
+        text("""
+            SELECT COALESCE(SUM(valor_lavado_snapshot), 0)
+            FROM operaciones_servicio
+            WHERE id_ingreso_generado = :id_ingreso
+              AND estado = 'CONVERTIDO_ESTADIA'
+        """),
+        {"id_ingreso": id_ingreso},
+    ).scalar()
+    return int(total or 0)
+
+
 def _calcular_monto_con_lavados(conn, id_ingreso: int, fecha_ingreso: datetime, fecha_salida: datetime):
     minutos_totales = max(0, int(math.ceil((fecha_salida - fecha_ingreso).total_seconds() / 60.0)))
     minutos_lavado = _calcular_minutos_lavado(conn, id_ingreso, fecha_salida)
     minutos_cobrables = max(minutos_totales - minutos_lavado, 0)
     total_lavados = _calcular_total_lavados(conn, id_ingreso)
+    total_lavados_convertidos = _calcular_total_lavados_convertidos(conn, id_ingreso)
+    total_lavados += total_lavados_convertidos
 
     minutos, monto_estacionamiento, detalle = calcular_monto_desde_minutos(conn, minutos_cobrables, fecha_ingreso, fecha_salida)
     monto_total = monto_estacionamiento + total_lavados
@@ -69,6 +84,8 @@ def _calcular_monto_con_lavados(conn, id_ingreso: int, fecha_ingreso: datetime, 
         detalle = f"{detalle} - descuenta {minutos_lavado} min de lavado"
     if total_lavados > 0:
         detalle = f"{detalle} - lavados ${total_lavados}"
+    if total_lavados_convertidos > 0:
+        detalle = f"{detalle} (incluye solo lavado convertido ${total_lavados_convertidos})"
     return minutos, monto_total, detalle, monto_estacionamiento, total_lavados
 
 

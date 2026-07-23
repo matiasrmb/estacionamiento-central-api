@@ -13,9 +13,7 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 def _ensure_safe_jwt_secret() -> None:
-    jwt_secret = settings.jwt_secret.strip()
-    if settings.env.strip().lower() in {"prod", "production"} and jwt_secret in {"", "CHANGE_ME"}:
-        raise RuntimeError("JWT_SECRET must be configured for production")
+    settings.validate_runtime_safety()
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:

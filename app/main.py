@@ -57,6 +57,7 @@ app.add_exception_handler(Exception, unhandled_exception_handler)
 @app.on_event("startup")
 def on_startup() -> None:
     logger.info("Starting %s (env=%s)", settings.app_name, settings.env)
+    settings.validate_runtime_safety()
     try:
         ensure_wash_vehicle_type_schema()
         ensure_operaciones_servicio_schema()

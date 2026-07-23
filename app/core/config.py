@@ -1,6 +1,11 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+PRODUCTION_ENVS = {"prod", "production"}
+JWT_SECRET_PLACEHOLDERS = {"", "CHANGE_ME"}
+DB_PASSWORD_PLACEHOLDERS = {"", "ec_app_2026"}
+
+
 class Settings(BaseSettings):
     """
     Configuración central del backend.
@@ -20,8 +25,8 @@ class Settings(BaseSettings):
     # DB (MySQL local)
     db_host: str = "127.0.0.1"
     db_port: int = 3306
-    db_user: str = "root"
-    db_password: str = "4Da46151-"
+    db_user: str = "estacionamiento_app"
+    db_password: str = ""
     db_name: str = "estacionamiento_db"
 
     # Pool
@@ -30,9 +35,27 @@ class Settings(BaseSettings):
     db_pool_recycle: int = 1800
 
     # JWT
-    jwt_secret: str = "CHANGE_ME"
+    jwt_secret: str = ""
     jwt_algorithm: str = "HS256"
     jwt_access_token_expire_minutes: int = 720
+
+    def is_production(self) -> bool:
+        return self.env.strip().lower() in PRODUCTION_ENVS
+
+    def validate_runtime_safety(self) -> None:
+        if not self.is_production():
+            return
+
+        errors = []
+        if self.jwt_secret.strip() in JWT_SECRET_PLACEHOLDERS:
+            errors.append("JWT_SECRET must be configured for production")
+        if self.db_password.strip() in DB_PASSWORD_PLACEHOLDERS:
+            errors.append("DB_PASSWORD must be configured for production")
+        if self.db_user.strip().lower() == "root":
+            errors.append("DB_USER must not be root in production")
+
+        if errors:
+            raise RuntimeError("; ".join(errors))
 
 
 settings = Settings()

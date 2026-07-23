@@ -3,8 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
 from app.api.deps import require_role
-from app.repositories.ingresos_repo import find_active_ingreso_by_plate, create_ingreso
-from app.repositories.vehiculos_repo import get_or_create_vehicle_by_plate
+from app.repositories.ingresos_repo import ActiveIngresoAlreadyExists, create_ingreso_for_plate_if_no_active
 from app.repositories.print_jobs_repo import create_print_job_pc_pdf
 from app.services.tickets_service import build_ticket_ingreso_payload
 
@@ -19,10 +18,15 @@ class IngresoRequest(BaseModel):
 @router.post("/ingresos", tags=["mvp"])
 def registrar_ingreso(payload: IngresoRequest, user=Depends(require_role("operador", "admin"))):
     patente = payload.patente.strip().upper()
+    now = datetime.now()  # hora servidor local
 
-    # Validación de duplicado
-    active = find_active_ingreso_by_plate(patente)
-    if active:
+    try:
+        created = create_ingreso_for_plate_if_no_active(
+            patente=patente,
+            fecha_hora_ingreso=now,
+            usuario=user.get("sub"),
+        )
+    except ActiveIngresoAlreadyExists:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={
@@ -33,10 +37,7 @@ def registrar_ingreso(payload: IngresoRequest, user=Depends(require_role("operad
                 }
             },
         )
-
-    now = datetime.now()  # hora servidor local
-    id_vehiculo = get_or_create_vehicle_by_plate(patente)
-    id_ingreso = create_ingreso(id_vehiculo=id_vehiculo, fecha_hora_ingreso=now, usuario=user.get("sub"))
+    id_ingreso = created["id_ingreso"]
 
     # Crear print job PC (obligatorio)
     hora_ingreso_iso = now.isoformat(timespec="seconds")

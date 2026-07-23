@@ -1,7 +1,11 @@
 import os
+import logging
 from typing import Dict
 
 from printer_agent.agent import run_loop
+
+
+logger = logging.getLogger("print_agent.service")
 
 
 def get_print_agent_config() -> Dict[str, str]:
@@ -16,7 +20,10 @@ def get_print_agent_config() -> Dict[str, str]:
 
 
 def main() -> None:
-    run_loop()
+    try:
+        run_loop()
+    except KeyboardInterrupt:
+        logger.info("Print Agent service stop requested; exiting cleanly.")
 
 
 if __name__ == "__main__":

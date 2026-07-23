@@ -133,16 +133,20 @@ def confirmar_salida(payload: SalidaConfirmIn, user=Depends(require_role("operad
         minutos, monto, detalle, monto_estacionamiento, total_lavados = _calcular_monto_con_lavados(conn, int(ingreso["id_ingreso"]), fecha_ing, ahora)
 
         # Persistir salida + tarifa final (ajusta nombres si tu tabla usa otro campo)
-        conn.execute(
+        update_result = conn.execute(
             text("""
                 UPDATE ingresos
                 SET fecha_hora_salida = :salida,
                     tarifa_aplicada = :monto,
                     usuario = :usuario
                 WHERE id_ingreso = :id
+                  AND fecha_hora_salida IS NULL
             """),
             {"salida": ahora, "monto": monto, "usuario": user.get("sub") or "", "id": payload.id_ingreso},
         )
+        if update_result.rowcount != 1:
+            conn.rollback()
+            raise HTTPException(status_code=409, detail="INGRESO_YA_SALIO")
 
         patente = str(ingreso["patente"])
 

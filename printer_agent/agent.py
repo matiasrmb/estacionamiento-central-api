@@ -155,9 +155,20 @@ def mark_error(job_id: int, err_msg: str) -> None:
         with engine.begin() as conn:
             # Leemos intentos actuales para calcular delay
             cur = conn.execute(
-                text("SELECT intentos FROM print_jobs WHERE id_print_job=:id LIMIT 1"),
-                {"id": job_id},
+                text("""
+                SELECT intentos
+                FROM print_jobs
+                WHERE id_print_job=:id
+                  AND estado='IMPRIMIENDO'
+                  AND locked_by=:agent
+                LIMIT 1
+                """),
+                {"id": job_id, "agent": AGENT_ID},
             ).scalar()
+            if cur is None:
+                logger.warning("Skipped marking ERROR for job id=%s because it is not locked by this agent", job_id)
+                return
+
             intentos = int(cur or 0)
             delay = (intentos + 1) * 10
 
@@ -172,8 +183,10 @@ def mark_error(job_id: int, err_msg: str) -> None:
                     locked_by=NULL,
                     updated_at=NOW()
                 WHERE id_print_job=:id
+                  AND estado='IMPRIMIENDO'
+                  AND locked_by=:agent
                 """),
-                {"id": job_id, "err": err_msg[:500], "delay": delay},
+                {"id": job_id, "agent": AGENT_ID, "err": err_msg[:500], "delay": delay},
             )
 
 
@@ -187,6 +200,7 @@ def run_loop() -> None:
     logger.info("Sumatra path: %s", SUMATRA_PATH)
 
     while True:
+        job_id = None
         try:
             # 1) Liberar locks viejos (seguridad)
             release_stale_locks()
@@ -226,11 +240,11 @@ def run_loop() -> None:
             logger.info("Printed OK job id=%s pdf=%s", job_id, pdf_path)
 
         except Exception as exc:
-            # Si ocurrió después de claim, intentamos marcar error usando job_id si existe
+            # Si ocurrió después de claim, intentamos marcar error sólo para el job de esta iteración.
             logger.exception("Agent error: %s", exc)
             try:
-                if "job_id" in locals():
-                    mark_error(int(job_id), str(exc))
+                if job_id is not None:
+                    mark_error(job_id, str(exc))
             except Exception:
                 logger.exception("Failed to mark ERROR for job")
 

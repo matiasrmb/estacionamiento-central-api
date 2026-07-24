@@ -3,7 +3,19 @@ from datetime import datetime
 from typing import Dict, Any
 
 from reportlab.lib.pagesizes import mm
+from reportlab.pdfbase.pdfmetrics import stringWidth
 from reportlab.pdfgen import canvas
+
+
+TICKET_WIDTH = 58 * mm
+TICKET_MARGIN = 4 * mm
+TICKET_FONT = "Courier"
+TICKET_FONT_SIZE = 8
+TICKET_PRINTABLE_WIDTH = TICKET_WIDTH - (2 * TICKET_MARGIN)
+TICKET_TOP_MARGIN = 8 * mm
+TICKET_BOTTOM_MARGIN = 8 * mm
+TICKET_LINE_SPACING = 4.5 * mm
+TICKET_MIN_HEIGHT = 235 * mm
 
 
 def _safe_filename(s: str) -> str:
@@ -23,6 +35,53 @@ def _format_datetime(value: Any) -> str:
         except ValueError:
             pass
     return normalized
+
+
+def _format_amount(value: Any) -> str:
+    try:
+        amount = float(value or 0)
+    except (TypeError, ValueError):
+        return str(value or 0)
+    return str(int(amount)) if amount.is_integer() else f"{amount:.2f}"
+
+
+def _format_modo_cobro(value: Any) -> str:
+    modo = str(value or "").strip()
+    return {
+        "minuto": "Por minuto",
+        "personalizado": "Tramos",
+        "auto": "Automatico",
+    }.get(modo.lower(), modo)
+
+
+def _detail_section_lines(secciones: Any) -> list[str]:
+    if not isinstance(secciones, dict):
+        return []
+
+    lines: list[str] = []
+    total = 0.0
+    rendered_sections = 0
+    for key, title in (("lavado", "LAVADO"), ("estadia", "ESTADIA")):
+        section = secciones.get(key)
+        if not isinstance(section, dict):
+            continue
+        monto = section.get("monto", 0)
+        try:
+            total += float(monto or 0)
+        except (TypeError, ValueError):
+            pass
+        rendered_sections += 1
+        lines.extend([
+            f"{title}:",
+            f"INICIO: {_format_datetime(section.get('inicio'))}",
+            f"FIN: {_format_datetime(section.get('fin'))}",
+            f"DURACION: {int(section.get('duracion_minutos') or 0)} min",
+            f"MONTO: ${_format_amount(monto)}",
+        ])
+
+    if rendered_sections == 2:
+        lines.append(f"TOTAL DETALLE: ${_format_amount(total)}")
+    return lines
 
 
 def _ticket_lines(payload: Dict[str, Any]) -> list[str]:
@@ -53,13 +112,23 @@ def _ticket_lines(payload: Dict[str, Any]) -> list[str]:
         ])
 
         det = payload.get("detalle") or {}
+        modo_cobro = _format_modo_cobro(det.get("modo_cobro"))
+        if modo_cobro:
+            lines.append(f"MODO: {modo_cobro}")
         texto_detalle = det.get("texto") or payload.get("detalle_texto") or ""
         if texto_detalle:
             lines.append(f"DETALLE: {texto_detalle}")
+        try:
+            monto_extra = float(det.get("monto_extra") or 0)
+        except (TypeError, ValueError):
+            monto_extra = 0
+        if det.get("subida_aplicada") or monto_extra > 0:
+            lines.append(f"SUBIDA: +${_format_amount(det.get('monto_extra'))}")
         if det.get("monto_estacionamiento") is not None:
             lines.append(f"ESTACIONAMIENTO: ${det.get('monto_estacionamiento')}")
         if det.get("total_lavados"):
             lines.append(f"LAVADOS: ${det.get('total_lavados')}")
+        lines.extend(_detail_section_lines(det.get("secciones")))
         lines.extend([
             "------------------------",
             f"TOTAL: ${payload.get('monto_final', payload.get('monto', ''))}",
@@ -73,11 +142,21 @@ def _ticket_lines(payload: Dict[str, Any]) -> list[str]:
     return lines
 
 
-def _wrap_ticket_line(text: str, width: int = 32) -> list[str]:
+def _wrap_ticket_line(
+    text: str,
+    width: int | None = None,
+    *,
+    max_width: float = TICKET_PRINTABLE_WIDTH,
+    font_name: str = TICKET_FONT,
+    font_size: float = TICKET_FONT_SIZE,
+) -> list[str]:
     if text == "":
         return [""]
 
-    if len(text) <= width:
+    if width is not None:
+        max_width = stringWidth("M" * width, font_name, font_size)
+
+    if stringWidth(text, font_name, font_size) <= max_width:
         return [text]
 
     words = text.split()
@@ -85,15 +164,43 @@ def _wrap_ticket_line(text: str, width: int = 32) -> list[str]:
     current = ""
     for word in words:
         candidate = f"{current} {word}".strip()
-        if len(candidate) <= width:
+        if stringWidth(candidate, font_name, font_size) <= max_width:
             current = candidate
             continue
         if current:
             lines.append(current)
-        current = word[:width]
+        current = ""
+        for character in word:
+            candidate = current + character
+            if current and stringWidth(candidate, font_name, font_size) > max_width:
+                lines.append(current)
+                current = character
+            else:
+                current = candidate
     if current:
         lines.append(current)
     return lines
+
+
+def _is_bold_ticket_line(line_text: str) -> bool:
+    return line_text.startswith(("TICKET", "PATENTE", "TOTAL"))
+
+
+def _wrapped_ticket_lines(payload: Dict[str, Any]) -> list[tuple[str, bool]]:
+    wrapped_lines: list[tuple[str, bool]] = []
+    for line_text in _ticket_lines(payload):
+        bold = _is_bold_ticket_line(line_text)
+        font_name = "Courier-Bold" if bold else TICKET_FONT
+        wrapped_lines.extend(
+            (line, bold)
+            for line in _wrap_ticket_line(line_text, font_name=font_name)
+        )
+    return wrapped_lines
+
+
+def _ticket_page_height(line_count: int) -> float:
+    content_height = TICKET_TOP_MARGIN + (line_count * TICKET_LINE_SPACING) + TICKET_BOTTOM_MARGIN
+    return max(TICKET_MIN_HEIGHT, content_height)
 
 
 def render_ticket_pdf(payload: Dict[str, Any], out_dir: str) -> str:
@@ -115,25 +222,24 @@ def render_ticket_pdf(payload: Dict[str, Any], out_dir: str) -> str:
     fname = f"{_safe_filename(kind)}_{_safe_filename(patente)}_{id_ingreso}_{ts}.pdf"
     path = os.path.abspath(os.path.join(out_dir, fname))
 
-    # Ticket 58mm: ancho 58mm, con margen extra para facilitar el corte.
-    width = 58 * mm
-    height = 235 * mm
+    wrapped_lines = _wrapped_ticket_lines(payload)
+
+    # Ticket 58mm: keep margins on both sides for narrow printer mechanisms.
+    width = TICKET_WIDTH
+    height = _ticket_page_height(len(wrapped_lines))
 
     c = canvas.Canvas(path, pagesize=(width, height))
 
-    y = height - 8 * mm
-    line = 6.5 * mm
+    y = height - TICKET_TOP_MARGIN
 
     def draw(txt: str, bold: bool = False):
         nonlocal y
-        c.setFont("Courier-Bold" if bold else "Courier", 12)
-        c.drawString(4 * mm, y, txt[:29])  # corte simple por ancho
-        y -= line
+        c.setFont("Courier-Bold" if bold else TICKET_FONT, TICKET_FONT_SIZE)
+        c.drawString(TICKET_MARGIN, y, txt)
+        y -= TICKET_LINE_SPACING
 
-    for line_text in _ticket_lines(payload):
-        bold = line_text.startswith("TICKET") or line_text.startswith("PATENTE") or line_text.startswith("TOTAL")
-        for wrapped in _wrap_ticket_line(line_text):
-            draw(wrapped, bold=bold)
+    for line_text, bold in wrapped_lines:
+        draw(line_text, bold=bold)
 
     c.showPage()
     c.save()

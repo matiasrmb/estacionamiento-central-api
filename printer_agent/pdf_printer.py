@@ -4,6 +4,14 @@ import subprocess
 from pathlib import Path
 
 
+class AmbiguousPrintDispatchError(RuntimeError):
+    """The print command was started, so physical output cannot be ruled out."""
+
+
+class PrintDispatchStartError(RuntimeError):
+    """Sumatra could not be started, so the job can be retried automatically."""
+
+
 def _ps(cmd: str, timeout: int = 15) -> tuple[int, str, str]:
     """
     Ejecuta PowerShell y retorna (rc, stdout, stderr).
@@ -58,11 +66,11 @@ def print_pdf_with_sumatra(*, sumatra_path: str, pdf_path: str, printer_name: st
     """
     exe = Path(sumatra_path)
     if not exe.exists():
-        raise FileNotFoundError(f"SumatraPDF not found: {sumatra_path}")
+        raise PrintDispatchStartError(f"SumatraPDF not found: {sumatra_path}")
 
     pdf = Path(pdf_path)
     if not pdf.exists():
-        raise FileNotFoundError(f"PDF not found: {pdf_path}")
+        raise PrintDispatchStartError(f"PDF not found: {pdf_path}")
 
     cmd = [
         str(exe),
@@ -71,10 +79,15 @@ def print_pdf_with_sumatra(*, sumatra_path: str, pdf_path: str, printer_name: st
         str(pdf),
     ]
 
-    p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_seconds)
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_seconds)
+    except (FileNotFoundError, OSError) as exc:
+        raise PrintDispatchStartError(f"Could not start Sumatra: {exc}") from exc
+    except Exception as exc:
+        raise AmbiguousPrintDispatchError(f"Sumatra dispatch did not complete: {exc}") from exc
 
     if p.returncode != 0:
-        raise RuntimeError(
+        raise AmbiguousPrintDispatchError(
             f"Sumatra print failed rc={p.returncode} stderr={p.stderr.strip()} stdout={p.stdout.strip()}"
         )
 

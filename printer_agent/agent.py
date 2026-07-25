@@ -12,7 +12,11 @@ from app.core.slowlog import log_if_slow
 from app.db.database import engine
 
 from printer_agent.pdf_renderer import render_ticket_pdf
-from printer_agent.pdf_printer import print_pdf_with_sumatra
+from printer_agent.pdf_printer import (
+    AmbiguousPrintDispatchError,
+    PrintDispatchStartError,
+    print_pdf_with_sumatra,
+)
 
 
 setup_logging()
@@ -65,16 +69,26 @@ def slow_print_step(operation: str, **context: Any):
 def release_stale_locks() -> None:
     """
     Libera jobs atascados en IMPRIMIENDO por más de STALE_LOCK_SECONDS.
-    Los pasa a ERROR para reintento.
+    Un despacho que pudo llegar al spooler queda bloqueado para evitar duplicados.
     """
     with slow_print_step("release_stale_locks"):
         with engine.begin() as conn:
             conn.execute(
                 text("""
                 UPDATE print_jobs
-                SET estado='ERROR',
-                    next_retry_at=NOW(),
-                    last_error=COALESCE(last_error, 'Stale lock released'),
+                SET estado=CASE
+                        WHEN last_error LIKE :dispatch_started_prefix THEN 'REVISION_MANUAL'
+                        ELSE 'ERROR'
+                    END,
+                    next_retry_at=CASE
+                        WHEN last_error LIKE :dispatch_started_prefix THEN NULL
+                        ELSE NOW()
+                    END,
+                    last_error=CASE
+                        WHEN last_error LIKE :dispatch_started_prefix
+                            THEN CONCAT('AMBIGUOUS_PRINT_DISPATCH: ', last_error)
+                        ELSE COALESCE(last_error, 'Stale lock released')
+                    END,
                     locked_at=NULL,
                     locked_by=NULL,
                     updated_at=NOW()
@@ -83,7 +97,10 @@ def release_stale_locks() -> None:
                   AND locked_at IS NOT NULL
                   AND locked_at < DATE_SUB(NOW(), INTERVAL :sec SECOND)
                 """),
-                {"sec": STALE_LOCK_SECONDS},
+                {
+                    "sec": STALE_LOCK_SECONDS,
+                    "dispatch_started_prefix": "AMBIGUOUS_PRINT_DISPATCH_STARTED:%",
+                },
             )
 
 
@@ -146,6 +163,31 @@ def mark_printed(job_id: int) -> None:
             )
 
 
+def mark_dispatch_started(job_id: int) -> None:
+    """Persists the ambiguity marker before handing the PDF to Sumatra."""
+    with slow_print_step("mark_dispatch_started", job_id=job_id):
+        with engine.begin() as conn:
+            result = conn.execute(
+                text("""
+                UPDATE print_jobs
+                SET last_error=:err,
+                    updated_at=NOW()
+                WHERE id_print_job=:id
+                  AND estado='IMPRIMIENDO'
+                  AND locked_by=:agent
+                """),
+                {
+                    "id": job_id,
+                    "agent": AGENT_ID,
+                    "err": f"AMBIGUOUS_PRINT_DISPATCH_STARTED: agent={AGENT_ID}"[:500],
+                },
+            )
+            if result.rowcount != 1:
+                raise RuntimeError(
+                    f"Could not persist dispatch-start marker for job id={job_id}"
+                )
+
+
 def mark_error(job_id: int, err_msg: str) -> None:
     """
     Backoff lineal simple:
@@ -190,6 +232,33 @@ def mark_error(job_id: int, err_msg: str) -> None:
             )
 
 
+def mark_ambiguous_dispatch_error(job_id: int, err_msg: str) -> None:
+    """Blocks automatic retry when a ticket may already be in the spooler."""
+    with slow_print_step("mark_ambiguous_dispatch_error", job_id=job_id):
+        with engine.begin() as conn:
+            result = conn.execute(
+                text("""
+                UPDATE print_jobs
+                SET estado='REVISION_MANUAL',
+                    next_retry_at=NULL,
+                    last_error=:err,
+                    locked_at=NULL,
+                    locked_by=NULL,
+                    updated_at=NOW()
+                WHERE id_print_job=:id
+                  AND estado='IMPRIMIENDO'
+                  AND locked_by=:agent
+                """),
+                {
+                    "id": job_id,
+                    "agent": AGENT_ID,
+                    "err": f"AMBIGUOUS_PRINT_DISPATCH: {err_msg}"[:500],
+                },
+            )
+            if result.rowcount != 1:
+                logger.warning("Skipped blocking ambiguous dispatch for job id=%s because it is not locked by this agent", job_id)
+
+
 def run_loop() -> None:
     if not PRINTER_NAME:
         raise RuntimeError("PRINTER_NAME no está configurado. Define PRINTER_NAME en tu .env o variables de entorno.")
@@ -201,6 +270,7 @@ def run_loop() -> None:
 
     while True:
         job_id = None
+        dispatch_may_have_started = False
         try:
             # 1) Liberar locks viejos (seguridad)
             release_stale_locks()
@@ -227,6 +297,10 @@ def run_loop() -> None:
             if PRINT_ENGINE != "SUMATRA":
                 raise RuntimeError("MVP requiere PRINT_ENGINE=SUMATRA. Acrobat es inestable post-reinicio.")
 
+            # This commits before Sumatra starts, so a crash cannot make a possible
+            # physical dispatch eligible for automatic retry.
+            mark_dispatch_started(job_id)
+            dispatch_may_have_started = True
             with slow_print_step("print_pdf", job_id=job_id, printer=PRINTER_NAME):
                 print_pdf_with_sumatra(
                     sumatra_path=SUMATRA_PATH,
@@ -234,7 +308,6 @@ def run_loop() -> None:
                     printer_name=PRINTER_NAME,
                     timeout_seconds=PRINT_TIMEOUT,
                 )
-
             # 6) Marcar impreso (transacción aparte)
             mark_printed(job_id)
             logger.info("Printed OK job id=%s pdf=%s", job_id, pdf_path)
@@ -244,7 +317,16 @@ def run_loop() -> None:
             logger.exception("Agent error: %s", exc)
             try:
                 if job_id is not None:
-                    mark_error(job_id, str(exc))
+                    if (
+                        isinstance(exc, AmbiguousPrintDispatchError)
+                        or (
+                            dispatch_may_have_started
+                            and not isinstance(exc, PrintDispatchStartError)
+                        )
+                    ):
+                        mark_ambiguous_dispatch_error(job_id, str(exc))
+                    else:
+                        mark_error(job_id, str(exc))
             except Exception:
                 logger.exception("Failed to mark ERROR for job")
 

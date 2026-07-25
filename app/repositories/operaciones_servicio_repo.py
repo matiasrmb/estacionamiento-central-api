@@ -5,6 +5,7 @@ from sqlalchemy import text
 
 from app.db.database import db_conn
 from app.db.schema_ensure import ensure_operaciones_servicio_schema, ensure_wash_vehicle_type_schema
+from app.services.print_jobs import crear_print_job_solo_lavado
 
 from app.schemas.operaciones_servicio import OperacionServicioContrato, OperacionServicioState
 
@@ -183,6 +184,12 @@ def finalizar_solo_lavado_cobrar(id_operacion_servicio: int, usuario: str) -> Di
                 usuario_fin = :usuario_fin
             WHERE id_operacion_servicio = :id
         """), {"fecha_hora_fin": now, "usuario_fin": usuario, "id": id_operacion_servicio})
+        try:
+            if not crear_print_job_solo_lavado(conn, operation, now, usuario):
+                raise RuntimeError("SOLO_WASH_PRINT_JOB_NOT_CREATED")
+        except Exception:
+            conn.rollback()
+            raise
         conn.commit()
 
     return _finalized_payload(operation, ESTADO_FINALIZADO_COBRADO, now, usuario, True)
@@ -221,7 +228,8 @@ def convertir_solo_lavado_a_estadia(id_operacion_servicio: int, usuario: str) ->
 
 def _get_active_operation(conn, id_operacion_servicio: int):
     operation = conn.execute(text("""
-        SELECT id_operacion_servicio, patente, estado, valor_lavado_snapshot
+        SELECT id_operacion_servicio, patente, estado, valor_lavado_snapshot,
+               tipo_vehiculo_lavado_snapshot, fecha_hora_inicio
         FROM operaciones_servicio
         WHERE id_operacion_servicio = :id
         LIMIT 1

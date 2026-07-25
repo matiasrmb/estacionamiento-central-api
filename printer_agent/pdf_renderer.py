@@ -87,8 +87,12 @@ def _detail_section_lines(secciones: Any) -> list[str]:
 def _ticket_lines(payload: Dict[str, Any]) -> list[str]:
     kind = payload.get("kind", "TICKET")
     patente = str(payload.get("patente", "")).upper()
-    hora_ingreso = _format_datetime(payload.get("hora_ingreso") or payload.get("fecha_hora_ingreso"))
-    hora_salida = _format_datetime(payload.get("hora_salida") or payload.get("fecha_hora_salida"))
+    hora_ingreso = _format_datetime(
+        payload.get("hora_ingreso") or payload.get("fecha_hora_ingreso") or payload.get("hora_inicio")
+    )
+    hora_salida = _format_datetime(
+        payload.get("hora_salida") or payload.get("fecha_hora_salida") or payload.get("hora_fin")
+    )
     top_margin = ["------------------------", "------------------------"]
     bottom_margin = ["------------------------", "------------------------", "------------------------"]
 
@@ -96,11 +100,15 @@ def _ticket_lines(payload: Dict[str, Any]) -> list[str]:
         *top_margin,
         "ESTACIONAMIENTO CENTRAL",
         "------------------------",
-        "TICKET DE INGRESO" if kind == "TICKET_INGRESO" else "TICKET DE SALIDA",
+        (
+            "TICKET DE INGRESO" if kind == "TICKET_INGRESO"
+            else "RECIBO DE SOLO LAVADO" if kind == "TICKET_SOLO_LAVADO"
+            else "TICKET DE SALIDA"
+        ),
         f"PATENTE: {patente}",
     ]
 
-    if hora_ingreso:
+    if hora_ingreso and kind != "TICKET_SOLO_LAVADO":
         lines.append(f"INGRESO: {hora_ingreso}")
 
     if kind == "TICKET_SALIDA":
@@ -132,6 +140,17 @@ def _ticket_lines(payload: Dict[str, Any]) -> list[str]:
         lines.extend([
             "------------------------",
             f"TOTAL: ${payload.get('monto_final', payload.get('monto', ''))}",
+        ])
+
+    if kind == "TICKET_SOLO_LAVADO":
+        servicio = str(payload.get("servicio") or "Lavado")
+        lines.extend([
+            f"SERVICIO: {servicio}",
+            f"INICIO: {hora_ingreso}",
+            f"FIN: {hora_salida}",
+            f"DURACION: {payload.get('minutos', '')} min",
+            "------------------------",
+            f"TOTAL: ${_format_amount(payload.get('monto_final', payload.get('total', '')))}",
         ])
 
     lines.extend([

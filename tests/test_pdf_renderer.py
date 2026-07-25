@@ -83,6 +83,33 @@ class PdfRendererTests(unittest.TestCase):
         self.assertIn("TOTAL: $1500", lines)
         self.assertFalse(any(line.startswith("MODO:") for line in lines))
 
+    def test_solo_lavado_renders_receipt_fields_and_fits_58mm(self):
+        payload = {
+            "kind": "TICKET_SOLO_LAVADO",
+            "id_operacion_servicio": 31,
+            "patente": "abc123",
+            "servicio": "SUV completo",
+            "hora_inicio": "2026-07-25T10:00:00",
+            "hora_fin": "2026-07-25T10:35:00",
+            "minutos": 35,
+            "monto_final": 9000,
+        }
+
+        lines = _ticket_lines(payload)
+        self.assertIn("RECIBO DE SOLO LAVADO", lines)
+        self.assertIn("PATENTE: ABC123", lines)
+        self.assertIn("INICIO: 25-07-2026 10:00:00", lines)
+        self.assertIn("FIN: 25-07-2026 10:35:00", lines)
+        self.assertIn("DURACION: 35 min", lines)
+        self.assertIn("TOTAL: $9000", lines)
+
+        wrapped_lines = _wrapped_ticket_lines(payload)
+        self.assertTrue(all(
+            stringWidth(line, "Courier-Bold" if bold else TICKET_FONT, TICKET_FONT_SIZE) <= TICKET_PRINTABLE_WIDTH
+            for line, bold in wrapped_lines
+        ))
+        self.assertGreaterEqual(_ticket_page_height(len(wrapped_lines)), TICKET_MIN_HEIGHT)
+
     def test_salida_no_muestra_subida_si_no_corresponde(self):
         lines = _ticket_lines({
             "kind": "TICKET_SALIDA",

@@ -187,21 +187,6 @@ def confirmar_salida(payload: SalidaConfirmIn, user=Depends(require_role("operad
         ):
             created += 1
 
-        # Sunmi opcional (preparado)
-        if payload.imprimir_sunmi:
-            sunmi_payload = {**pc_payload, "destino": "SUNMI_TEXT", "formato": "TEXT"}
-            if crear_print_job(
-                conn,
-                tipo="TICKET_SALIDA",
-                destino="SUNMI_TEXT",
-                id_ingreso=int(payload.id_ingreso),
-                patente=patente,
-                payload=sunmi_payload,
-                idempotency_key=f"TICKET_SALIDA_SUNMI_{payload.id_ingreso}",
-                prioridad=60,
-            ):
-                created += 1
-
         conn.commit()
 
         return {

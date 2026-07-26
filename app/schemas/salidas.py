@@ -15,7 +15,11 @@ class SalidaPreviewOut(BaseModel):
 
 class SalidaConfirmIn(BaseModel):
     id_ingreso: int = Field(..., ge=1)
-    imprimir_sunmi: bool = False
+    imprimir_sunmi: bool = Field(
+        False,
+        description="Deprecated and ignored. Exit receipts are queued only as PC_PDF print jobs.",
+        deprecated=True,
+    )
 
 
 class SalidaConfirmOut(BaseModel):

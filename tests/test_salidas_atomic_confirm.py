@@ -121,7 +121,7 @@ class SalidasAtomicConfirmTests(unittest.TestCase):
         self.assertFalse(conn.committed)
         self.assertEqual(print_calls, [])
 
-    def test_confirm_success_commits_and_creates_print_jobs(self):
+    def test_confirm_ignores_deprecated_sunmi_flag_and_creates_only_pc_pdf_job(self):
         conn = FakeConnection(update_rowcount=1)
         print_calls = []
 
@@ -139,8 +139,9 @@ class SalidasAtomicConfirmTests(unittest.TestCase):
 
         self.assertTrue(conn.committed)
         self.assertFalse(conn.rolled_back)
-        self.assertEqual(result["print_jobs_creados"], 2)
-        self.assertEqual([call["destino"] for call in print_calls], ["PC_PDF", "SUNMI_TEXT"])
+        self.assertEqual(result["print_jobs_creados"], 1)
+        self.assertEqual([call["destino"] for call in print_calls], ["PC_PDF"])
+        self.assertNotIn("SUNMI_TEXT", [call["destino"] for call in print_calls])
 
 
 if __name__ == "__main__":

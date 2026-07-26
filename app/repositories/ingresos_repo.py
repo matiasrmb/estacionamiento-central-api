@@ -1,12 +1,17 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from sqlalchemy import text
 from app.db.database import db_conn
+from app.repositories.print_jobs_repo import create_print_job_pc_pdf_with_connection
 
 
 class ActiveIngresoAlreadyExists(Exception):
     def __init__(self, active_ingreso: Dict[str, Any]):
         super().__init__("Active ingreso already exists for plate")
         self.active_ingreso = active_ingreso
+
+
+class RequiredPrintJobCreationFailed(Exception):
+    pass
 
 
 def find_active_ingreso_by_plate(patente: str) -> Optional[Dict[str, Any]]:
@@ -44,6 +49,40 @@ def create_ingreso(id_vehiculo: int, fecha_hora_ingreso, usuario: str) -> int:
 
 
 def create_ingreso_for_plate_if_no_active(patente: str, fecha_hora_ingreso, usuario: str) -> Dict[str, int]:
+    return _create_ingreso_for_plate_if_no_active(patente, fecha_hora_ingreso, usuario)
+
+
+def create_ingreso_with_required_pc_pdf_job(
+    patente: str,
+    fecha_hora_ingreso,
+    usuario: str,
+    build_ticket_payload: Callable[[int], dict],
+) -> Dict[str, int]:
+    patente = patente.strip().upper()
+
+    def create_required_job(conn, id_ingreso: int) -> int:
+        try:
+            ticket_payload = build_ticket_payload(id_ingreso)
+            return create_print_job_pc_pdf_with_connection(
+                conn,
+                tipo="TICKET_INGRESO",
+                id_ingreso=id_ingreso,
+                patente=patente,
+                payload=ticket_payload,
+                idempotency_key=f"TICKET_INGRESO:INGRESO_ID:{id_ingreso}",
+            )
+        except Exception as exc:
+            raise RequiredPrintJobCreationFailed() from exc
+
+    return _create_ingreso_for_plate_if_no_active(patente, fecha_hora_ingreso, usuario, create_required_job)
+
+
+def _create_ingreso_for_plate_if_no_active(
+    patente: str,
+    fecha_hora_ingreso,
+    usuario: str,
+    after_ingreso: Callable[[Any, int], int] | None = None,
+) -> Dict[str, int]:
     patente = patente.strip().upper()
     lock_name = f"ingreso:active:{patente}"
     locked = False
@@ -99,8 +138,11 @@ def create_ingreso_for_plate_if_no_active(patente: str, fecha_hora_ingreso, usua
                 {"idv": id_vehiculo, "fhi": fecha_hora_ingreso, "usr": usuario},
             )
             id_ingreso = int(conn.execute(text("SELECT LAST_INSERT_ID()")).scalar())
+            result = {"id_vehiculo": id_vehiculo, "id_ingreso": id_ingreso}
+            if after_ingreso:
+                result["pc_job_id"] = after_ingreso(conn, id_ingreso)
             conn.commit()
-            return {"id_vehiculo": id_vehiculo, "id_ingreso": id_ingreso}
+            return result
         except Exception as exc:
             operation_error = exc
             conn.rollback()

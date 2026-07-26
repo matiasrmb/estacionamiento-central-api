@@ -3,8 +3,11 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
 from app.api.deps import require_role
-from app.repositories.ingresos_repo import ActiveIngresoAlreadyExists, create_ingreso_for_plate_if_no_active
-from app.repositories.print_jobs_repo import create_print_job_pc_pdf
+from app.repositories.ingresos_repo import (
+    ActiveIngresoAlreadyExists,
+    RequiredPrintJobCreationFailed,
+    create_ingreso_with_required_pc_pdf_job,
+)
 from app.services.tickets_service import build_ticket_ingreso_payload
 
 router = APIRouter()
@@ -19,12 +22,20 @@ class IngresoRequest(BaseModel):
 def registrar_ingreso(payload: IngresoRequest, user=Depends(require_role("operador", "admin"))):
     patente = payload.patente.strip().upper()
     now = datetime.now()  # hora servidor local
+    hora_ingreso_iso = now.isoformat(timespec="seconds")
 
     try:
-        created = create_ingreso_for_plate_if_no_active(
+        created = create_ingreso_with_required_pc_pdf_job(
             patente=patente,
             fecha_hora_ingreso=now,
             usuario=user.get("sub"),
+            build_ticket_payload=lambda id_ingreso: build_ticket_ingreso_payload(
+                id_ingreso=id_ingreso,
+                patente=patente,
+                hora_ingreso_iso=hora_ingreso_iso,
+                usuario_claims=user,
+                server_time_iso=hora_ingreso_iso,
+            ),
         )
     except ActiveIngresoAlreadyExists:
         raise HTTPException(
@@ -37,35 +48,13 @@ def registrar_ingreso(payload: IngresoRequest, user=Depends(require_role("operad
                 }
             },
         )
-    id_ingreso = created["id_ingreso"]
-
-    # Crear print job PC (obligatorio)
-    hora_ingreso_iso = now.isoformat(timespec="seconds")
-    server_time_iso = now.isoformat(timespec="seconds")
-    ticket_payload = build_ticket_ingreso_payload(
-        id_ingreso=id_ingreso,
-        patente=patente,
-        hora_ingreso_iso=hora_ingreso_iso,
-        usuario_claims=user,
-        server_time_iso=server_time_iso,
-    )
-
-    idempotency_key = f"TICKET_INGRESO:INGRESO_ID:{id_ingreso}"
-    try:
-        pc_job_id = create_print_job_pc_pdf(
-            tipo="TICKET_INGRESO",
-            id_ingreso=id_ingreso,
-            patente=patente,
-            payload=ticket_payload,
-            idempotency_key=idempotency_key,
-        )
-    except Exception:
-        # Para MVP: si no se crea job PC, consideramos fallo crítico
+    except RequiredPrintJobCreationFailed:
         raise HTTPException(
             status_code=500,
             detail={"error": {"code": "PRINT_JOB_CREATE_FAILED", "message": "No se pudo crear el trabajo de impresión PC"}},
         )
 
+    id_ingreso = created["id_ingreso"]
     return {
         "ingreso": {
             "id_ingreso": id_ingreso,
@@ -75,7 +64,7 @@ def registrar_ingreso(payload: IngresoRequest, user=Depends(require_role("operad
         },
         "print": {
             "pc_job_created": True,
-            "pc_job_id": pc_job_id,
+            "pc_job_id": created["pc_job_id"],
             "sunmi_payload": {"enabled": False, "text": None},
         },
     }

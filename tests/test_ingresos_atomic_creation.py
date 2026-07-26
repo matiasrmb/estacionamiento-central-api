@@ -32,12 +32,15 @@ class EmptyResult:
 
 
 class FakeConnection:
-    def __init__(self, active_row=None, vehicle_row=None, insert_id=99):
+    def __init__(self, active_row=None, vehicle_row=None, insert_id=99, print_job_id=100, print_job_error=None):
         self.active_row = active_row
         self.vehicle_row = vehicle_row
         self.insert_id = insert_id
+        self.print_job_id = print_job_id
+        self.print_job_error = print_job_error
+        self.print_job_inserted = False
         self.calls = []
-        self.committed = False
+        self.commit_count = 0
         self.rolled_back = False
 
     def execute(self, statement, params=None):
@@ -51,12 +54,17 @@ class FakeConnection:
             return MappingResult(self.active_row)
         if "FROM vehiculos" in sql:
             return MappingResult(self.vehicle_row)
+        if "INSERT INTO print_jobs" in sql:
+            if self.print_job_error:
+                raise self.print_job_error
+            self.print_job_inserted = True
+            return EmptyResult()
         if "LAST_INSERT_ID" in sql:
-            return ScalarResult(self.insert_id)
+            return ScalarResult(self.print_job_id if self.print_job_inserted else self.insert_id)
         return EmptyResult()
 
     def commit(self):
-        self.committed = True
+        self.commit_count += 1
 
     def rollback(self):
         self.rolled_back = True
@@ -75,21 +83,16 @@ class FakeDbConn:
 
 class IngresosAtomicCreationTests(unittest.TestCase):
     def test_endpoint_returns_existing_duplicate_payload_when_atomic_repo_reports_active(self):
-        original_create = ingresos.create_ingreso_for_plate_if_no_active
-        original_print = ingresos.create_print_job_pc_pdf
-
-        def fake_create_ingreso_for_plate_if_no_active(**kwargs):
+        def fake_create_ingreso_with_required_pc_pdf_job(**kwargs):
             raise ingresos.ActiveIngresoAlreadyExists({"id_ingreso": 10, "patente": "ABC123"})
 
-        try:
-            ingresos.create_ingreso_for_plate_if_no_active = fake_create_ingreso_for_plate_if_no_active
-            ingresos.create_print_job_pc_pdf = lambda **kwargs: 1
-
+        with patch.object(
+            ingresos,
+            "create_ingreso_with_required_pc_pdf_job",
+            side_effect=fake_create_ingreso_with_required_pc_pdf_job,
+        ):
             with self.assertRaises(HTTPException) as raised:
                 ingresos.registrar_ingreso(ingresos.IngresoRequest(patente=" abc123 "), user={"sub": "tester"})
-        finally:
-            ingresos.create_ingreso_for_plate_if_no_active = original_create
-            ingresos.create_print_job_pc_pdf = original_print
 
         self.assertEqual(raised.exception.status_code, status.HTTP_409_CONFLICT)
         self.assertEqual(
@@ -112,7 +115,7 @@ class IngresosAtomicCreationTests(unittest.TestCase):
 
         self.assertTrue(conn.rolled_back)
         self.assertTrue(any("RELEASE_LOCK" in sql for sql, _ in conn.calls))
-        self.assertFalse(conn.committed)
+        self.assertEqual(conn.commit_count, 0)
 
     def test_repository_releases_named_lock_when_insert_succeeds(self):
         conn = FakeConnection(vehicle_row={"id_vehiculo": 77}, insert_id=88)
@@ -125,8 +128,55 @@ class IngresosAtomicCreationTests(unittest.TestCase):
             )
 
         self.assertEqual(result, {"id_vehiculo": 77, "id_ingreso": 88})
-        self.assertTrue(conn.committed)
+        self.assertEqual(conn.commit_count, 1)
         self.assertTrue(any("RELEASE_LOCK" in sql for sql, _ in conn.calls))
+
+    def test_required_pc_job_and_ingreso_commit_once(self):
+        conn = FakeConnection(vehicle_row={"id_vehiculo": 77}, insert_id=88, print_job_id=89)
+
+        with patch.object(ingresos_repo, "db_conn", return_value=FakeDbConn(conn)):
+            result = ingresos_repo.create_ingreso_with_required_pc_pdf_job(
+                "abc123",
+                datetime(2026, 1, 1, 10, 0),
+                "tester",
+                lambda id_ingreso: {"kind": "TICKET_INGRESO", "id_ingreso": id_ingreso},
+            )
+
+        print_sql, print_params = next((sql, params) for sql, params in conn.calls if "INSERT INTO print_jobs" in sql)
+        self.assertIn("'PC_PDF'", print_sql)
+        self.assertEqual(print_params["tipo"], "TICKET_INGRESO")
+        self.assertEqual(result, {"id_vehiculo": 77, "id_ingreso": 88, "pc_job_id": 89})
+        self.assertEqual(conn.commit_count, 1)
+        self.assertFalse(conn.rolled_back)
+
+    def test_print_job_insert_failure_rolls_back_ingreso(self):
+        conn = FakeConnection(vehicle_row={"id_vehiculo": 77}, print_job_error=RuntimeError("print job unavailable"))
+
+        with patch.object(ingresos_repo, "db_conn", return_value=FakeDbConn(conn)):
+            with self.assertRaises(ingresos_repo.RequiredPrintJobCreationFailed):
+                ingresos_repo.create_ingreso_with_required_pc_pdf_job(
+                    "abc123", datetime(2026, 1, 1, 10, 0), "tester", lambda _: {"kind": "TICKET_INGRESO"}
+                )
+
+        self.assertTrue(conn.rolled_back)
+        self.assertEqual(conn.commit_count, 0)
+        self.assertTrue(any("RELEASE_LOCK" in sql for sql, _ in conn.calls))
+
+    def test_payload_build_failure_rolls_back_ingreso(self):
+        conn = FakeConnection(vehicle_row={"id_vehiculo": 77})
+
+        with patch.object(ingresos_repo, "db_conn", return_value=FakeDbConn(conn)):
+            with self.assertRaises(ingresos_repo.RequiredPrintJobCreationFailed):
+                ingresos_repo.create_ingreso_with_required_pc_pdf_job(
+                    "abc123",
+                    datetime(2026, 1, 1, 10, 0),
+                    "tester",
+                    lambda _: (_ for _ in ()).throw(ValueError("payload failed")),
+                )
+
+        self.assertTrue(conn.rolled_back)
+        self.assertEqual(conn.commit_count, 0)
+        self.assertFalse(any("INSERT INTO print_jobs" in sql for sql, _ in conn.calls))
 
 
 if __name__ == "__main__":

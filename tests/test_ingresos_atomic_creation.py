@@ -117,6 +117,28 @@ class IngresosAtomicCreationTests(unittest.TestCase):
         self.assertTrue(any("RELEASE_LOCK" in sql for sql, _ in conn.calls))
         self.assertEqual(conn.commit_count, 0)
 
+    def test_repository_blocks_waiting_ingreso_without_creating_print_job_or_committing(self):
+        conn = FakeConnection(
+            active_row={"id_ingreso": 10, "id_vehiculo": 5, "patente": "ABC123", "en_espera": 1}
+        )
+
+        with patch.object(ingresos_repo, "db_conn", return_value=FakeDbConn(conn)):
+            with self.assertRaises(ingresos_repo.ActiveIngresoAlreadyExists) as raised:
+                ingresos_repo.create_ingreso_with_required_pc_pdf_job(
+                    "abc123",
+                    datetime(2026, 1, 1, 10, 0),
+                    "tester",
+                    lambda _: {"kind": "TICKET_INGRESO"},
+                )
+
+        active_lookup_sql = next(sql for sql, _ in conn.calls if "FROM ingresos i" in sql)
+        self.assertEqual(raised.exception.active_ingreso["en_espera"], 1)
+        self.assertNotIn("i.en_espera = 0", active_lookup_sql)
+        self.assertTrue(conn.rolled_back)
+        self.assertEqual(conn.commit_count, 0)
+        self.assertFalse(any("INSERT INTO ingresos" in sql for sql, _ in conn.calls))
+        self.assertFalse(any("INSERT INTO print_jobs" in sql for sql, _ in conn.calls))
+
     def test_repository_releases_named_lock_when_insert_succeeds(self):
         conn = FakeConnection(vehicle_row={"id_vehiculo": 77}, insert_id=88)
 

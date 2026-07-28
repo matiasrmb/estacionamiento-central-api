@@ -16,7 +16,7 @@ class RequiredPrintJobCreationFailed(Exception):
 
 def find_active_ingreso_by_plate(patente: str) -> Optional[Dict[str, Any]]:
     """
-    Activo = fecha_hora_salida IS NULL y en_espera=0 (MVP).
+    Activo = fecha_hora_salida IS NULL.
     """
     patente = patente.strip().upper()
     query = """
@@ -27,7 +27,6 @@ def find_active_ingreso_by_plate(patente: str) -> Optional[Dict[str, Any]]:
       JOIN vehiculos v ON v.id_vehiculo = i.id_vehiculo
       WHERE v.patente = :p
         AND i.fecha_hora_salida IS NULL
-        AND i.en_espera = 0
       ORDER BY i.id_ingreso DESC
       LIMIT 1
     """
@@ -105,7 +104,6 @@ def _create_ingreso_for_plate_if_no_active(
                       JOIN vehiculos v ON v.id_vehiculo = i.id_vehiculo
                       WHERE v.patente = :p
                         AND i.fecha_hora_salida IS NULL
-                        AND i.en_espera = 0
                       ORDER BY i.id_ingreso DESC
                       LIMIT 1
                     """

@@ -98,7 +98,7 @@ class SalidasAtomicConfirmTests(unittest.TestCase):
         conn = FakeConnection(update_rowcount=1)
 
         with patch.object(salidas, "db_conn", return_value=FakeDbConn(conn)), \
-             patch.object(salidas, "calcular_monto_desde_minutos", return_value=(60, 1000, "detalle")), \
+             patch.object(salidas, "calcular_monto_con_lavados", return_value=(60, 1000, "detalle", 1000, 0)), \
              patch.object(salidas, "crear_print_job", return_value=True):
             salidas.confirmar_salida(salidas.SalidaConfirmIn(id_ingreso=7), user={"sub": "tester"})
 
@@ -110,7 +110,7 @@ class SalidasAtomicConfirmTests(unittest.TestCase):
         print_calls = []
 
         with patch.object(salidas, "db_conn", return_value=FakeDbConn(conn)), \
-             patch.object(salidas, "calcular_monto_desde_minutos", return_value=(60, 1000, "detalle")), \
+             patch.object(salidas, "calcular_monto_con_lavados", return_value=(60, 1000, "detalle", 1000, 0)), \
              patch.object(salidas, "crear_print_job", side_effect=lambda *args, **kwargs: print_calls.append(kwargs)):
             with self.assertRaises(HTTPException) as raised:
                 salidas.confirmar_salida(salidas.SalidaConfirmIn(id_ingreso=7), user={"sub": "tester"})
@@ -130,7 +130,7 @@ class SalidasAtomicConfirmTests(unittest.TestCase):
             return True
 
         with patch.object(salidas, "db_conn", return_value=FakeDbConn(conn)), \
-             patch.object(salidas, "calcular_monto_desde_minutos", return_value=(60, 1000, "detalle")), \
+             patch.object(salidas, "calcular_monto_con_lavados", return_value=(60, 1000, "detalle", 1000, 0)), \
              patch.object(salidas, "crear_print_job", side_effect=fake_crear_print_job):
             result = salidas.confirmar_salida(
                 salidas.SalidaConfirmIn(id_ingreso=7, imprimir_sunmi=True),

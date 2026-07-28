@@ -4,7 +4,7 @@ from unittest.mock import Mock, patch
 
 from app.repositories.cierres_repo import build_cierre_summary_from_rows
 from app.repositories.reportes_repo import build_report_totals
-from app.api.v1.endpoints.salidas import _calcular_monto_con_lavados
+from app.services.tarifas import calcular_monto_con_lavados
 
 
 class SoloLavadoAccountingSemanticsTests(unittest.TestCase):
@@ -47,9 +47,9 @@ class SoloLavadoAccountingSemanticsTests(unittest.TestCase):
         conn.execute.return_value.mappings.return_value.all.return_value = []
         conn.execute.return_value.scalar.side_effect = [0, 9000]
 
-        with patch("app.api.v1.endpoints.salidas.calcular_monto_desde_minutos") as calc:
+        with patch("app.services.tarifas.calcular_monto_desde_minutos") as calc:
             calc.return_value = (60, 1200, "Base")
-            minutos, monto, detalle, monto_estacionamiento, total_lavados = _calcular_monto_con_lavados(
+            minutos, monto, detalle, monto_estacionamiento, total_lavados = calcular_monto_con_lavados(
                 conn,
                 42,
                 datetime(2026, 7, 1, 10, 0),

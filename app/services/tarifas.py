@@ -1,6 +1,6 @@
 import math
 from datetime import datetime, timedelta
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.engine import Connection
 
 
@@ -13,6 +13,13 @@ def _get_config_int(conn: Connection, clave: str, default: int) -> int:
         return default
     try:
         return int(float(row[0]))
+    except Exception:
+        return default
+
+
+def _config_int(config: dict[str, str], clave: str, default: int) -> int:
+    try:
+        return int(float(config.get(clave, default)))
     except Exception:
         return default
 
@@ -59,6 +66,13 @@ def _get_subida_activa(conn: Connection) -> dict[str, object] | None:
     }
 
 
+def _cargar_contexto_tarifas(conn: Connection) -> tuple[dict[str, str], dict[str, object] | None, list[dict[str, int]]]:
+    config = _get_config(conn)
+    subida = _get_subida_activa(conn)
+    tramos = _list_tarifas_personalizadas(conn) if config.get("modo_cobro", "minuto") == "personalizado" else []
+    return config, subida, tramos
+
+
 def _time_as_hhmm(value: object) -> str:
     if hasattr(value, "strftime"):
         return value.strftime("%H:%M")
@@ -92,11 +106,13 @@ def _calcular_minutos_en_subida(
     return int((fin_real - inicio_real).total_seconds() / 60)
 
 
-def calcular_monto_desde_minutos(
-    conn: Connection,
+def _calcular_monto_desde_minutos_con_contexto(
     minutos: int,
     fecha_ingreso: datetime,
     fecha_salida: datetime,
+    config: dict[str, str],
+    subida: dict[str, object] | None,
+    tramos: list[dict[str, int]],
 ) -> tuple[int, int, str]:
     """
     Retorna (minutos, monto, detalle) usando minutos ya ajustados.
@@ -109,11 +125,9 @@ def calcular_monto_desde_minutos(
     """
     minutos = max(0, int(minutos))
 
-    config = _get_config(conn)
     modo = config.get("modo_cobro", "minuto")
     tarifa_minima = int(config.get("tarifa_minima", 300))
     valor_minuto = int(config.get("valor_minuto", 25))
-    subida = _get_subida_activa(conn)
 
     if modo == "minuto":
         if minutos <= 0:
@@ -134,8 +148,6 @@ def calcular_monto_desde_minutos(
         return minutos, round(total), "Modo minuto"
 
     if modo == "personalizado":
-        tramos = _list_tarifas_personalizadas(conn)
-
         if subida:
             hora_inicio = datetime.combine(
                 fecha_salida.date(),
@@ -201,9 +213,9 @@ def calcular_monto_desde_minutos(
 
     # Compatibilidad: versiones tempranas de la API usaban "tarifa_por_hora",
     # pero el escritorio y schema canónico usan "tarifa_hora".
-    tarifa_hora = _get_config_int(conn, "tarifa_por_hora", 0)
+    tarifa_hora = _config_int(config, "tarifa_por_hora", 0)
     if tarifa_hora <= 0:
-        tarifa_hora = _get_config_int(conn, "tarifa_hora", 600)
+        tarifa_hora = _config_int(config, "tarifa_hora", 600)
 
     if minutos <= 60:
         return minutos, tarifa_minima, "MVP: tarifa mínima (<= 60 min)"
@@ -213,6 +225,19 @@ def calcular_monto_desde_minutos(
     return minutos, monto, f"MVP: mínima + {extra_horas}h extra"
 
 
+def calcular_monto_desde_minutos(
+    conn: Connection,
+    minutos: int,
+    fecha_ingreso: datetime,
+    fecha_salida: datetime,
+) -> tuple[int, int, str]:
+    """Calcula una tarifa con la configuración vigente."""
+    config, subida, tramos = _cargar_contexto_tarifas(conn)
+    return _calcular_monto_desde_minutos_con_contexto(
+        minutos, fecha_ingreso, fecha_salida, config, subida, tramos
+    )
+
+
 def calcular_monto_mvp(conn: Connection, fecha_ingreso: datetime, fecha_salida: datetime) -> tuple[int, int, str]:
     """
     Retorna (minutos, monto, detalle) calculando minutos desde las fechas reales.
@@ -220,3 +245,156 @@ def calcular_monto_mvp(conn: Connection, fecha_ingreso: datetime, fecha_salida: 
     diff = (fecha_salida - fecha_ingreso).total_seconds()
     minutos = max(0, int(math.ceil(diff / 60.0)))
     return calcular_monto_desde_minutos(conn, minutos, fecha_ingreso, fecha_salida)
+
+
+def _calcular_minutos_lavado(conn: Connection, id_ingreso: int, fecha_salida: datetime) -> int:
+    rows = conn.execute(
+        text("""
+            SELECT fecha_hora_inicio, fecha_hora_fin
+            FROM lavados
+            WHERE id_ingreso = :id_ingreso
+        """),
+        {"id_ingreso": id_ingreso},
+    ).mappings().all()
+
+    total = 0
+    for row in rows:
+        inicio = row["fecha_hora_inicio"]
+        fin = row["fecha_hora_fin"] or fecha_salida
+        if fin > inicio:
+            total += int((fin - inicio).total_seconds() / 60)
+    return total
+
+
+def _calcular_total_lavados(conn: Connection, id_ingreso: int) -> int:
+    total = conn.execute(
+        text("""
+            SELECT COALESCE(SUM(valor_lavado), 0)
+            FROM lavados
+            WHERE id_ingreso = :id_ingreso
+        """),
+        {"id_ingreso": id_ingreso},
+    ).scalar()
+    return int(total or 0)
+
+
+def _calcular_total_lavados_convertidos(conn: Connection, id_ingreso: int) -> int:
+    total = conn.execute(
+        text("""
+            SELECT COALESCE(SUM(valor_lavado_snapshot), 0)
+            FROM operaciones_servicio
+            WHERE id_ingreso_generado = :id_ingreso
+              AND estado = 'CONVERTIDO_ESTADIA'
+        """),
+        {"id_ingreso": id_ingreso},
+    ).scalar()
+    return int(total or 0)
+
+
+def calcular_monto_con_lavados(
+    conn: Connection,
+    id_ingreso: int,
+    fecha_ingreso: datetime,
+    fecha_salida: datetime,
+) -> tuple[int, int, str, int, int]:
+    """Calcula la cotización de estadía con los mismos ajustes que una salida."""
+    minutos_totales = max(0, int(math.ceil((fecha_salida - fecha_ingreso).total_seconds() / 60.0)))
+    minutos_lavado = _calcular_minutos_lavado(conn, id_ingreso, fecha_salida)
+    minutos_cobrables = max(minutos_totales - minutos_lavado, 0)
+    total_lavados = _calcular_total_lavados(conn, id_ingreso)
+    total_lavados_convertidos = _calcular_total_lavados_convertidos(conn, id_ingreso)
+    total_lavados += total_lavados_convertidos
+
+    minutos, monto_estacionamiento, detalle = calcular_monto_desde_minutos(
+        conn,
+        minutos_cobrables,
+        fecha_ingreso,
+        fecha_salida,
+    )
+    monto_total = monto_estacionamiento + total_lavados
+    if minutos_lavado > 0:
+        detalle = f"{detalle} - descuenta {minutos_lavado} min de lavado"
+    if total_lavados > 0:
+        detalle = f"{detalle} - lavados ${total_lavados}"
+    if total_lavados_convertidos > 0:
+        detalle = f"{detalle} (incluye solo lavado convertido ${total_lavados_convertidos})"
+    return minutos, monto_total, detalle, monto_estacionamiento, total_lavados
+
+
+def calcular_montos_activos_con_lavados(
+    conn: Connection,
+    ingresos: list[dict[str, object]],
+    calculado_a: datetime,
+) -> dict[int, tuple[int, int, str, int, int]]:
+    """Cotiza activos sin repetir consultas de lavados ni tarifas por ingreso."""
+    if not ingresos:
+        return {}
+
+    ids = [int(ingreso["id_ingreso"]) for ingreso in ingresos]
+    lavado_rows = conn.execute(
+        text("""
+            SELECT id_ingreso, fecha_hora_inicio, fecha_hora_fin
+            FROM lavados
+            WHERE id_ingreso IN :ids
+        """).bindparams(bindparam("ids", expanding=True)),
+        {"ids": ids},
+    ).mappings().all()
+    lavado_totales = conn.execute(
+        text("""
+            SELECT id_ingreso, COALESCE(SUM(valor_lavado), 0) AS total
+            FROM lavados
+            WHERE id_ingreso IN :ids
+            GROUP BY id_ingreso
+        """).bindparams(bindparam("ids", expanding=True)),
+        {"ids": ids},
+    ).mappings().all()
+    convertidos_totales = conn.execute(
+        text("""
+            SELECT id_ingreso_generado, COALESCE(SUM(valor_lavado_snapshot), 0) AS total
+            FROM operaciones_servicio
+            WHERE id_ingreso_generado IN :ids
+              AND estado = 'CONVERTIDO_ESTADIA'
+            GROUP BY id_ingreso_generado
+        """).bindparams(bindparam("ids", expanding=True)),
+        {"ids": ids},
+    ).mappings().all()
+
+    minutos_lavado = {id_ingreso: 0 for id_ingreso in ids}
+    for lavado in lavado_rows:
+        inicio = lavado["fecha_hora_inicio"]
+        fin = min(lavado["fecha_hora_fin"] or calculado_a, calculado_a)
+        if fin > inicio:
+            minutos_lavado[int(lavado["id_ingreso"])] += int((fin - inicio).total_seconds() / 60)
+
+    total_lavados = {int(row["id_ingreso"]): int(row["total"] or 0) for row in lavado_totales}
+    total_convertidos = {
+        int(row["id_ingreso_generado"]): int(row["total"] or 0)
+        for row in convertidos_totales
+    }
+    config, subida, tramos = _cargar_contexto_tarifas(conn)
+
+    cotizaciones = {}
+    for ingreso in ingresos:
+        id_ingreso = int(ingreso["id_ingreso"])
+        minutos_totales = max(
+            0,
+            int(math.ceil((calculado_a - ingreso["fecha_hora_ingreso"]).total_seconds() / 60.0)),
+        )
+        minutos_cobrables = max(minutos_totales - minutos_lavado[id_ingreso], 0)
+        minutos, monto_estacionamiento, detalle = _calcular_monto_desde_minutos_con_contexto(
+            minutos_cobrables,
+            ingreso["fecha_hora_ingreso"],
+            calculado_a,
+            config,
+            subida,
+            tramos,
+        )
+        total = total_lavados.get(id_ingreso, 0) + total_convertidos.get(id_ingreso, 0)
+        if minutos_lavado[id_ingreso] > 0:
+            detalle = f"{detalle} - descuenta {minutos_lavado[id_ingreso]} min de lavado"
+        if total > 0:
+            detalle = f"{detalle} - lavados ${total}"
+        if total_convertidos.get(id_ingreso, 0) > 0:
+            detalle = f"{detalle} (incluye solo lavado convertido ${total_convertidos[id_ingreso]})"
+        cotizaciones[id_ingreso] = (minutos, monto_estacionamiento + total, detalle, monto_estacionamiento, total)
+    return cotizaciones

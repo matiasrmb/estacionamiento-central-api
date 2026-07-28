@@ -15,7 +15,7 @@ except ModuleNotFoundError:
     sys.modules["sqlalchemy"] = sqlalchemy_stub
     sys.modules["sqlalchemy.engine"] = sqlalchemy_engine_stub
 
-from app.services.tarifas import calcular_monto_mvp
+from app.services.tarifas import calcular_monto_mvp, calcular_montos_activos_con_lavados
 
 
 class _FakeResult:
@@ -67,6 +67,37 @@ class _FakeConnection:
                 return _FakeResult()
             return _FakeResult((value,))
 
+        raise AssertionError(f"Unexpected query: {sql}")
+
+
+class _BatchResult(_FakeResult):
+    def mappings(self):
+        return self
+
+    def all(self):
+        return self._rows
+
+
+class _BatchConnection:
+    def __init__(self, lavado_rows=None, lavado_totals=None, convertido_totals=None):
+        self.queries = []
+        self.lavado_rows = lavado_rows or []
+        self.lavado_totals = lavado_totals or []
+        self.convertido_totals = convertido_totals or []
+
+    def execute(self, statement, params=None):
+        sql = str(statement)
+        self.queries.append(sql)
+        if "fecha_hora_inicio, fecha_hora_fin" in sql:
+            return _BatchResult(rows=self.lavado_rows)
+        if "SUM(valor_lavado)" in sql:
+            return _BatchResult(rows=self.lavado_totals)
+        if "SUM(valor_lavado_snapshot)" in sql:
+            return _BatchResult(rows=self.convertido_totals)
+        if "FROM configuracion" in sql:
+            return _BatchResult(rows=[("modo_cobro", "minuto"), ("tarifa_minima", "300"), ("valor_minuto", "25")])
+        if "FROM subida_precios" in sql:
+            return _BatchResult()
         raise AssertionError(f"Unexpected query: {sql}")
 
 
@@ -154,6 +185,69 @@ class CalcularMontoMvpTests(unittest.TestCase):
         self.assertEqual(minutos, 11)
         self.assertEqual(monto, 1550)
         self.assertEqual(detalle, "Modo minuto")
+
+    def test_active_batch_quote_uses_fixed_aggregate_and_tariff_queries(self):
+        conn = _BatchConnection()
+        calculado_a = datetime(2026, 7, 1, 11, 0)
+
+        cotizaciones = calcular_montos_activos_con_lavados(
+            conn,
+            [
+                {"id_ingreso": 1, "fecha_hora_ingreso": datetime(2026, 7, 1, 10, 0)},
+                {"id_ingreso": 2, "fecha_hora_ingreso": datetime(2026, 7, 1, 10, 15)},
+                {"id_ingreso": 3, "fecha_hora_ingreso": datetime(2026, 7, 1, 10, 30)},
+            ],
+            calculado_a,
+        )
+
+        self.assertEqual(set(cotizaciones), {1, 2, 3})
+        self.assertEqual(len(conn.queries), 5)
+        self.assertEqual(sum("FROM lavados" in query for query in conn.queries), 2)
+        self.assertEqual(sum("FROM operaciones_servicio" in query for query in conn.queries), 1)
+        self.assertEqual(sum("FROM configuracion" in query for query in conn.queries), 1)
+
+    def test_active_batch_quote_caps_active_wash_at_calculation_time(self):
+        calculado_a = datetime(2026, 7, 1, 11, 0)
+        conn = _BatchConnection(
+            lavado_rows=[{
+                "id_ingreso": 1,
+                "fecha_hora_inicio": datetime(2026, 7, 1, 10, 30),
+                "fecha_hora_fin": datetime(2026, 7, 1, 11, 30),
+            }]
+        )
+
+        cotizaciones = calcular_montos_activos_con_lavados(
+            conn,
+            [{"id_ingreso": 1, "fecha_hora_ingreso": datetime(2026, 7, 1, 10, 0)}],
+            calculado_a,
+        )
+
+        minutos, monto, detalle, monto_estacionamiento, total_lavados = cotizaciones[1]
+        self.assertEqual(minutos, 30)
+        self.assertEqual(monto_estacionamiento, 1025)
+        self.assertEqual(monto, 1025)
+        self.assertEqual(total_lavados, 0)
+        self.assertIn("descuenta 30 min de lavado", detalle)
+
+    def test_active_batch_quote_includes_converted_solo_lavado_once(self):
+        calculado_a = datetime(2026, 7, 1, 11, 0)
+        conn = _BatchConnection(
+            convertido_totals=[{"id_ingreso_generado": 1, "total": 9000}]
+        )
+
+        cotizaciones = calcular_montos_activos_con_lavados(
+            conn,
+            [{"id_ingreso": 1, "fecha_hora_ingreso": datetime(2026, 7, 1, 10, 0)}],
+            calculado_a,
+        )
+
+        minutos, monto, detalle, monto_estacionamiento, total_lavados = cotizaciones[1]
+        self.assertEqual(minutos, 60)
+        self.assertEqual(monto_estacionamiento, 1775)
+        self.assertEqual(total_lavados, 9000)
+        self.assertEqual(monto, 10775)
+        self.assertIn("lavados $9000", detalle)
+        self.assertIn("incluye solo lavado convertido $9000", detalle)
 
 
 if __name__ == "__main__":

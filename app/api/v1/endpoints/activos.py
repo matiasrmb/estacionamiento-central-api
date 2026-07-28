@@ -1,8 +1,11 @@
+from datetime import datetime
+
 from fastapi import APIRouter, Depends
 from sqlalchemy import text
 
 from app.api.deps import require_role
 from app.db.database import db_conn
+from app.services.tarifas import calcular_montos_activos_con_lavados
 
 router = APIRouter(tags=["activos"])
 
@@ -29,4 +32,18 @@ def listar_activos(_user=Depends(require_role("operador", "admin"))):
             """)
         ).mappings().all()
 
-        return {"items": [dict(r) for r in rows]}
+        calculado_a = datetime.now().replace(microsecond=0)
+        cotizables = [dict(row) for row in rows if int(row.get("en_espera") or 0) != 1]
+        cotizaciones = calcular_montos_activos_con_lavados(conn, cotizables, calculado_a)
+        items = []
+        for row in rows:
+            item = dict(row)
+            if int(item.get("en_espera") or 0) == 1:
+                item.update({"monto_acumulado": 0, "minutos_cobrables": 0})
+            else:
+                minutos, monto, _detalle, _monto_estacionamiento, _total_lavados = cotizaciones[int(item["id_ingreso"])]
+                item.update({"monto_acumulado": int(monto), "minutos_cobrables": int(minutos)})
+            item["calculado_a"] = calculado_a.isoformat()
+            items.append(item)
+
+        return {"items": items}

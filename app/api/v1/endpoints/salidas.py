@@ -1,4 +1,3 @@
-import math
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import text
@@ -6,7 +5,7 @@ from sqlalchemy import text
 from app.api.deps import require_role
 from app.db.database import db_conn
 from app.schemas.salidas import SalidaPreviewIn, SalidaPreviewOut, SalidaConfirmIn, SalidaConfirmOut
-from app.services.tarifas import calcular_monto_desde_minutos
+from app.services.tarifas import calcular_monto_con_lavados
 from app.services.print_jobs import crear_print_job
 
 router = APIRouter(prefix="/salidas", tags=["salidas"])
@@ -26,69 +25,6 @@ def _get_ingreso(conn, id_ingreso: int):
     ).mappings().first()
 
 
-def _calcular_minutos_lavado(conn, id_ingreso: int, fecha_salida: datetime) -> int:
-    rows = conn.execute(
-        text("""
-            SELECT fecha_hora_inicio, fecha_hora_fin
-            FROM lavados
-            WHERE id_ingreso = :id_ingreso
-        """),
-        {"id_ingreso": id_ingreso},
-    ).mappings().all()
-
-    total = 0
-    for row in rows:
-        inicio = row["fecha_hora_inicio"]
-        fin = row["fecha_hora_fin"] or fecha_salida
-        if fin > inicio:
-            total += int((fin - inicio).total_seconds() / 60)
-    return total
-
-
-def _calcular_total_lavados(conn, id_ingreso: int) -> int:
-    total = conn.execute(
-        text("""
-            SELECT COALESCE(SUM(valor_lavado), 0)
-            FROM lavados
-            WHERE id_ingreso = :id_ingreso
-        """),
-        {"id_ingreso": id_ingreso},
-    ).scalar()
-    return int(total or 0)
-
-
-def _calcular_total_lavados_convertidos(conn, id_ingreso: int) -> int:
-    total = conn.execute(
-        text("""
-            SELECT COALESCE(SUM(valor_lavado_snapshot), 0)
-            FROM operaciones_servicio
-            WHERE id_ingreso_generado = :id_ingreso
-              AND estado = 'CONVERTIDO_ESTADIA'
-        """),
-        {"id_ingreso": id_ingreso},
-    ).scalar()
-    return int(total or 0)
-
-
-def _calcular_monto_con_lavados(conn, id_ingreso: int, fecha_ingreso: datetime, fecha_salida: datetime):
-    minutos_totales = max(0, int(math.ceil((fecha_salida - fecha_ingreso).total_seconds() / 60.0)))
-    minutos_lavado = _calcular_minutos_lavado(conn, id_ingreso, fecha_salida)
-    minutos_cobrables = max(minutos_totales - minutos_lavado, 0)
-    total_lavados = _calcular_total_lavados(conn, id_ingreso)
-    total_lavados_convertidos = _calcular_total_lavados_convertidos(conn, id_ingreso)
-    total_lavados += total_lavados_convertidos
-
-    minutos, monto_estacionamiento, detalle = calcular_monto_desde_minutos(conn, minutos_cobrables, fecha_ingreso, fecha_salida)
-    monto_total = monto_estacionamiento + total_lavados
-    if minutos_lavado > 0:
-        detalle = f"{detalle} - descuenta {minutos_lavado} min de lavado"
-    if total_lavados > 0:
-        detalle = f"{detalle} - lavados ${total_lavados}"
-    if total_lavados_convertidos > 0:
-        detalle = f"{detalle} (incluye solo lavado convertido ${total_lavados_convertidos})"
-    return minutos, monto_total, detalle, monto_estacionamiento, total_lavados
-
-
 @router.post("/preview", response_model=SalidaPreviewOut)
 def preview_salida(payload: SalidaPreviewIn, _user=Depends(require_role("operador", "admin"))):
     with db_conn() as conn:
@@ -104,7 +40,7 @@ def preview_salida(payload: SalidaPreviewIn, _user=Depends(require_role("operado
 
         fecha_ing = ingreso["fecha_hora_ingreso"]
         ahora = datetime.now()  # hora servidor
-        minutos, monto, detalle, _monto_estacionamiento, _total_lavados = _calcular_monto_con_lavados(conn, int(ingreso["id_ingreso"]), fecha_ing, ahora)
+        minutos, monto, detalle, _monto_estacionamiento, _total_lavados = calcular_monto_con_lavados(conn, int(ingreso["id_ingreso"]), fecha_ing, ahora)
 
         return {
             "id_ingreso": int(ingreso["id_ingreso"]),
@@ -130,7 +66,7 @@ def confirmar_salida(payload: SalidaConfirmIn, user=Depends(require_role("operad
 
         fecha_ing = ingreso["fecha_hora_ingreso"]
         ahora = datetime.now().replace(microsecond=0)
-        minutos, monto, detalle, monto_estacionamiento, total_lavados = _calcular_monto_con_lavados(conn, int(ingreso["id_ingreso"]), fecha_ing, ahora)
+        minutos, monto, detalle, monto_estacionamiento, total_lavados = calcular_monto_con_lavados(conn, int(ingreso["id_ingreso"]), fecha_ing, ahora)
 
         # Persistir salida + tarifa final (ajusta nombres si tu tabla usa otro campo)
         update_result = conn.execute(

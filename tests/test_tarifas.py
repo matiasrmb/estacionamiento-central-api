@@ -2,6 +2,7 @@ import unittest
 import sys
 import types
 from datetime import datetime, timedelta
+from unittest.mock import Mock, patch
 
 try:
     import sqlalchemy  # noqa: F401
@@ -15,7 +16,11 @@ except ModuleNotFoundError:
     sys.modules["sqlalchemy"] = sqlalchemy_stub
     sys.modules["sqlalchemy.engine"] = sqlalchemy_engine_stub
 
-from app.services.tarifas import calcular_monto_mvp, calcular_montos_activos_con_lavados
+from app.services.tarifas import (
+    calcular_monto_con_lavados,
+    calcular_monto_mvp,
+    calcular_montos_activos_con_lavados,
+)
 
 
 class _FakeResult:
@@ -79,11 +84,12 @@ class _BatchResult(_FakeResult):
 
 
 class _BatchConnection:
-    def __init__(self, lavado_rows=None, lavado_totals=None, convertido_totals=None):
+    def __init__(self, lavado_rows=None, lavado_totals=None, convertido_totals=None, config=None):
         self.queries = []
         self.lavado_rows = lavado_rows or []
         self.lavado_totals = lavado_totals or []
         self.convertido_totals = convertido_totals or []
+        self.config = config or {"modo_cobro": "minuto", "tarifa_minima": "300", "valor_minuto": "25"}
 
     def execute(self, statement, params=None):
         sql = str(statement)
@@ -95,7 +101,7 @@ class _BatchConnection:
         if "SUM(valor_lavado_snapshot)" in sql:
             return _BatchResult(rows=self.convertido_totals)
         if "FROM configuracion" in sql:
-            return _BatchResult(rows=[("modo_cobro", "minuto"), ("tarifa_minima", "300"), ("valor_minuto", "25")])
+            return _BatchResult(rows=list(self.config.items()))
         if "FROM subida_precios" in sql:
             return _BatchResult()
         raise AssertionError(f"Unexpected query: {sql}")
@@ -143,6 +149,43 @@ class CalcularMontoMvpTests(unittest.TestCase):
         self.assertEqual(minutos, 10)
         self.assertEqual(monto, 525)
         self.assertEqual(detalle, "Modo minuto")
+
+    def test_minute_mode_charges_only_completed_minutes(self):
+        conn = _FakeConnection(
+            {"modo_cobro": "minuto", "tarifa_minima": "0", "valor_minuto": "25"}
+        )
+        ingreso = datetime(2026, 1, 1, 10, 0, 0)
+
+        for segundos, minutos_esperados, monto_esperado in [
+            (0, 0, 0),
+            (60, 1, 0),
+            (61, 1, 0),
+            (120, 2, 25),
+        ]:
+            with self.subTest(segundos=segundos):
+                minutos, monto, _ = calcular_monto_mvp(
+                    conn, ingreso, ingreso + timedelta(seconds=segundos)
+                )
+
+                self.assertEqual(minutos, minutos_esperados)
+                self.assertEqual(monto, monto_esperado)
+
+    def test_quote_with_washes_uses_only_completed_minutes(self):
+        ingreso = datetime(2026, 1, 1, 10, 0, 0)
+
+        for segundos, minutos_esperados in [(0, 0), (60, 1), (61, 1), (120, 2)]:
+            with self.subTest(segundos=segundos):
+                conn = Mock()
+                conn.execute.return_value.mappings.return_value.all.return_value = []
+                conn.execute.return_value.scalar.side_effect = [0, 0]
+
+                with patch("app.services.tarifas.calcular_monto_desde_minutos") as calcular:
+                    calcular.return_value = (minutos_esperados, 0, "Modo minuto")
+                    calcular_monto_con_lavados(
+                        conn, 1, ingreso, ingreso + timedelta(seconds=segundos)
+                    )
+
+                self.assertEqual(calcular.call_args.args[1], minutos_esperados)
 
     def test_matches_desktop_auto_mode(self):
         conn = _FakeConnection({"modo_cobro": "auto", "tarifa_minima": "300"})
@@ -205,6 +248,30 @@ class CalcularMontoMvpTests(unittest.TestCase):
         self.assertEqual(sum("FROM lavados" in query for query in conn.queries), 2)
         self.assertEqual(sum("FROM operaciones_servicio" in query for query in conn.queries), 1)
         self.assertEqual(sum("FROM configuracion" in query for query in conn.queries), 1)
+
+    def test_active_batch_quote_charges_only_completed_minutes(self):
+        calculado_a = datetime(2026, 7, 1, 11, 0, 0)
+        conn = _BatchConnection(
+            config={"modo_cobro": "minuto", "tarifa_minima": "0", "valor_minuto": "25"}
+        )
+        offsets = [0, 60, 61, 120]
+
+        cotizaciones = calcular_montos_activos_con_lavados(
+            conn,
+            [
+                {
+                    "id_ingreso": index,
+                    "fecha_hora_ingreso": calculado_a - timedelta(seconds=segundos),
+                }
+                for index, segundos in enumerate(offsets, start=1)
+            ],
+            calculado_a,
+        )
+
+        self.assertEqual(
+            {id_ingreso: cotizaciones[id_ingreso][:2] for id_ingreso in cotizaciones},
+            {1: (0, 0), 2: (1, 0), 3: (1, 0), 4: (2, 25)},
+        )
 
     def test_active_batch_quote_caps_active_wash_at_calculation_time(self):
         calculado_a = datetime(2026, 7, 1, 11, 0)

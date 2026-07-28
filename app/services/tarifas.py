@@ -79,6 +79,11 @@ def _time_as_hhmm(value: object) -> str:
     return str(value)[:5]
 
 
+def _calcular_minutos_completos(segundos: float) -> int:
+    """Convierte una duración a minutos completos, igual que Desktop."""
+    return max(0, int(segundos / 60))
+
+
 def _calcular_minutos_en_subida(
     fecha_hora_ingreso: datetime,
     fecha_hora_salida: datetime,
@@ -243,7 +248,7 @@ def calcular_monto_mvp(conn: Connection, fecha_ingreso: datetime, fecha_salida: 
     Retorna (minutos, monto, detalle) calculando minutos desde las fechas reales.
     """
     diff = (fecha_salida - fecha_ingreso).total_seconds()
-    minutos = max(0, int(math.ceil(diff / 60.0)))
+    minutos = _calcular_minutos_completos(diff)
     return calcular_monto_desde_minutos(conn, minutos, fecha_ingreso, fecha_salida)
 
 
@@ -298,7 +303,9 @@ def calcular_monto_con_lavados(
     fecha_salida: datetime,
 ) -> tuple[int, int, str, int, int]:
     """Calcula la cotización de estadía con los mismos ajustes que una salida."""
-    minutos_totales = max(0, int(math.ceil((fecha_salida - fecha_ingreso).total_seconds() / 60.0)))
+    minutos_totales = _calcular_minutos_completos(
+        (fecha_salida - fecha_ingreso).total_seconds()
+    )
     minutos_lavado = _calcular_minutos_lavado(conn, id_ingreso, fecha_salida)
     minutos_cobrables = max(minutos_totales - minutos_lavado, 0)
     total_lavados = _calcular_total_lavados(conn, id_ingreso)
@@ -376,9 +383,8 @@ def calcular_montos_activos_con_lavados(
     cotizaciones = {}
     for ingreso in ingresos:
         id_ingreso = int(ingreso["id_ingreso"])
-        minutos_totales = max(
-            0,
-            int(math.ceil((calculado_a - ingreso["fecha_hora_ingreso"]).total_seconds() / 60.0)),
+        minutos_totales = _calcular_minutos_completos(
+            (calculado_a - ingreso["fecha_hora_ingreso"]).total_seconds()
         )
         minutos_cobrables = max(minutos_totales - minutos_lavado[id_ingreso], 0)
         minutos, monto_estacionamiento, detalle = _calcular_monto_desde_minutos_con_contexto(

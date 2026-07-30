@@ -20,6 +20,8 @@ class SalidaPreviewOut(BaseModel):
     detalle: str
     noches_prepagadas: list[NochePrepagadaOut] = Field(default_factory=list)
     total_noches_prepagadas: int = 0
+    minutos_extra_antes_noche: int = 0
+    minutos_extra_despues_noche: int = 0
 
 
 class SalidaConfirmIn(BaseModel):
@@ -44,4 +46,6 @@ class SalidaConfirmOut(BaseModel):
     total_lavados: int
     noches_prepagadas: list[NochePrepagadaOut] = Field(default_factory=list)
     total_noches_prepagadas: int = 0
+    minutos_extra_antes_noche: int = 0
+    minutos_extra_despues_noche: int = 0
     print_jobs_creados: int

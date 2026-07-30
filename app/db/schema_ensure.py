@@ -340,8 +340,8 @@ def _ensure_noches_schema_on_connection(conn: Connection) -> None:
     """)
     for clave, valor in {
         "noches_activo": "0",
-        "noches_hora_inicio": "22:00",
-        "noches_hora_fin": "08:00",
+        "noches_hora_inicio": "19:30",
+        "noches_hora_fin": "09:30",
         "noches_valor": "0",
     }.items():
         conn.execute(text("""

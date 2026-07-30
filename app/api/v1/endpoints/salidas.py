@@ -5,7 +5,7 @@ from sqlalchemy import text
 from app.api.deps import require_role
 from app.db.database import db_conn
 from app.schemas.salidas import SalidaPreviewIn, SalidaPreviewOut, SalidaConfirmIn, SalidaConfirmOut
-from app.services.tarifas import calcular_monto_con_lavados
+from app.services.tarifas import calcular_minutos_fuera_modo_noche, calcular_monto_con_lavados
 from app.services.print_jobs import crear_print_job
 
 router = APIRouter(prefix="/salidas", tags=["salidas"])
@@ -55,8 +55,12 @@ def preview_salida(payload: SalidaPreviewIn, _user=Depends(require_role("operado
 
         fecha_ing = ingreso["fecha_hora_ingreso"]
         ahora = datetime.now()  # hora servidor
-        minutos, monto, detalle, _monto_estacionamiento, _total_lavados = calcular_monto_con_lavados(conn, int(ingreso["id_ingreso"]), fecha_ing, ahora)
         noches_prepagadas = _get_noches_prepagadas(conn, int(ingreso["id_ingreso"]))
+        modo_noche = bool(noches_prepagadas)
+        minutos, monto, detalle, _monto_estacionamiento, _total_lavados = calcular_monto_con_lavados(
+            conn, int(ingreso["id_ingreso"]), fecha_ing, ahora, modo_noche=modo_noche
+        )
+        minutos_noche = calcular_minutos_fuera_modo_noche(fecha_ing, ahora) if modo_noche else {"antes": 0, "despues": 0}
 
         return {
             "id_ingreso": int(ingreso["id_ingreso"]),
@@ -67,6 +71,8 @@ def preview_salida(payload: SalidaPreviewIn, _user=Depends(require_role("operado
             "detalle": detalle,
             "noches_prepagadas": noches_prepagadas,
             "total_noches_prepagadas": sum(cobro["monto_snapshot"] for cobro in noches_prepagadas),
+            "minutos_extra_antes_noche": minutos_noche["antes"],
+            "minutos_extra_despues_noche": minutos_noche["despues"],
         }
 
 
@@ -85,8 +91,12 @@ def confirmar_salida(payload: SalidaConfirmIn, user=Depends(require_role("operad
 
         fecha_ing = ingreso["fecha_hora_ingreso"]
         ahora = datetime.now().replace(microsecond=0)
-        minutos, monto, detalle, monto_estacionamiento, total_lavados = calcular_monto_con_lavados(conn, int(ingreso["id_ingreso"]), fecha_ing, ahora)
         noches_prepagadas = _get_noches_prepagadas(conn, int(ingreso["id_ingreso"]))
+        modo_noche = bool(noches_prepagadas)
+        minutos, monto, detalle, monto_estacionamiento, total_lavados = calcular_monto_con_lavados(
+            conn, int(ingreso["id_ingreso"]), fecha_ing, ahora, modo_noche=modo_noche
+        )
+        minutos_noche = calcular_minutos_fuera_modo_noche(fecha_ing, ahora) if modo_noche else {"antes": 0, "despues": 0}
 
         # Persistir salida + tarifa final (ajusta nombres si tu tabla usa otro campo)
         update_result = conn.execute(
@@ -160,5 +170,7 @@ def confirmar_salida(payload: SalidaConfirmIn, user=Depends(require_role("operad
             "total_lavados": int(total_lavados),
             "noches_prepagadas": noches_prepagadas,
             "total_noches_prepagadas": sum(cobro["monto_snapshot"] for cobro in noches_prepagadas),
+            "minutos_extra_antes_noche": minutos_noche["antes"],
+            "minutos_extra_despues_noche": minutos_noche["despues"],
             "print_jobs_creados": int(created),
         }

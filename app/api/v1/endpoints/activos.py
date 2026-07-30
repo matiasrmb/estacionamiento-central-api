@@ -24,7 +24,12 @@ def listar_activos(_user=Depends(require_role("operador", "admin"))):
                        i.fecha_hora_ingreso,
                        i.en_espera,
                        i.en_lavado,
-                       i.usuario
+                       i.usuario,
+                       EXISTS (
+                           SELECT 1 FROM cobros_noches cn
+                           WHERE cn.id_ingreso = i.id_ingreso
+                             AND cn.estado = 'PAGADO'
+                       ) AS modo_noche
                 FROM ingresos i
                 JOIN vehiculos v ON v.id_vehiculo = i.id_vehiculo
                 WHERE i.fecha_hora_salida IS NULL

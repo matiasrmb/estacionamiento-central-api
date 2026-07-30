@@ -130,8 +130,8 @@ class IngresosAtomicCreationTests(unittest.TestCase):
             )
 
         self.assertEqual(result["cobro_noche"]["monto_snapshot"], 5000)
-        self.assertEqual(result["cobro_noche"]["hora_inicio_snapshot"], "22:00")
-        self.assertEqual(result["cobro_noche"]["hora_fin_snapshot"], "08:00")
+        self.assertEqual(result["cobro_noche"]["hora_inicio_snapshot"], "19:30")
+        self.assertEqual(result["cobro_noche"]["hora_fin_snapshot"], "09:30")
         self.assertEqual(conn.commit_count, 1)
         self.assertTrue(any("INSERT INTO cobros_noches" in sql for sql, _ in conn.calls))
         self.assertTrue(any("INSERT INTO print_jobs" in sql for sql, _ in conn.calls))
@@ -172,8 +172,8 @@ class IngresosAtomicCreationTests(unittest.TestCase):
                 "abc123", datetime(2026, 1, 1, 12, 0), "tester", lambda *_: {}
             )
 
-        self.assertEqual(result["cobro_noche"]["hora_inicio_snapshot"], "22:00")
-        self.assertEqual(result["cobro_noche"]["hora_fin_snapshot"], "08:00")
+        self.assertEqual(result["cobro_noche"]["hora_inicio_snapshot"], "19:30")
+        self.assertEqual(result["cobro_noche"]["hora_fin_snapshot"], "09:30")
 
     def test_noches_ingreso_rejects_inactive_or_zero_price(self):
         for config_rows in (

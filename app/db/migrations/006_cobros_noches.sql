@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS cobros_noches (
 
 INSERT INTO configuracion (clave, valor) VALUES
     ('noches_activo', '0'),
-    ('noches_hora_inicio', '22:00'),
-    ('noches_hora_fin', '08:00'),
+('noches_hora_inicio', '19:30'),
+('noches_hora_fin', '09:30'),
     ('noches_valor', '0')
 ON DUPLICATE KEY UPDATE clave = VALUES(clave);

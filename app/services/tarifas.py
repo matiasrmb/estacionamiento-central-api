@@ -84,6 +84,66 @@ def _calcular_minutos_completos(segundos: float) -> int:
     return max(0, int(segundos / 60))
 
 
+def calcular_minutos_fuera_modo_noche(
+    fecha_hora_ingreso: datetime,
+    fecha_hora_salida: datetime,
+) -> dict[str, int]:
+    """Calcula extras fuera de la gracia fija del modo Noche: 19:00 a 10:00."""
+    if fecha_hora_salida <= fecha_hora_ingreso:
+        return {"antes": 0, "despues": 0, "total": 0}
+    fecha_noche = fecha_hora_ingreso.date()
+    if fecha_hora_ingreso.time() <= datetime.strptime("10:00", "%H:%M").time():
+        fecha_noche -= timedelta(days=1)
+    inicio_gracia = datetime.combine(fecha_noche, datetime.strptime("19:00", "%H:%M").time())
+    fin_gracia = inicio_gracia + timedelta(hours=15)
+    antes = _calcular_minutos_completos((min(inicio_gracia, fecha_hora_salida) - fecha_hora_ingreso).total_seconds())
+    despues = _calcular_minutos_completos((fecha_hora_salida - max(fin_gracia, fecha_hora_ingreso)).total_seconds())
+    return {"antes": antes, "despues": despues, "total": antes + despues}
+
+
+def calcular_intervalos_fuera_modo_noche(
+    fecha_hora_ingreso: datetime,
+    fecha_hora_salida: datetime,
+) -> list[tuple[datetime, datetime]]:
+    """Retorna los tramos cobrables fuera de la gracia fija 19:00-10:00."""
+    if fecha_hora_salida <= fecha_hora_ingreso:
+        return []
+
+    fecha_noche = fecha_hora_ingreso.date()
+    if fecha_hora_ingreso.time() <= datetime.strptime("10:00", "%H:%M").time():
+        fecha_noche -= timedelta(days=1)
+    inicio_gracia = datetime.combine(fecha_noche, datetime.strptime("19:00", "%H:%M").time())
+    fin_gracia = inicio_gracia + timedelta(hours=15)
+    intervalos = []
+    if fecha_hora_ingreso < inicio_gracia:
+        intervalos.append((fecha_hora_ingreso, min(inicio_gracia, fecha_hora_salida)))
+    if fecha_hora_salida > fin_gracia:
+        intervalos.append((max(fin_gracia, fecha_hora_ingreso), fecha_hora_salida))
+    return [(inicio, fin) for inicio, fin in intervalos if fin > inicio]
+
+
+def _descontar_intervalos(
+    intervalos: list[tuple[datetime, datetime]],
+    descuentos: list[tuple[datetime, datetime]],
+) -> list[tuple[datetime, datetime]]:
+    """Sustrae lavados sólo de los tramos cobrables."""
+    restantes = list(intervalos)
+    for descuento_inicio, descuento_fin in descuentos:
+        nuevos = []
+        for inicio, fin in restantes:
+            solapamiento_inicio = max(inicio, descuento_inicio)
+            solapamiento_fin = min(fin, descuento_fin)
+            if solapamiento_inicio >= solapamiento_fin:
+                nuevos.append((inicio, fin))
+                continue
+            if inicio < solapamiento_inicio:
+                nuevos.append((inicio, solapamiento_inicio))
+            if solapamiento_fin < fin:
+                nuevos.append((solapamiento_fin, fin))
+        restantes = nuevos
+    return restantes
+
+
 def _calcular_minutos_en_subida(
     fecha_hora_ingreso: datetime,
     fecha_hora_salida: datetime,
@@ -243,6 +303,31 @@ def calcular_monto_desde_minutos(
     )
 
 
+def _calcular_monto_por_intervalos_con_contexto(
+    intervalos: list[tuple[datetime, datetime]],
+    config: dict[str, str],
+    subida: dict[str, object] | None,
+    tramos: list[dict[str, int]],
+) -> tuple[int, int, str]:
+    """Suma tarifas de tramos cobrables sin exponer recargos al tiempo de gracia."""
+    minutos = 0
+    monto = 0
+    detalles = []
+    for inicio, fin in intervalos:
+        minutos_intervalo, monto_intervalo, detalle = _calcular_monto_desde_minutos_con_contexto(
+            _calcular_minutos_completos((fin - inicio).total_seconds()),
+            inicio,
+            fin,
+            config,
+            subida,
+            tramos,
+        )
+        minutos += minutos_intervalo
+        monto += monto_intervalo
+        detalles.append(detalle)
+    return minutos, monto, detalles[0] if len(set(detalles)) == 1 else "Tarifa por intervalos"
+
+
 def calcular_monto_mvp(conn: Connection, fecha_ingreso: datetime, fecha_salida: datetime) -> tuple[int, int, str]:
     """
     Retorna (minutos, monto, detalle) calculando minutos desde las fechas reales.
@@ -253,6 +338,15 @@ def calcular_monto_mvp(conn: Connection, fecha_ingreso: datetime, fecha_salida: 
 
 
 def _calcular_minutos_lavado(conn: Connection, id_ingreso: int, fecha_salida: datetime) -> int:
+    return sum(
+        _calcular_minutos_completos((fin - inicio).total_seconds())
+        for inicio, fin in _obtener_intervalos_lavado(conn, id_ingreso, fecha_salida)
+    )
+
+
+def _obtener_intervalos_lavado(
+    conn: Connection, id_ingreso: int, fecha_salida: datetime
+) -> list[tuple[datetime, datetime]]:
     rows = conn.execute(
         text("""
             SELECT fecha_hora_inicio, fecha_hora_fin
@@ -262,13 +356,13 @@ def _calcular_minutos_lavado(conn: Connection, id_ingreso: int, fecha_salida: da
         {"id_ingreso": id_ingreso},
     ).mappings().all()
 
-    total = 0
+    intervalos = []
     for row in rows:
         inicio = row["fecha_hora_inicio"]
-        fin = row["fecha_hora_fin"] or fecha_salida
+        fin = min(row["fecha_hora_fin"] or fecha_salida, fecha_salida)
         if fin > inicio:
-            total += int((fin - inicio).total_seconds() / 60)
-    return total
+            intervalos.append((inicio, fin))
+    return intervalos
 
 
 def _calcular_total_lavados(conn: Connection, id_ingreso: int) -> int:
@@ -301,24 +395,49 @@ def calcular_monto_con_lavados(
     id_ingreso: int,
     fecha_ingreso: datetime,
     fecha_salida: datetime,
+    modo_noche: bool = False,
 ) -> tuple[int, int, str, int, int]:
     """Calcula la cotización de estadía con los mismos ajustes que una salida."""
     minutos_totales = _calcular_minutos_completos(
         (fecha_salida - fecha_ingreso).total_seconds()
     )
-    minutos_lavado = _calcular_minutos_lavado(conn, id_ingreso, fecha_salida)
-    minutos_cobrables = max(minutos_totales - minutos_lavado, 0)
+    minutos_noche = calcular_minutos_fuera_modo_noche(fecha_ingreso, fecha_salida) if modo_noche else None
+    intervalos_cobrables = []
+    if modo_noche:
+        intervalos_cobrables = _descontar_intervalos(
+            calcular_intervalos_fuera_modo_noche(fecha_ingreso, fecha_salida),
+            _obtener_intervalos_lavado(conn, id_ingreso, fecha_salida),
+        )
+        minutos_cobrables = sum(
+            _calcular_minutos_completos((fin - inicio).total_seconds())
+            for inicio, fin in intervalos_cobrables
+        )
+    else:
+        minutos_lavado = _calcular_minutos_lavado(conn, id_ingreso, fecha_salida)
+        minutos_cobrables = max(minutos_totales - minutos_lavado, 0)
     total_lavados = _calcular_total_lavados(conn, id_ingreso)
     total_lavados_convertidos = _calcular_total_lavados_convertidos(conn, id_ingreso)
     total_lavados += total_lavados_convertidos
 
-    minutos, monto_estacionamiento, detalle = calcular_monto_desde_minutos(
-        conn,
-        minutos_cobrables,
-        fecha_ingreso,
-        fecha_salida,
-    )
+    if modo_noche and minutos_cobrables == 0:
+        minutos, monto_estacionamiento, detalle = 0, 0, "Modo Noche sin extra de estacionamiento"
+    elif modo_noche:
+        config, subida, tramos = _cargar_contexto_tarifas(conn)
+        minutos, monto_estacionamiento, detalle = _calcular_monto_por_intervalos_con_contexto(
+            intervalos_cobrables, config, subida, tramos
+        )
+    else:
+        minutos, monto_estacionamiento, detalle = calcular_monto_desde_minutos(
+            conn,
+            minutos_cobrables,
+            fecha_ingreso,
+            fecha_salida,
+        )
+    if minutos_noche:
+        detalle = f"{detalle} - extra modo Noche: {minutos_noche['total']} min"
     monto_total = monto_estacionamiento + total_lavados
+    if modo_noche:
+        minutos_lavado = minutos_noche["total"] - minutos_cobrables
     if minutos_lavado > 0:
         detalle = f"{detalle} - descuenta {minutos_lavado} min de lavado"
     if total_lavados > 0:
@@ -366,12 +485,12 @@ def calcular_montos_activos_con_lavados(
         {"ids": ids},
     ).mappings().all()
 
-    minutos_lavado = {id_ingreso: 0 for id_ingreso in ids}
+    intervalos_lavado = {id_ingreso: [] for id_ingreso in ids}
     for lavado in lavado_rows:
         inicio = lavado["fecha_hora_inicio"]
         fin = min(lavado["fecha_hora_fin"] or calculado_a, calculado_a)
         if fin > inicio:
-            minutos_lavado[int(lavado["id_ingreso"])] += int((fin - inicio).total_seconds() / 60)
+            intervalos_lavado[int(lavado["id_ingreso"])].append((inicio, fin))
 
     total_lavados = {int(row["id_ingreso"]): int(row["total"] or 0) for row in lavado_totales}
     total_convertidos = {
@@ -386,18 +505,50 @@ def calcular_montos_activos_con_lavados(
         minutos_totales = _calcular_minutos_completos(
             (calculado_a - ingreso["fecha_hora_ingreso"]).total_seconds()
         )
-        minutos_cobrables = max(minutos_totales - minutos_lavado[id_ingreso], 0)
-        minutos, monto_estacionamiento, detalle = _calcular_monto_desde_minutos_con_contexto(
-            minutos_cobrables,
-            ingreso["fecha_hora_ingreso"],
-            calculado_a,
-            config,
-            subida,
-            tramos,
-        )
+        minutos_noche = calcular_minutos_fuera_modo_noche(ingreso["fecha_hora_ingreso"], calculado_a) if ingreso.get("modo_noche") else None
+        intervalos_cobrables = []
+        if minutos_noche:
+            intervalos_cobrables = _descontar_intervalos(
+                calcular_intervalos_fuera_modo_noche(ingreso["fecha_hora_ingreso"], calculado_a),
+                intervalos_lavado[id_ingreso],
+            )
+            minutos_cobrables = sum(
+                _calcular_minutos_completos((fin - inicio).total_seconds())
+                for inicio, fin in intervalos_cobrables
+            )
+        else:
+            minutos_cobrables = max(
+                minutos_totales - sum(
+                    _calcular_minutos_completos((fin - inicio).total_seconds())
+                    for inicio, fin in intervalos_lavado[id_ingreso]
+                ),
+                0,
+            )
+        if minutos_noche and minutos_cobrables == 0:
+            minutos, monto_estacionamiento, detalle = 0, 0, "Modo Noche sin extra de estacionamiento"
+        elif minutos_noche:
+            minutos, monto_estacionamiento, detalle = _calcular_monto_por_intervalos_con_contexto(
+                intervalos_cobrables, config, subida, tramos
+            )
+        else:
+            minutos, monto_estacionamiento, detalle = _calcular_monto_desde_minutos_con_contexto(
+                minutos_cobrables,
+                ingreso["fecha_hora_ingreso"],
+                calculado_a,
+                config,
+                subida,
+                tramos,
+            )
+        if minutos_noche:
+            detalle = f"{detalle} - extra modo Noche: {minutos_noche['total']} min"
         total = total_lavados.get(id_ingreso, 0) + total_convertidos.get(id_ingreso, 0)
-        if minutos_lavado[id_ingreso] > 0:
-            detalle = f"{detalle} - descuenta {minutos_lavado[id_ingreso]} min de lavado"
+        minutos_lavado = (
+            minutos_noche["total"] - minutos_cobrables
+            if minutos_noche
+            else minutos_totales - minutos_cobrables
+        )
+        if minutos_lavado > 0:
+            detalle = f"{detalle} - descuenta {minutos_lavado} min de lavado"
         if total > 0:
             detalle = f"{detalle} - lavados ${total}"
         if total_convertidos.get(id_ingreso, 0) > 0:

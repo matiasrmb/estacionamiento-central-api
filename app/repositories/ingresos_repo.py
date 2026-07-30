@@ -128,8 +128,8 @@ def _create_noches_charge(conn, id_ingreso: int, fecha_hora_pago, usuario: str) 
 
     cobro_noche = {
         "monto_snapshot": monto,
-        "hora_inicio_snapshot": "22:00",
-        "hora_fin_snapshot": "08:00",
+        "hora_inicio_snapshot": "19:30",
+        "hora_fin_snapshot": "09:30",
         "fecha_hora_pago": fecha_hora_pago.isoformat(timespec="seconds"),
     }
     conn.execute(text("""

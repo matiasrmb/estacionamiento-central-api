@@ -82,10 +82,10 @@ def _build_pending_summary(conn, lock_expenses: bool = False) -> Dict[str, Any]:
 
     banos = conn.execute(
         text("""
-            SELECT id_uso_bano, fecha_hora, monto
+            SELECT id AS id_uso_bano, fecha_hora, monto
             FROM usos_bano
             WHERE id_cierre IS NULL
-            ORDER BY fecha_hora ASC, id_uso_bano ASC
+            ORDER BY fecha_hora ASC, id ASC
         """ + (" FOR UPDATE" if lock_expenses else "")),
     ).mappings().all()
 
@@ -300,7 +300,7 @@ def _link_bathroom_uses_to_cierre(conn, bathroom_use_ids: List[int], id_cierre: 
             UPDATE usos_bano
             SET id_cierre = :id_cierre
             WHERE id_cierre IS NULL
-              AND id_uso_bano IN ({', '.join(placeholders)})
+              AND id IN ({', '.join(placeholders)})
         """),
         params,
     )

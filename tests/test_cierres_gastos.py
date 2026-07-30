@@ -98,6 +98,8 @@ class CierresGastosTests(unittest.TestCase):
         self.assertIn("WHERE id_cierre IS NULL", expense_query)
         self.assertIn("FOR UPDATE", expense_query)
         bathroom_query = conn.executed[3][0]
+        self.assertIn("SELECT id AS id_uso_bano", bathroom_query)
+        self.assertIn("ORDER BY fecha_hora ASC, id ASC", bathroom_query)
         self.assertIn("WHERE id_cierre IS NULL", bathroom_query)
         self.assertIn("FOR UPDATE", bathroom_query)
         self.assertNotIn("MAX(fecha_cierre)", bathroom_query)
@@ -145,7 +147,7 @@ class CierresGastosTests(unittest.TestCase):
         self.assertEqual(expenses_update[1], {"id_cierre": 31, "expense_id_0": 5, "expense_id_1": 8})
         bathrooms_update = next((entry for entry in conn.executed if "UPDATE usos_bano" in entry[0]), None)
         self.assertIsNotNone(bathrooms_update)
-        self.assertIn("id_uso_bano IN (:bathroom_use_id_0, :bathroom_use_id_1)", bathrooms_update[0])
+        self.assertIn("id IN (:bathroom_use_id_0, :bathroom_use_id_1)", bathrooms_update[0])
         self.assertEqual(
             bathrooms_update[1],
             {"id_cierre": 31, "bathroom_use_id_0": 3, "bathroom_use_id_1": 4},

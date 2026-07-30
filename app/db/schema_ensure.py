@@ -338,6 +338,11 @@ def _ensure_noches_schema_on_connection(conn: Connection) -> None:
                 FOREIGN KEY (id_cierre) REFERENCES cierres_diarios(id_cierre)
         )
     """)
+    _execute_many_schema(conn, [
+        "ALTER TABLE cobros_noches ADD COLUMN estado_operativo ENUM('PENDIENTE', 'RETIRADO', 'CONVERTIDO') NOT NULL DEFAULT 'PENDIENTE'",
+        "ALTER TABLE cobros_noches ADD COLUMN fecha_hora_resolucion DATETIME NULL",
+        "ALTER TABLE cobros_noches ADD INDEX idx_cobros_noches_estado_operativo (estado_operativo, id_ingreso)",
+    ])
     for clave, valor in {
         "noches_activo": "0",
         "noches_hora_inicio": "19:30",

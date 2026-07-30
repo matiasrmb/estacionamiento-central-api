@@ -25,11 +25,12 @@ def listar_activos(_user=Depends(require_role("operador", "admin"))):
                        i.en_espera,
                        i.en_lavado,
                        i.usuario,
-                       EXISTS (
+                        EXISTS (
                            SELECT 1 FROM cobros_noches cn
                            WHERE cn.id_ingreso = i.id_ingreso
-                             AND cn.estado = 'PAGADO'
-                       ) AS modo_noche
+                              AND cn.estado = 'PAGADO'
+                              AND cn.estado_operativo = 'PENDIENTE'
+                        ) AS modo_noche
                 FROM ingresos i
                 JOIN vehiculos v ON v.id_vehiculo = i.id_vehiculo
                 WHERE i.fecha_hora_salida IS NULL
@@ -38,12 +39,12 @@ def listar_activos(_user=Depends(require_role("operador", "admin"))):
         ).mappings().all()
 
         calculado_a = datetime.now().replace(microsecond=0)
-        cotizables = [dict(row) for row in rows if int(row.get("en_espera") or 0) != 1]
+        cotizables = [dict(row) for row in rows if int(row.get("en_espera") or 0) != 1 and not int(row.get("modo_noche") or 0)]
         cotizaciones = calcular_montos_activos_con_lavados(conn, cotizables, calculado_a)
         items = []
         for row in rows:
             item = dict(row)
-            if int(item.get("en_espera") or 0) == 1:
+            if int(item.get("en_espera") or 0) == 1 or int(item.get("modo_noche") or 0):
                 item.update({"monto_acumulado": 0, "minutos_cobrables": 0})
             else:
                 minutos, monto, _detalle, _monto_estacionamiento, _total_lavados = cotizaciones[int(item["id_ingreso"])]

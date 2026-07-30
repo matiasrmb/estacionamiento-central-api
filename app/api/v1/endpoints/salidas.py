@@ -1,11 +1,11 @@
-from datetime import datetime
+from datetime import datetime, time, timedelta
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import text
 
 from app.api.deps import require_role
 from app.db.database import db_conn
 from app.schemas.salidas import SalidaPreviewIn, SalidaPreviewOut, SalidaConfirmIn, SalidaConfirmOut
-from app.services.tarifas import calcular_minutos_fuera_modo_noche, calcular_monto_con_lavados
+from app.services.tarifas import calcular_monto_con_lavados
 from app.services.print_jobs import crear_print_job
 
 router = APIRouter(prefix="/salidas", tags=["salidas"])
@@ -40,6 +40,32 @@ def _get_noches_prepagadas(conn, id_ingreso: int):
     } for row in rows]
 
 
+def _get_noche_pendiente(conn, id_ingreso: int, lock: bool = False):
+    lock_clause = " FOR UPDATE" if lock else ""
+    return conn.execute(text("""
+        SELECT id_cobro_noche, fecha_hora_pago
+        FROM cobros_noches
+        WHERE id_ingreso = :id_ingreso
+          AND estado = 'PAGADO'
+          AND estado_operativo = 'PENDIENTE'
+        ORDER BY id_cobro_noche DESC
+        LIMIT 1
+    """ + lock_clause), {"id_ingreso": id_ingreso}).mappings().first()
+
+
+def _inicio_normal_desde_diez(fecha_hora_pago: datetime) -> datetime:
+    """Ancla el ingreso normal al fin de la noche cubierta por el pago."""
+    fecha = fecha_hora_pago.date()
+    if fecha_hora_pago.time() > time(10):
+        fecha += timedelta(days=1)
+    return datetime.combine(fecha, time(10))
+
+
+def _require_no_noche_pendiente(conn, id_ingreso: int) -> None:
+    if _get_noche_pendiente(conn, id_ingreso):
+        raise HTTPException(status_code=409, detail="NOCHE_PENDIENTE_DE_REVISION")
+
+
 @router.post("/preview", response_model=SalidaPreviewOut)
 def preview_salida(payload: SalidaPreviewIn, _user=Depends(require_role("operador", "admin"))):
     with db_conn() as conn:
@@ -53,14 +79,13 @@ def preview_salida(payload: SalidaPreviewIn, _user=Depends(require_role("operado
         if int(ingreso.get("en_lavado") or 0) == 1:
             raise HTTPException(status_code=409, detail="VEHICULO_EN_LAVADO")
 
+        _require_no_noche_pendiente(conn, int(ingreso["id_ingreso"]))
         fecha_ing = ingreso["fecha_hora_ingreso"]
         ahora = datetime.now()  # hora servidor
         noches_prepagadas = _get_noches_prepagadas(conn, int(ingreso["id_ingreso"]))
-        modo_noche = bool(noches_prepagadas)
         minutos, monto, detalle, _monto_estacionamiento, _total_lavados = calcular_monto_con_lavados(
-            conn, int(ingreso["id_ingreso"]), fecha_ing, ahora, modo_noche=modo_noche
+            conn, int(ingreso["id_ingreso"]), fecha_ing, ahora
         )
-        minutos_noche = calcular_minutos_fuera_modo_noche(fecha_ing, ahora) if modo_noche else {"antes": 0, "despues": 0}
 
         return {
             "id_ingreso": int(ingreso["id_ingreso"]),
@@ -71,8 +96,8 @@ def preview_salida(payload: SalidaPreviewIn, _user=Depends(require_role("operado
             "detalle": detalle,
             "noches_prepagadas": noches_prepagadas,
             "total_noches_prepagadas": sum(cobro["monto_snapshot"] for cobro in noches_prepagadas),
-            "minutos_extra_antes_noche": minutos_noche["antes"],
-            "minutos_extra_despues_noche": minutos_noche["despues"],
+            "minutos_extra_antes_noche": 0,
+            "minutos_extra_despues_noche": 0,
         }
 
 
@@ -89,14 +114,13 @@ def confirmar_salida(payload: SalidaConfirmIn, user=Depends(require_role("operad
         if int(ingreso.get("en_lavado") or 0) == 1:
             raise HTTPException(status_code=409, detail="VEHICULO_EN_LAVADO")
 
+        _require_no_noche_pendiente(conn, int(ingreso["id_ingreso"]))
         fecha_ing = ingreso["fecha_hora_ingreso"]
         ahora = datetime.now().replace(microsecond=0)
         noches_prepagadas = _get_noches_prepagadas(conn, int(ingreso["id_ingreso"]))
-        modo_noche = bool(noches_prepagadas)
         minutos, monto, detalle, monto_estacionamiento, total_lavados = calcular_monto_con_lavados(
-            conn, int(ingreso["id_ingreso"]), fecha_ing, ahora, modo_noche=modo_noche
+            conn, int(ingreso["id_ingreso"]), fecha_ing, ahora
         )
-        minutos_noche = calcular_minutos_fuera_modo_noche(fecha_ing, ahora) if modo_noche else {"antes": 0, "despues": 0}
 
         # Persistir salida + tarifa final (ajusta nombres si tu tabla usa otro campo)
         update_result = conn.execute(
@@ -170,7 +194,58 @@ def confirmar_salida(payload: SalidaConfirmIn, user=Depends(require_role("operad
             "total_lavados": int(total_lavados),
             "noches_prepagadas": noches_prepagadas,
             "total_noches_prepagadas": sum(cobro["monto_snapshot"] for cobro in noches_prepagadas),
-            "minutos_extra_antes_noche": minutos_noche["antes"],
-            "minutos_extra_despues_noche": minutos_noche["despues"],
+            "minutos_extra_antes_noche": 0,
+            "minutos_extra_despues_noche": 0,
             "print_jobs_creados": int(created),
         }
+
+
+@router.post("/{id_ingreso}/noche/finalizar")
+def finalizar_noche(id_ingreso: int, user=Depends(require_role("operador", "admin"))):
+    ahora = datetime.now().replace(microsecond=0)
+    with db_conn() as conn:
+        ingreso = _get_ingreso(conn, id_ingreso)
+        if not ingreso or ingreso["fecha_hora_salida"] is not None:
+            raise HTTPException(status_code=404, detail="INGRESO_ACTIVO_NOT_FOUND")
+        noche = _get_noche_pendiente(conn, id_ingreso, lock=True)
+        if not noche:
+            raise HTTPException(status_code=409, detail="NOCHE_NO_PENDIENTE")
+        conn.execute(text("""
+            UPDATE cobros_noches SET estado_operativo = 'RETIRADO', fecha_hora_resolucion = :ahora
+            WHERE id_cobro_noche = :id_cobro_noche AND estado_operativo = 'PENDIENTE'
+        """), {"ahora": ahora, "id_cobro_noche": noche["id_cobro_noche"]})
+        updated = conn.execute(text("""
+            UPDATE ingresos SET fecha_hora_salida = :ahora, tarifa_aplicada = 0, usuario = :usuario
+            WHERE id_ingreso = :id_ingreso AND fecha_hora_salida IS NULL
+        """), {"ahora": ahora, "usuario": user.get("sub") or "", "id_ingreso": id_ingreso})
+        if updated.rowcount != 1:
+            conn.rollback()
+            raise HTTPException(status_code=409, detail="INGRESO_YA_SALIO")
+        conn.commit()
+    return {"id_ingreso": id_ingreso, "estado": "RETIRADO", "monto_adicional": 0}
+
+
+@router.post("/{id_ingreso}/noche/convertir")
+def convertir_noche_a_ingreso_normal(id_ingreso: int, user=Depends(require_role("operador", "admin"))):
+    ahora = datetime.now().replace(microsecond=0)
+    with db_conn() as conn:
+        ingreso = _get_ingreso(conn, id_ingreso)
+        if not ingreso or ingreso["fecha_hora_salida"] is not None:
+            raise HTTPException(status_code=404, detail="INGRESO_ACTIVO_NOT_FOUND")
+        noche = _get_noche_pendiente(conn, id_ingreso, lock=True)
+        if not noche:
+            raise HTTPException(status_code=409, detail="NOCHE_NO_PENDIENTE")
+        inicio_normal = _inicio_normal_desde_diez(noche["fecha_hora_pago"])
+        conn.execute(text("""
+            UPDATE cobros_noches SET estado_operativo = 'CONVERTIDO', fecha_hora_resolucion = :ahora
+            WHERE id_cobro_noche = :id_cobro_noche AND estado_operativo = 'PENDIENTE'
+        """), {"ahora": ahora, "id_cobro_noche": noche["id_cobro_noche"]})
+        updated = conn.execute(text("""
+            UPDATE ingresos SET fecha_hora_ingreso = :inicio_normal, usuario = :usuario
+            WHERE id_ingreso = :id_ingreso AND fecha_hora_salida IS NULL
+        """), {"inicio_normal": inicio_normal, "usuario": user.get("sub") or "", "id_ingreso": id_ingreso})
+        if updated.rowcount != 1:
+            conn.rollback()
+            raise HTTPException(status_code=409, detail="INGRESO_YA_SALIO")
+        conn.commit()
+    return {"id_ingreso": id_ingreso, "estado": "CONVERTIDO", "fecha_hora_ingreso": inicio_normal.isoformat()}

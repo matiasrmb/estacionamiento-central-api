@@ -11,10 +11,13 @@ CREATE TABLE IF NOT EXISTS cobros_noches (
     fecha_hora_pago DATETIME NOT NULL,
     usuario VARCHAR(50) NOT NULL,
     estado ENUM('PAGADO', 'ANULADO') NOT NULL DEFAULT 'PAGADO',
+    estado_operativo ENUM('PENDIENTE', 'RETIRADO', 'CONVERTIDO') NOT NULL DEFAULT 'PENDIENTE',
+    fecha_hora_resolucion DATETIME NULL,
     id_cierre INT NULL,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_cobros_noches_ingreso (id_ingreso),
     INDEX idx_cobros_noches_pendiente_cierre (id_cierre, fecha_hora_pago),
+    INDEX idx_cobros_noches_estado_operativo (estado_operativo, id_ingreso),
     CONSTRAINT fk_cobros_noches_ingreso FOREIGN KEY (id_ingreso) REFERENCES ingresos(id_ingreso),
     CONSTRAINT fk_cobros_noches_cierre FOREIGN KEY (id_cierre) REFERENCES cierres_diarios(id_cierre)
 );

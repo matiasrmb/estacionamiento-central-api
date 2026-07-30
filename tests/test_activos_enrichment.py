@@ -79,6 +79,27 @@ class ActivosEnrichmentTests(unittest.TestCase):
         calcular.assert_called_once()
         self.assertEqual(calcular.call_args.args[:2], (conn, []))
 
+    def test_pending_night_is_not_quoted_as_normal_parking_after_ten(self):
+        conn = _Connection([{
+            "id_ingreso": 9,
+            "patente": "NIGHT01",
+            "fecha_hora_ingreso": datetime(2026, 7, 1, 19, 30),
+            "en_espera": 0,
+            "en_lavado": 0,
+            "usuario": "tester",
+            "modo_noche": 1,
+        }])
+
+        with patch.object(activos, "db_conn", return_value=_DbConn(conn)), \
+             patch.object(activos, "calcular_montos_activos_con_lavados", return_value={}) as calcular:
+            result = activos.listar_activos()
+
+        item = result["items"][0]
+        self.assertEqual(item["monto_acumulado"], 0)
+        self.assertEqual(item["minutos_cobrables"], 0)
+        calcular.assert_called_once()
+        self.assertEqual(calcular.call_args.args[:2], (conn, []))
+
 
 if __name__ == "__main__":
     unittest.main()

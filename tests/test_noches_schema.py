@@ -16,6 +16,7 @@ class NochesSchemaTests(unittest.TestCase):
         self.assertIn("hora_fin_snapshot TIME NOT NULL", migration)
         self.assertIn("fecha_hora_pago DATETIME NOT NULL", migration)
         self.assertIn("id_cierre INT NULL", migration)
+        self.assertIn("estado_operativo ENUM('PENDIENTE', 'RETIRADO', 'CONVERTIDO')", migration)
         self.assertIn("'noches_activo', '0'", migration)
 
     def test_runtime_ensure_creates_charge_table_and_default_configuration(self):
@@ -33,6 +34,8 @@ class NochesSchemaTests(unittest.TestCase):
         params = [params for _, params in conn.statements if params]
         self.assertIn("CREATE TABLE IF NOT EXISTS cobros_noches", sql)
         self.assertIn("estado ENUM('PAGADO', 'ANULADO')", sql)
+        self.assertIn("estado_operativo ENUM('PENDIENTE', 'RETIRADO', 'CONVERTIDO')", sql)
+        self.assertIn("idx_cobros_noches_estado_operativo", sql)
         self.assertIn("idx_cobros_noches_pendiente_cierre", sql)
         self.assertEqual(
             {item["clave"] for item in params},

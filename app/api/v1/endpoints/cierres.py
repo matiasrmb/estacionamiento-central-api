@@ -8,17 +8,17 @@ router = APIRouter(prefix="/cierres", tags=["cierres"])
 
 
 @router.get("/pendiente")
-def obtener_cierre_pendiente(_user=Depends(require_role("admin"))):
+def obtener_cierre_pendiente(_user=Depends(require_role("operador", "admin"))):
     return get_cierre_pendiente()
 
 
 @router.get("")
-def listar_cierres(_user=Depends(require_role("admin"))):
+def listar_cierres(_user=Depends(require_role("operador", "admin"))):
     return {"items": list_cierres()}
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
-def crear_cierre(user=Depends(require_role("admin"))):
+def crear_cierre(user=Depends(require_role("operador", "admin"))):
     try:
         return realizar_cierre(user.get("sub") or "")
     except LookupError:

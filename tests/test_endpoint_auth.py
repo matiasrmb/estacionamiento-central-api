@@ -8,6 +8,7 @@ def _install_optional_dependency_stubs():
     if "sqlalchemy" not in sys.modules:
         sqlalchemy_stub = types.ModuleType("sqlalchemy")
         sqlalchemy_stub.text = lambda value: value
+        sqlalchemy_stub.bindparam = lambda value, *args, **kwargs: value
         sqlalchemy_stub.create_engine = lambda *args, **kwargs: object()
 
         sqlalchemy_engine_stub = types.ModuleType("sqlalchemy.engine")
@@ -19,7 +20,11 @@ def _install_optional_dependency_stubs():
         class IntegrityError(Exception):
             pass
 
+        class DBAPIError(Exception):
+            pass
+
         sqlalchemy_exc_stub.IntegrityError = IntegrityError
+        sqlalchemy_exc_stub.DBAPIError = DBAPIError
 
         sys.modules["sqlalchemy"] = sqlalchemy_stub
         sys.modules["sqlalchemy.engine"] = sqlalchemy_engine_stub
@@ -105,14 +110,16 @@ class EndpointAuthTests(unittest.TestCase):
         self.assertEqual(_allowed_roles(operaciones.iniciar_lavado_endpoint), allowed)
         self.assertEqual(_allowed_roles(operaciones.finalizar_lavado_endpoint), allowed)
 
-    def test_cierres_requires_admin(self):
-        self.assertEqual(_allowed_roles(cierres.obtener_cierre_pendiente), {"admin"})
-        self.assertEqual(_allowed_roles(cierres.listar_cierres), {"admin"})
-        self.assertEqual(_allowed_roles(cierres.crear_cierre), {"admin"})
+    def test_cierres_allows_operator_and_admin(self):
+        allowed = {"operador", "admin"}
+        self.assertEqual(_allowed_roles(cierres.obtener_cierre_pendiente), allowed)
+        self.assertEqual(_allowed_roles(cierres.listar_cierres), allowed)
+        self.assertEqual(_allowed_roles(cierres.crear_cierre), allowed)
 
-    def test_gastos_requires_admin(self):
-        self.assertEqual(_allowed_roles(gastos.crear_gasto_endpoint), {"admin"})
-        self.assertEqual(_allowed_roles(gastos.listar_gastos_pendientes), {"admin"})
+    def test_gastos_allows_operator_and_admin(self):
+        allowed = {"operador", "admin"}
+        self.assertEqual(_allowed_roles(gastos.crear_gasto_endpoint), allowed)
+        self.assertEqual(_allowed_roles(gastos.listar_gastos_pendientes), allowed)
 
     def test_reportes_requires_admin(self):
         self.assertEqual(_allowed_roles(reportes.listar_movimientos), {"admin"})

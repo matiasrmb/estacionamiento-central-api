@@ -9,7 +9,7 @@ router = APIRouter(prefix="/gastos", tags=["gastos"])
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
-def crear_gasto_endpoint(payload: GastoCreateIn, user=Depends(require_role("admin"))):
+def crear_gasto_endpoint(payload: GastoCreateIn, user=Depends(require_role("operador", "admin"))):
     return crear_gasto(
         payload.categoria,
         payload.descripcion,
@@ -19,5 +19,5 @@ def crear_gasto_endpoint(payload: GastoCreateIn, user=Depends(require_role("admi
 
 
 @router.get("/pendientes")
-def listar_gastos_pendientes(_user=Depends(require_role("admin"))):
+def listar_gastos_pendientes(_user=Depends(require_role("operador", "admin"))):
     return list_gastos_pendientes()

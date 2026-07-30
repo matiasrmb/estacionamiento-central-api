@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 from sqlalchemy import text
 from app.db.database import db_conn
@@ -11,6 +12,10 @@ class ActiveIngresoAlreadyExists(Exception):
 
 
 class RequiredPrintJobCreationFailed(Exception):
+    pass
+
+
+class NochesNotAvailable(Exception):
     pass
 
 
@@ -76,12 +81,79 @@ def create_ingreso_with_required_pc_pdf_job(
     return _create_ingreso_for_plate_if_no_active(patente, fecha_hora_ingreso, usuario, create_required_job)
 
 
+def create_ingreso_with_noches_prepaid_and_required_pc_pdf_job(
+    patente: str,
+    fecha_hora_ingreso,
+    usuario: str,
+    build_ticket_payload: Callable[[int, Dict[str, Any]], dict],
+) -> Dict[str, Any]:
+    patente = patente.strip().upper()
+
+    def create_night_charge_and_required_job(conn, id_ingreso: int) -> Dict[str, int | str]:
+        cobro_noche = _create_noches_charge(conn, id_ingreso, fecha_hora_ingreso, usuario)
+        try:
+            pc_job_id = create_print_job_pc_pdf_with_connection(
+                conn,
+                tipo="TICKET_INGRESO",
+                id_ingreso=id_ingreso,
+                patente=patente,
+                payload=build_ticket_payload(id_ingreso, cobro_noche),
+                idempotency_key=f"TICKET_INGRESO:INGRESO_ID:{id_ingreso}",
+            )
+        except Exception as exc:
+            raise RequiredPrintJobCreationFailed() from exc
+        return {"cobro_noche": cobro_noche, "pc_job_id": pc_job_id}
+
+    return _create_ingreso_for_plate_if_no_active(
+        patente, fecha_hora_ingreso, usuario, create_night_charge_and_required_job
+    )
+
+
+def _create_noches_charge(conn, id_ingreso: int, fecha_hora_pago, usuario: str) -> Dict[str, Any]:
+    rows = conn.execute(text("""
+        SELECT clave, valor
+        FROM configuracion
+        WHERE clave IN ('noches_activo', 'noches_valor')
+    """)).mappings().all()
+    config = {str(row["clave"]): str(row["valor"]) for row in rows}
+    try:
+        monto = int(config.get("noches_valor", "0"))
+    except (TypeError, ValueError) as exc:
+        raise NochesNotAvailable() from exc
+    if (
+        config.get("noches_activo") != "1"
+        or monto <= 0
+    ):
+        raise NochesNotAvailable()
+
+    cobro_noche = {
+        "monto_snapshot": monto,
+        "hora_inicio_snapshot": "22:00",
+        "hora_fin_snapshot": "08:00",
+        "fecha_hora_pago": fecha_hora_pago.isoformat(timespec="seconds"),
+    }
+    conn.execute(text("""
+        INSERT INTO cobros_noches (
+            id_ingreso, monto_snapshot, hora_inicio_snapshot,
+            hora_fin_snapshot, fecha_hora_pago, usuario
+        ) VALUES (:id_ingreso, :monto, :hora_inicio, :hora_fin, :fecha_pago, :usuario)
+    """), {
+        "id_ingreso": id_ingreso,
+        "monto": monto,
+        "hora_inicio": cobro_noche["hora_inicio_snapshot"],
+        "hora_fin": cobro_noche["hora_fin_snapshot"],
+        "fecha_pago": fecha_hora_pago,
+        "usuario": usuario,
+    })
+    return cobro_noche
+
+
 def _create_ingreso_for_plate_if_no_active(
     patente: str,
     fecha_hora_ingreso,
     usuario: str,
-    after_ingreso: Callable[[Any, int], int] | None = None,
-) -> Dict[str, int]:
+    after_ingreso: Callable[[Any, int], Dict[str, Any] | int] | None = None,
+) -> Dict[str, Any]:
     patente = patente.strip().upper()
     lock_name = f"ingreso:active:{patente}"
     locked = False
@@ -138,7 +210,11 @@ def _create_ingreso_for_plate_if_no_active(
             id_ingreso = int(conn.execute(text("SELECT LAST_INSERT_ID()")).scalar())
             result = {"id_vehiculo": id_vehiculo, "id_ingreso": id_ingreso}
             if after_ingreso:
-                result["pc_job_id"] = after_ingreso(conn, id_ingreso)
+                after_result = after_ingreso(conn, id_ingreso)
+                if isinstance(after_result, dict):
+                    result.update(after_result)
+                else:
+                    result["pc_job_id"] = after_result
             conn.commit()
             return result
         except Exception as exc:

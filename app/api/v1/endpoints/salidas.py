@@ -25,6 +25,21 @@ def _get_ingreso(conn, id_ingreso: int):
     ).mappings().first()
 
 
+def _get_noches_prepagadas(conn, id_ingreso: int):
+    rows = conn.execute(text("""
+        SELECT monto_snapshot, hora_inicio_snapshot, hora_fin_snapshot
+        FROM cobros_noches
+        WHERE id_ingreso = :id_ingreso
+          AND estado = 'PAGADO'
+        ORDER BY id_cobro_noche ASC
+    """), {"id_ingreso": id_ingreso}).mappings().all()
+    return [{
+        "monto_snapshot": int(row["monto_snapshot"] or 0),
+        "hora_inicio_snapshot": str(row["hora_inicio_snapshot"])[:5],
+        "hora_fin_snapshot": str(row["hora_fin_snapshot"])[:5],
+    } for row in rows]
+
+
 @router.post("/preview", response_model=SalidaPreviewOut)
 def preview_salida(payload: SalidaPreviewIn, _user=Depends(require_role("operador", "admin"))):
     with db_conn() as conn:
@@ -41,13 +56,17 @@ def preview_salida(payload: SalidaPreviewIn, _user=Depends(require_role("operado
         fecha_ing = ingreso["fecha_hora_ingreso"]
         ahora = datetime.now()  # hora servidor
         minutos, monto, detalle, _monto_estacionamiento, _total_lavados = calcular_monto_con_lavados(conn, int(ingreso["id_ingreso"]), fecha_ing, ahora)
+        noches_prepagadas = _get_noches_prepagadas(conn, int(ingreso["id_ingreso"]))
 
         return {
             "id_ingreso": int(ingreso["id_ingreso"]),
             "patente": str(ingreso["patente"]),
             "minutos": int(minutos),
             "monto": int(monto),
+            "a_cobrar_ahora": int(monto),
             "detalle": detalle,
+            "noches_prepagadas": noches_prepagadas,
+            "total_noches_prepagadas": sum(cobro["monto_snapshot"] for cobro in noches_prepagadas),
         }
 
 
@@ -67,6 +86,7 @@ def confirmar_salida(payload: SalidaConfirmIn, user=Depends(require_role("operad
         fecha_ing = ingreso["fecha_hora_ingreso"]
         ahora = datetime.now().replace(microsecond=0)
         minutos, monto, detalle, monto_estacionamiento, total_lavados = calcular_monto_con_lavados(conn, int(ingreso["id_ingreso"]), fecha_ing, ahora)
+        noches_prepagadas = _get_noches_prepagadas(conn, int(ingreso["id_ingreso"]))
 
         # Persistir salida + tarifa final (ajusta nombres si tu tabla usa otro campo)
         update_result = conn.execute(
@@ -110,6 +130,8 @@ def confirmar_salida(payload: SalidaConfirmIn, user=Depends(require_role("operad
             "detalle_texto": detalle,
             "destino": "PC_PDF",
         }
+        if noches_prepagadas:
+            pc_payload["noches_prepagadas"] = noches_prepagadas
 
         if crear_print_job(
             conn,
@@ -130,10 +152,13 @@ def confirmar_salida(payload: SalidaConfirmIn, user=Depends(require_role("operad
             "patente": patente,
             "minutos": int(minutos),
             "monto": int(monto),
+            "a_cobrar_ahora": int(monto),
             "fecha_hora_ingreso": fecha_ing.replace(microsecond=0).isoformat(sep=" "),
             "fecha_hora_salida": ahora.isoformat(sep=" "),
             "detalle": detalle,
             "monto_estacionamiento": int(monto_estacionamiento),
             "total_lavados": int(total_lavados),
+            "noches_prepagadas": noches_prepagadas,
+            "total_noches_prepagadas": sum(cobro["monto_snapshot"] for cobro in noches_prepagadas),
             "print_jobs_creados": int(created),
         }

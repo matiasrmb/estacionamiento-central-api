@@ -36,6 +36,7 @@ def obtener_reporte(fecha_inicio: date, fecha_fin: date, patente: str = "") -> D
         accounting_items = list(items)
         lavados_solos = []
         pagos_mensuales = []
+        cobros_noches = []
         if not patente:
             banos = conn.execute(
                 text("""
@@ -89,9 +90,24 @@ def obtener_reporte(fecha_inicio: date, fecha_fin: date, patente: str = "") -> D
         ).mappings().all()
         for pago in pagos_mensuales:
             items.append(_serialize_pago_mensual(pago))
+        night_charges_query = """
+            SELECT v.patente, c.fecha_hora_pago, c.monto_snapshot, c.usuario,
+                   c.hora_inicio_snapshot, c.hora_fin_snapshot
+            FROM cobros_noches c
+            JOIN ingresos i ON i.id_ingreso = c.id_ingreso
+            JOIN vehiculos v ON v.id_vehiculo = i.id_vehiculo
+            WHERE c.estado = 'PAGADO'
+              AND DATE(c.fecha_hora_pago) BETWEEN :fecha_inicio AND :fecha_fin
+        """
+        if patente:
+            night_charges_query += " AND v.patente = :patente"
+        night_charges_query += " ORDER BY c.fecha_hora_pago ASC, c.id_cobro_noche ASC"
+        cobros_noches = conn.execute(text(night_charges_query), params).mappings().all()
+        for cobro in cobros_noches:
+            items.append(_serialize_cobro_noche(cobro))
 
     items.sort(key=lambda item: item["fecha_hora_salida"] or "")
-    totals = build_report_totals(accounting_items, lavados_solos, pagos_mensuales)
+    totals = build_report_totals(accounting_items, lavados_solos, pagos_mensuales, cobros_noches)
     totals["total_movimientos"] = len(items)
     return {
         "fecha_inicio": fecha_inicio.isoformat(),
@@ -137,6 +153,20 @@ def _serialize_pago_mensual(row) -> Dict[str, Any]:
         "metodo_pago": row.get("metodo_pago"),
         "observacion": row.get("observacion"),
         "periodo": _iso(row.get("periodo")),
+    }
+
+
+def _serialize_cobro_noche(row) -> Dict[str, Any]:
+    return {
+        "tipo": "noche",
+        "patente": row["patente"],
+        "fecha_hora_ingreso": _iso(row["fecha_hora_pago"]),
+        "fecha_hora_salida": _iso(row["fecha_hora_pago"]),
+        "minutos": 0,
+        "tarifa_aplicada": int(row["monto_snapshot"] or 0),
+        "usuario": row.get("usuario"),
+        "hora_inicio_snapshot": _iso(row.get("hora_inicio_snapshot")),
+        "hora_fin_snapshot": _iso(row.get("hora_fin_snapshot")),
     }
 
 

@@ -8,8 +8,9 @@ def build_ticket_ingreso_payload(
     hora_ingreso_iso: str,
     usuario_claims: Dict[str, Any],
     server_time_iso: str,
+    cobro_noche: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
-    return {
+    payload = {
         "kind": "TICKET_INGRESO",
         "id_ingreso": id_ingreso,
         "patente": patente,
@@ -24,6 +25,9 @@ def build_ticket_ingreso_payload(
         },
         "meta": {"server_time": server_time_iso, "version": 1},
     }
+    if cobro_noche:
+        payload["noches"] = cobro_noche
+    return payload
 
 
 def build_ticket_salida_payload(

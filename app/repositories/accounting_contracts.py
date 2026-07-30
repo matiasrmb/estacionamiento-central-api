@@ -7,6 +7,7 @@ def build_accounting_summary(
     wash_only_operations,
     expenses=None,
     monthly_payments=None,
+    night_charges=None,
 ):
     """Build the accounting shape shared by cierres and reports.
 
@@ -23,11 +24,14 @@ def build_accounting_summary(
     total_lavados_solos_monto = _sum_amount(charged_wash_only, "valor_lavado_snapshot")
     monthly_payments = monthly_payments or []
     total_mensualidades_monto = _sum_amount(monthly_payments, "monto_snapshot")
+    night_charges = night_charges or []
+    total_noches_monto = _sum_amount(night_charges, "monto_snapshot")
     total_general = (
         total_recaudado
         + total_banos_monto
         + total_lavados_solos_monto
         + total_mensualidades_monto
+        + total_noches_monto
     )
     total_gastos = _sum_amount(expenses or [], "monto")
 
@@ -41,13 +45,15 @@ def build_accounting_summary(
         "total_lavados_solos_monto": total_lavados_solos_monto,
         "total_mensualidades": len(monthly_payments),
         "total_mensualidades_monto": total_mensualidades_monto,
+        "total_noches": len(night_charges),
+        "total_noches_monto": total_noches_monto,
         "total_general": total_general,
         "total_gastos": total_gastos,
         "total_neto": total_general - total_gastos,
     }
 
 
-def build_report_totals(items, wash_only_operations, monthly_payments=None):
+def build_report_totals(items, wash_only_operations, monthly_payments=None, night_charges=None):
     total_recaudado = _sum_amount(items, "tarifa_aplicada")
     charged_wash_only = [
         operation
@@ -57,6 +63,8 @@ def build_report_totals(items, wash_only_operations, monthly_payments=None):
     total_lavados_solos_monto = _sum_amount(charged_wash_only, "valor_lavado_snapshot")
     monthly_payments = monthly_payments or []
     total_mensualidades_monto = _sum_amount(monthly_payments, "monto_snapshot")
+    night_charges = night_charges or []
+    total_noches_monto = _sum_amount(night_charges, "monto_snapshot")
 
     return {
         "total_recaudado": total_recaudado,
@@ -65,7 +73,14 @@ def build_report_totals(items, wash_only_operations, monthly_payments=None):
         "total_lavados_solos_monto": total_lavados_solos_monto,
         "total_mensualidades": len(monthly_payments),
         "total_mensualidades_monto": total_mensualidades_monto,
-        "total_general": total_recaudado + total_lavados_solos_monto + total_mensualidades_monto,
+        "total_noches": len(night_charges),
+        "total_noches_monto": total_noches_monto,
+        "total_general": (
+            total_recaudado
+            + total_lavados_solos_monto
+            + total_mensualidades_monto
+            + total_noches_monto
+        ),
     }
 
 

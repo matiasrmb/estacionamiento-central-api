@@ -45,6 +45,19 @@ class AccountingReportContractsTests(unittest.TestCase):
         self.assertEqual(summary["total_lavados_solos_monto"], 0)
         self.assertEqual(summary["total_general"], 10000)
 
+    def test_prepaid_nights_are_separate_from_exit_revenue_and_in_gross_total(self):
+        summary = build_accounting_summary(
+            parking_movements=[{"tarifa_aplicada": 1200}],
+            bathroom_uses=[],
+            wash_only_operations=[],
+            night_charges=[{"monto_snapshot": 5000}],
+        )
+
+        self.assertEqual(summary["total_recaudado"], 1200)
+        self.assertEqual(summary["total_noches"], 1)
+        self.assertEqual(summary["total_noches_monto"], 5000)
+        self.assertEqual(summary["total_general"], 6200)
+
 
 if __name__ == "__main__":
     unittest.main()

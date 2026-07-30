@@ -80,7 +80,7 @@ class PdfRendererTests(unittest.TestCase):
         })
 
         self.assertIn("ESTACIONAMIENTO: $1500", lines)
-        self.assertIn("TOTAL: $1500", lines)
+        self.assertIn("A COBRAR AHORA: $1500", lines)
         self.assertFalse(any(line.startswith("MODO:") for line in lines))
 
     def test_solo_lavado_renders_receipt_fields_and_fits_58mm(self):
@@ -118,6 +118,21 @@ class PdfRendererTests(unittest.TestCase):
         })
 
         self.assertFalse(any(line.startswith("SUBIDA:") for line in lines))
+
+    def test_salida_muestra_noches_prepagadas_separadas_del_cobro_actual(self):
+        lines = _ticket_lines({
+            "kind": "TICKET_SALIDA",
+            "monto_final": 1500,
+            "noches_prepagadas": [{
+                "monto_snapshot": 5000,
+                "hora_inicio_snapshot": "22:00",
+                "hora_fin_snapshot": "08:00",
+            }],
+        })
+
+        self.assertIn("NOCHES YA PAGADAS: $5000", lines)
+        self.assertIn("REFERENCIA NOCHES: 22:00 A 08:00", lines)
+        self.assertIn("A COBRAR AHORA: $1500", lines)
 
     def test_salida_detallada_lines_fit_printable_width(self):
         lines = _ticket_lines({

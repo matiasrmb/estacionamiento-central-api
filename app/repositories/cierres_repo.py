@@ -4,7 +4,7 @@ from typing import Any, Dict, List
 from sqlalchemy import text
 
 from app.db.database import db_conn
-from app.db.schema_ensure import ensure_monthly_payments_schema
+from app.db.schema_ensure import ensure_monthly_payments_schema, ensure_noches_schema
 from app.repositories.accounting_contracts import build_accounting_summary
 
 
@@ -15,21 +15,24 @@ def build_cierre_summary_from_rows(
     fecha_cierre: datetime,
     expenses=None,
     monthly_payments=None,
+    night_charges=None,
 ) -> Dict[str, Any]:
     expenses = expenses or []
     monthly_payments = monthly_payments or []
+    night_charges = night_charges or []
     summary = build_accounting_summary(
-        parking_movements, bathroom_uses, wash_only_operations, expenses, monthly_payments
+        parking_movements, bathroom_uses, wash_only_operations, expenses, monthly_payments, night_charges
     )
     dates = [row["fecha_hora_ingreso"] for row in parking_movements if row.get("fecha_hora_ingreso")]
     dates.extend(row["fecha_hora"] for row in bathroom_uses if row.get("fecha_hora"))
     dates.extend(row["fecha_hora_fin"] for row in wash_only_operations if row.get("fecha_hora_fin"))
     dates.extend(row["fecha_hora"] for row in expenses if row.get("fecha_hora"))
     dates.extend(row["fecha_pago"] for row in monthly_payments if row.get("fecha_pago"))
+    dates.extend(row["fecha_hora_pago"] for row in night_charges if row.get("fecha_hora_pago"))
     fecha_inicio = min(dates) if dates else None
 
     return {
-        "hay_pendiente": bool(parking_movements or bathroom_uses or wash_only_operations or expenses or monthly_payments),
+        "hay_pendiente": bool(parking_movements or bathroom_uses or wash_only_operations or expenses or monthly_payments or night_charges),
         "fecha_inicio": fecha_inicio,
         "fecha_cierre": fecha_cierre,
         **summary,
@@ -43,6 +46,9 @@ def build_cierre_summary_from_rows(
         "ids_gastos": [int(row["id_gasto"]) for row in expenses if row.get("id_gasto")],
         "ids_pagos_mensuales": [
             int(row["id_pago_mensual"]) for row in monthly_payments if row.get("id_pago_mensual")
+        ],
+        "ids_cobros_noches": [
+            int(row["id_cobro_noche"]) for row in night_charges if row.get("id_cobro_noche")
         ],
     }
 
@@ -99,7 +105,21 @@ def _build_pending_summary(conn, lock_expenses: bool = False) -> Dict[str, Any]:
         monthly_payments_sql += " FOR UPDATE"
     monthly_payments = conn.execute(text(monthly_payments_sql)).mappings().all()
 
-    if not registros and not lavados_solos and not gastos and not banos and not monthly_payments:
+    night_charges_sql = """
+        SELECT id_cobro_noche, fecha_hora_pago, monto_snapshot
+        FROM cobros_noches
+        WHERE id_cierre IS NULL
+          AND estado = 'PAGADO'
+          AND fecha_hora_pago <= :fecha_cierre
+        ORDER BY fecha_hora_pago ASC, id_cobro_noche ASC
+    """
+    if lock_expenses:
+        night_charges_sql += " FOR UPDATE"
+    night_charges = conn.execute(
+        text(night_charges_sql), {"fecha_cierre": fecha_cierre}
+    ).mappings().all()
+
+    if not registros and not lavados_solos and not gastos and not banos and not monthly_payments and not night_charges:
         return {
             "hay_pendiente": False,
             "fecha_inicio": None,
@@ -113,6 +133,8 @@ def _build_pending_summary(conn, lock_expenses: bool = False) -> Dict[str, Any]:
             "total_lavados_solos_monto": 0,
             "total_mensualidades": 0,
             "total_mensualidades_monto": 0,
+            "total_noches": 0,
+            "total_noches_monto": 0,
             "total_general": 0,
             "total_gastos": 0,
             "total_neto": 0,
@@ -121,6 +143,7 @@ def _build_pending_summary(conn, lock_expenses: bool = False) -> Dict[str, Any]:
             "ids_banos": [],
             "ids_gastos": [],
             "ids_pagos_mensuales": [],
+            "ids_cobros_noches": [],
         }
 
     fechas_inicio = [row["fecha_hora_ingreso"] for row in registros]
@@ -128,10 +151,11 @@ def _build_pending_summary(conn, lock_expenses: bool = False) -> Dict[str, Any]:
     fechas_inicio.extend(row["fecha_hora"] for row in gastos)
     fechas_inicio.extend(row["fecha_hora"] for row in banos)
     fechas_inicio.extend(row["fecha_pago"] for row in monthly_payments)
+    fechas_inicio.extend(row["fecha_hora_pago"] for row in night_charges)
     fecha_inicio = min(fechas_inicio)
 
     summary = build_cierre_summary_from_rows(
-        registros, banos, lavados_solos, fecha_cierre, gastos, monthly_payments
+        registros, banos, lavados_solos, fecha_cierre, gastos, monthly_payments, night_charges
     )
     summary["fecha_inicio"] = fecha_inicio
 
@@ -140,6 +164,7 @@ def _build_pending_summary(conn, lock_expenses: bool = False) -> Dict[str, Any]:
 
 def get_cierre_pendiente() -> Dict[str, Any]:
     ensure_monthly_payments_schema()
+    ensure_noches_schema()
     with db_conn() as conn:
         summary = _build_pending_summary(conn)
     return _serialize_summary(summary)
@@ -147,6 +172,7 @@ def get_cierre_pendiente() -> Dict[str, Any]:
 
 def realizar_cierre(usuario: str) -> Dict[str, Any]:
     ensure_monthly_payments_schema()
+    ensure_noches_schema()
     with db_conn() as conn:
         try:
             summary = _build_pending_summary(conn, lock_expenses=True)
@@ -160,7 +186,8 @@ def realizar_cierre(usuario: str) -> Dict[str, Any]:
                         total_ingresos, total_salidas, total_banos,
                         total_banos_monto, total_lavados_solos,
                         total_lavados_solos_monto, total_mensualidades,
-                        total_mensualidades_monto, total_general, total_gastos,
+                        total_mensualidades_monto, total_noches, total_noches_monto,
+                        total_general, total_gastos,
                         total_neto, usuario
                     )
                     VALUES (
@@ -168,7 +195,8 @@ def realizar_cierre(usuario: str) -> Dict[str, Any]:
                         :total_ingresos, :total_salidas, :total_banos,
                         :total_banos_monto, :total_lavados_solos,
                         :total_lavados_solos_monto, :total_mensualidades,
-                        :total_mensualidades_monto, :total_general, :total_gastos,
+                        :total_mensualidades_monto, :total_noches, :total_noches_monto,
+                        :total_general, :total_gastos,
                         :total_neto, :usuario
                     )
                 """),
@@ -202,6 +230,7 @@ def realizar_cierre(usuario: str) -> Dict[str, Any]:
             _link_expenses_to_cierre(conn, summary["ids_gastos"], id_cierre)
             _link_bathroom_uses_to_cierre(conn, summary.get("ids_banos", []), id_cierre)
             _link_monthly_payments_to_cierre(conn, summary.get("ids_pagos_mensuales", []), id_cierre)
+            _link_night_charges_to_cierre(conn, summary.get("ids_cobros_noches", []), id_cierre)
             conn.commit()
         except Exception:
             conn.rollback()
@@ -220,7 +249,8 @@ def list_cierres(limit: int = 20) -> List[Dict[str, Any]]:
                        total_ingresos, total_salidas, total_banos,
                        total_banos_monto, total_lavados_solos,
                        total_lavados_solos_monto, total_mensualidades,
-                       total_mensualidades_monto, total_general, total_gastos,
+                       total_mensualidades_monto, total_noches, total_noches_monto,
+                       total_general, total_gastos,
                        total_neto, usuario
                 FROM cierres_diarios
                 ORDER BY fecha_cierre DESC
@@ -240,6 +270,8 @@ def list_cierres(limit: int = 20) -> List[Dict[str, Any]]:
         item["total_lavados_solos_monto"] = int(item.get("total_lavados_solos_monto") or 0)
         item["total_mensualidades"] = int(item.get("total_mensualidades") or 0)
         item["total_mensualidades_monto"] = int(item.get("total_mensualidades_monto") or 0)
+        item["total_noches"] = int(item.get("total_noches") or 0)
+        item["total_noches_monto"] = int(item.get("total_noches_monto") or 0)
         item["total_general"] = int(item.get("total_general") or 0)
         item["total_gastos"] = int(item.get("total_gastos") or 0)
         item["total_neto"] = int(item.get("total_neto") or 0)
@@ -253,6 +285,7 @@ def _serialize_summary(summary: Dict[str, Any]) -> Dict[str, Any]:
     data.pop("ids_banos", None)
     data.pop("ids_gastos", None)
     data.pop("ids_pagos_mensuales", None)
+    data.pop("ids_cobros_noches", None)
     data["fecha_inicio"] = _iso(data.get("fecha_inicio"))
     data["fecha_cierre"] = _iso(data.get("fecha_cierre"))
     return data
@@ -321,6 +354,27 @@ def _link_monthly_payments_to_cierre(conn, payment_ids: List[int], id_cierre: in
             SET id_cierre = :id_cierre
             WHERE id_cierre IS NULL
               AND id_pago_mensual IN ({', '.join(placeholders)})
+        """),
+        params,
+    )
+
+
+def _link_night_charges_to_cierre(conn, night_charge_ids: List[int], id_cierre: int) -> None:
+    if not night_charge_ids:
+        return
+    params = {"id_cierre": id_cierre}
+    placeholders = []
+    for index, night_charge_id in enumerate(night_charge_ids):
+        key = f"night_charge_id_{index}"
+        placeholders.append(f":{key}")
+        params[key] = night_charge_id
+    conn.execute(
+        text(f"""
+            UPDATE cobros_noches
+            SET id_cierre = :id_cierre
+            WHERE id_cierre IS NULL
+              AND estado = 'PAGADO'
+              AND id_cobro_noche IN ({', '.join(placeholders)})
         """),
         params,
     )

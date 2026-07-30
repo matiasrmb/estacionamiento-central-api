@@ -85,6 +85,7 @@ class CierresGastosTests(unittest.TestCase):
                     FakeResult(rows=[]),
                     FakeResult(rows=[{"id_uso_bano": 9, "fecha_hora": datetime(2026, 7, 1, 9, 0), "monto": 300}]),
                     FakeResult(rows=[]),
+                    FakeResult(rows=[]),
                 ]
 
             def execute(self, statement, params=None):
@@ -107,6 +108,11 @@ class CierresGastosTests(unittest.TestCase):
         self.assertIn("FROM pagos_mensuales", monthly_payments_query)
         self.assertIn("WHERE id_cierre IS NULL", monthly_payments_query)
         self.assertIn("FOR UPDATE", monthly_payments_query)
+        night_charges_query = conn.executed[5][0]
+        self.assertIn("FROM cobros_noches", night_charges_query)
+        self.assertIn("fecha_hora_pago", night_charges_query)
+        self.assertIn("id_cierre IS NULL", night_charges_query)
+        self.assertIn("FOR UPDATE", night_charges_query)
         self.assertTrue(summary["hay_pendiente"])
         self.assertEqual(summary["total_banos_monto"], 300)
         self.assertEqual(summary["fecha_inicio"], datetime(2026, 7, 1, 9, 0))
@@ -134,6 +140,7 @@ class CierresGastosTests(unittest.TestCase):
             "ids_gastos": [5, 8],
         }
         with patch.object(cierres_repo, "ensure_monthly_payments_schema"), \
+             patch.object(cierres_repo, "ensure_noches_schema"), \
              patch.object(cierres_repo, "db_conn", return_value=FakeDbConn(conn)), \
              patch.object(cierres_repo, "_build_pending_summary", return_value=summary) as build:
             result = cierres_repo.realizar_cierre("admin")
@@ -157,6 +164,7 @@ class CierresGastosTests(unittest.TestCase):
     def test_no_pending_close_does_not_link_expenses(self):
         conn = FakeConnection()
         with patch.object(cierres_repo, "ensure_monthly_payments_schema"), \
+             patch.object(cierres_repo, "ensure_noches_schema"), \
              patch.object(cierres_repo, "db_conn", return_value=FakeDbConn(conn)), \
              patch.object(cierres_repo, "_build_pending_summary", return_value={"hay_pendiente": False}):
             with self.assertRaises(LookupError):
@@ -164,6 +172,31 @@ class CierresGastosTests(unittest.TestCase):
 
         self.assertFalse(any("UPDATE gastos_operacion" in sql for sql, _ in conn.executed))
         self.assertTrue(conn.rolled_back)
+
+    def test_prepaid_nights_use_payment_time_and_are_linked_once(self):
+        summary = cierres_repo.build_cierre_summary_from_rows(
+            parking_movements=[],
+            bathroom_uses=[],
+            wash_only_operations=[],
+            fecha_cierre=datetime(2026, 7, 2, 1, 0),
+            night_charges=[{
+                "id_cobro_noche": 14,
+                "fecha_hora_pago": datetime(2026, 7, 1, 22, 0),
+                "monto_snapshot": 5000,
+            }],
+        )
+
+        self.assertEqual(summary["fecha_inicio"], datetime(2026, 7, 1, 22, 0))
+        self.assertEqual(summary["total_noches_monto"], 5000)
+        self.assertEqual(summary["total_general"], 5000)
+        self.assertEqual(summary["ids_cobros_noches"], [14])
+
+        conn = FakeConnection()
+        cierres_repo._link_night_charges_to_cierre(conn, [14], 31)
+        update = next(entry for entry in conn.executed if "UPDATE cobros_noches" in entry[0])
+        self.assertIn("id_cierre IS NULL", update[0])
+        self.assertIn("estado = 'PAGADO'", update[0])
+        self.assertEqual(update[1], {"id_cierre": 31, "night_charge_id_0": 14})
 
 
 if __name__ == "__main__":

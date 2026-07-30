@@ -43,8 +43,9 @@ class UpdateResult:
 
 
 class FakeConnection:
-    def __init__(self, update_rowcount=1):
+    def __init__(self, update_rowcount=1, noches_prepagadas=None):
         self.update_rowcount = update_rowcount
+        self.noches_prepagadas = noches_prepagadas or []
         self.calls = []
         self.committed = False
         self.rolled_back = False
@@ -64,6 +65,8 @@ class FakeConnection:
                     "patente": "ABC123",
                 }
             )
+        if "FROM cobros_noches" in sql:
+            return RowsResult(self.noches_prepagadas)
         if "SUM(valor_lavado_snapshot)" in sql:
             return ScalarResult(0)
         if "SUM(valor_lavado)" in sql:
@@ -94,6 +97,22 @@ class FakeDbConn:
 
 
 class SalidasAtomicConfirmTests(unittest.TestCase):
+    def test_preview_separates_prepaid_noches_from_amount_due_now(self):
+        conn = FakeConnection(noches_prepagadas=[{
+            "monto_snapshot": 5000,
+            "hora_inicio_snapshot": "22:00:00",
+            "hora_fin_snapshot": "08:00:00",
+        }])
+
+        with patch.object(salidas, "db_conn", return_value=FakeDbConn(conn)), \
+             patch.object(salidas, "calcular_monto_con_lavados", return_value=(60, 1000, "detalle", 1000, 0)):
+            result = salidas.preview_salida(salidas.SalidaPreviewIn(id_ingreso=7), _user={"sub": "tester"})
+
+        self.assertEqual(result["monto"], 1000)
+        self.assertEqual(result["a_cobrar_ahora"], 1000)
+        self.assertEqual(result["total_noches_prepagadas"], 5000)
+        self.assertEqual(result["noches_prepagadas"][0]["hora_inicio_snapshot"], "22:00")
+
     def test_confirm_update_requires_open_ingreso(self):
         conn = FakeConnection(update_rowcount=1)
 
@@ -142,6 +161,25 @@ class SalidasAtomicConfirmTests(unittest.TestCase):
         self.assertEqual(result["print_jobs_creados"], 1)
         self.assertEqual([call["destino"] for call in print_calls], ["PC_PDF"])
         self.assertNotIn("SUNMI_TEXT", [call["destino"] for call in print_calls])
+
+    def test_confirm_includes_prepaid_noches_without_adding_them_to_exit_charge(self):
+        conn = FakeConnection(noches_prepagadas=[{
+            "monto_snapshot": 5000,
+            "hora_inicio_snapshot": "22:00:00",
+            "hora_fin_snapshot": "08:00:00",
+        }])
+        print_calls = []
+
+        with patch.object(salidas, "db_conn", return_value=FakeDbConn(conn)), \
+             patch.object(salidas, "calcular_monto_con_lavados", return_value=(60, 1000, "detalle", 1000, 0)), \
+             patch.object(salidas, "crear_print_job", side_effect=lambda *args, **kwargs: print_calls.append(kwargs) or True):
+            result = salidas.confirmar_salida(salidas.SalidaConfirmIn(id_ingreso=7), user={"sub": "tester"})
+
+        update_params = next(params for sql, params in conn.calls if "UPDATE ingresos" in sql)
+        self.assertEqual(update_params["monto"], 1000)
+        self.assertEqual(result["a_cobrar_ahora"], 1000)
+        self.assertEqual(result["total_noches_prepagadas"], 5000)
+        self.assertEqual(print_calls[0]["payload"]["noches_prepagadas"][0]["monto_snapshot"], 5000)
 
 
 if __name__ == "__main__":

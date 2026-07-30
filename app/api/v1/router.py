@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 from app.api.v1.endpoints import health, db_ping, auth
-from app.api.v1.endpoints import ingresos, activos, salidas, configuracion, tarifas, mensuales, operaciones, cierres, reportes, usuarios, asistencias, cotizaciones, wash_pricing, solo_lavados
+from app.api.v1.endpoints import ingresos, activos, salidas, configuracion, tarifas, mensuales, operaciones, cierres, gastos, reportes, usuarios, asistencias, cotizaciones, wash_pricing, solo_lavados
 
 api_router = APIRouter()
 
@@ -17,6 +17,7 @@ api_router.include_router(tarifas.router)
 api_router.include_router(mensuales.router)
 api_router.include_router(operaciones.router)
 api_router.include_router(cierres.router)
+api_router.include_router(gastos.router)
 api_router.include_router(reportes.router)
 api_router.include_router(usuarios.router)
 api_router.include_router(asistencias.router)

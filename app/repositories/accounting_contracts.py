@@ -1,7 +1,7 @@
 CHARGED_WASH_ONLY_STATES = {"FINALIZADO_COBRADO"}
 
 
-def build_accounting_summary(parking_movements, bathroom_uses, wash_only_operations):
+def build_accounting_summary(parking_movements, bathroom_uses, wash_only_operations, expenses=None):
     """Build the accounting shape shared by cierres and reports.
 
     Parking totals already include parking-linked washes. Solo wash revenue is
@@ -15,6 +15,8 @@ def build_accounting_summary(parking_movements, bathroom_uses, wash_only_operati
         if operation.get("estado") in CHARGED_WASH_ONLY_STATES
     ]
     total_lavados_solos_monto = _sum_amount(charged_wash_only, "valor_lavado_snapshot")
+    total_general = total_recaudado + total_banos_monto + total_lavados_solos_monto
+    total_gastos = _sum_amount(expenses or [], "monto")
 
     return {
         "total_recaudado": total_recaudado,
@@ -24,7 +26,9 @@ def build_accounting_summary(parking_movements, bathroom_uses, wash_only_operati
         "total_banos_monto": total_banos_monto,
         "total_lavados_solos": len(charged_wash_only),
         "total_lavados_solos_monto": total_lavados_solos_monto,
-        "total_general": total_recaudado + total_banos_monto + total_lavados_solos_monto,
+        "total_general": total_general,
+        "total_gastos": total_gastos,
+        "total_neto": total_general - total_gastos,
     }
 
 

@@ -40,7 +40,7 @@ def _install_optional_dependency_stubs():
 
 _install_optional_dependency_stubs()
 
-from app.api.v1.endpoints import activos, asistencias, cierres, configuracion, ingresos, mensuales, operaciones, reportes, salidas, tarifas, usuarios
+from app.api.v1.endpoints import activos, asistencias, cierres, configuracion, gastos, ingresos, mensuales, operaciones, reportes, salidas, tarifas, usuarios
 
 
 def _role_dependency(function):
@@ -99,6 +99,10 @@ class EndpointAuthTests(unittest.TestCase):
         self.assertEqual(_allowed_roles(cierres.obtener_cierre_pendiente), {"admin"})
         self.assertEqual(_allowed_roles(cierres.listar_cierres), {"admin"})
         self.assertEqual(_allowed_roles(cierres.crear_cierre), {"admin"})
+
+    def test_gastos_requires_admin(self):
+        self.assertEqual(_allowed_roles(gastos.crear_gasto_endpoint), {"admin"})
+        self.assertEqual(_allowed_roles(gastos.listar_gastos_pendientes), {"admin"})
 
     def test_reportes_requires_admin(self):
         self.assertEqual(_allowed_roles(reportes.listar_movimientos), {"admin"})

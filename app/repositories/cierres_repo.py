@@ -4,6 +4,7 @@ from typing import Any, Dict, List
 from sqlalchemy import text
 
 from app.db.database import db_conn
+from app.db.schema_ensure import ensure_gastos_operacion_schema
 from app.repositories.accounting_contracts import build_accounting_summary
 
 
@@ -12,14 +13,18 @@ def build_cierre_summary_from_rows(
     bathroom_uses,
     wash_only_operations,
     fecha_cierre: datetime,
+    expenses=None,
 ) -> Dict[str, Any]:
-    summary = build_accounting_summary(parking_movements, bathroom_uses, wash_only_operations)
+    expenses = expenses or []
+    summary = build_accounting_summary(parking_movements, bathroom_uses, wash_only_operations, expenses)
     dates = [row["fecha_hora_ingreso"] for row in parking_movements if row.get("fecha_hora_ingreso")]
+    dates.extend(row["fecha_hora"] for row in bathroom_uses if row.get("fecha_hora"))
     dates.extend(row["fecha_hora_fin"] for row in wash_only_operations if row.get("fecha_hora_fin"))
+    dates.extend(row["fecha_hora"] for row in expenses if row.get("fecha_hora"))
     fecha_inicio = min(dates) if dates else None
 
     return {
-        "hay_pendiente": bool(parking_movements or bathroom_uses or wash_only_operations),
+        "hay_pendiente": bool(parking_movements or bathroom_uses or wash_only_operations or expenses),
         "fecha_inicio": fecha_inicio,
         "fecha_cierre": fecha_cierre,
         **summary,
@@ -29,10 +34,12 @@ def build_cierre_summary_from_rows(
             for row in wash_only_operations
             if row.get("id_operacion_servicio")
         ],
+        "ids_banos": [int(row["id_uso_bano"]) for row in bathroom_uses if row.get("id_uso_bano")],
+        "ids_gastos": [int(row["id_gasto"]) for row in expenses if row.get("id_gasto")],
     }
 
 
-def _build_pending_summary(conn) -> Dict[str, Any]:
+def _build_pending_summary(conn, lock_expenses: bool = False) -> Dict[str, Any]:
     registros = conn.execute(
         text("""
             SELECT id_ingreso, fecha_hora_ingreso, fecha_hora_salida, tarifa_aplicada
@@ -55,7 +62,26 @@ def _build_pending_summary(conn) -> Dict[str, Any]:
         """)
     ).mappings().all()
 
-    if not registros and not lavados_solos:
+    gastos_sql = """
+        SELECT id_gasto, fecha_hora, monto
+        FROM gastos_operacion
+        WHERE id_cierre IS NULL
+        ORDER BY fecha_hora ASC, id_gasto ASC
+    """
+    if lock_expenses:
+        gastos_sql += " FOR UPDATE"
+    gastos = conn.execute(text(gastos_sql)).mappings().all()
+
+    banos = conn.execute(
+        text("""
+            SELECT id_uso_bano, fecha_hora, monto
+            FROM usos_bano
+            WHERE id_cierre IS NULL
+            ORDER BY fecha_hora ASC, id_uso_bano ASC
+        """ + (" FOR UPDATE" if lock_expenses else "")),
+    ).mappings().all()
+
+    if not registros and not lavados_solos and not gastos and not banos:
         return {
             "hay_pendiente": False,
             "fecha_inicio": None,
@@ -68,86 +94,91 @@ def _build_pending_summary(conn) -> Dict[str, Any]:
             "total_lavados_solos": 0,
             "total_lavados_solos_monto": 0,
             "total_general": 0,
+            "total_gastos": 0,
+            "total_neto": 0,
             "ids_ingresos": [],
             "ids_operaciones_servicio": [],
+            "ids_banos": [],
+            "ids_gastos": [],
         }
 
     fechas_inicio = [row["fecha_hora_ingreso"] for row in registros]
     fechas_inicio.extend(row["fecha_hora_fin"] for row in lavados_solos)
+    fechas_inicio.extend(row["fecha_hora"] for row in gastos)
+    fechas_inicio.extend(row["fecha_hora"] for row in banos)
     fecha_inicio = min(fechas_inicio)
 
-    banos = conn.execute(
-        text("""
-            SELECT COUNT(*) AS cantidad, COALESCE(SUM(monto), 0) AS total
-            FROM usos_bano
-            WHERE fecha_hora BETWEEN :fecha_inicio AND :fecha_cierre
-        """),
-        {"fecha_inicio": fecha_inicio, "fecha_cierre": fecha_cierre},
-    ).mappings().first()
-
-    total_banos = int((banos or {}).get("cantidad") or 0)
-    bathroom_uses = [{"monto": int((banos or {}).get("total") or 0)}] if total_banos else []
-    summary = build_cierre_summary_from_rows(registros, bathroom_uses, lavados_solos, fecha_cierre)
+    summary = build_cierre_summary_from_rows(registros, banos, lavados_solos, fecha_cierre, gastos)
     summary["fecha_inicio"] = fecha_inicio
-    summary["total_banos"] = total_banos
 
     return summary
 
 
 def get_cierre_pendiente() -> Dict[str, Any]:
+    ensure_gastos_operacion_schema()
     with db_conn() as conn:
         summary = _build_pending_summary(conn)
     return _serialize_summary(summary)
 
 
 def realizar_cierre(usuario: str) -> Dict[str, Any]:
+    ensure_gastos_operacion_schema()
     with db_conn() as conn:
-        summary = _build_pending_summary(conn)
-        if not summary["hay_pendiente"]:
-            raise LookupError("NO_PENDING_CLOSURE")
+        try:
+            summary = _build_pending_summary(conn, lock_expenses=True)
+            if not summary["hay_pendiente"]:
+                raise LookupError("NO_PENDING_CLOSURE")
 
-        conn.execute(
-            text("""
-                INSERT INTO cierres_diarios (
-                    fecha_inicio, fecha_cierre, total_recaudado,
-                    total_ingresos, total_salidas, total_banos,
-                    total_banos_monto, total_lavados_solos,
-                    total_lavados_solos_monto, total_general, usuario
-                )
-                VALUES (
-                    :fecha_inicio, :fecha_cierre, :total_recaudado,
-                    :total_ingresos, :total_salidas, :total_banos,
-                    :total_banos_monto, :total_lavados_solos,
-                    :total_lavados_solos_monto, :total_general, :usuario
-                )
-            """),
-            {
-                **summary,
-                "usuario": usuario,
-            },
-        )
+            conn.execute(
+                text("""
+                    INSERT INTO cierres_diarios (
+                        fecha_inicio, fecha_cierre, total_recaudado,
+                        total_ingresos, total_salidas, total_banos,
+                        total_banos_monto, total_lavados_solos,
+                        total_lavados_solos_monto, total_general, total_gastos,
+                        total_neto, usuario
+                    )
+                    VALUES (
+                        :fecha_inicio, :fecha_cierre, :total_recaudado,
+                        :total_ingresos, :total_salidas, :total_banos,
+                        :total_banos_monto, :total_lavados_solos,
+                        :total_lavados_solos_monto, :total_general, :total_gastos,
+                        :total_neto, :usuario
+                    )
+                """),
+                {
+                    **summary,
+                    "usuario": usuario,
+                },
+            )
+            id_cierre = int(conn.execute(text("SELECT LAST_INSERT_ID()")).scalar())
 
-        conn.execute(
-            text("""
-                UPDATE ingresos
-                SET cerrado = TRUE
-                WHERE fecha_hora_salida IS NOT NULL
-                  AND cerrado = FALSE
-                  AND fecha_hora_salida <= :fecha_cierre
-            """),
-            {"fecha_cierre": summary["fecha_cierre"]},
-        )
-        conn.execute(
-            text("""
-                UPDATE operaciones_servicio
-                SET cerrado = TRUE
-                WHERE estado = 'FINALIZADO_COBRADO'
-                  AND COALESCE(cerrado, FALSE) = FALSE
-                  AND fecha_hora_fin <= :fecha_cierre
-            """),
-            {"fecha_cierre": summary["fecha_cierre"]},
-        )
-        conn.commit()
+            conn.execute(
+                text("""
+                    UPDATE ingresos
+                    SET cerrado = TRUE
+                    WHERE fecha_hora_salida IS NOT NULL
+                      AND cerrado = FALSE
+                      AND fecha_hora_salida <= :fecha_cierre
+                """),
+                {"fecha_cierre": summary["fecha_cierre"]},
+            )
+            conn.execute(
+                text("""
+                    UPDATE operaciones_servicio
+                    SET cerrado = TRUE
+                    WHERE estado = 'FINALIZADO_COBRADO'
+                      AND COALESCE(cerrado, FALSE) = FALSE
+                      AND fecha_hora_fin <= :fecha_cierre
+                """),
+                {"fecha_cierre": summary["fecha_cierre"]},
+            )
+            _link_expenses_to_cierre(conn, summary["ids_gastos"], id_cierre)
+            _link_bathroom_uses_to_cierre(conn, summary.get("ids_banos", []), id_cierre)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
 
     serialized = _serialize_summary(summary)
     serialized["usuario"] = usuario
@@ -161,7 +192,8 @@ def list_cierres(limit: int = 20) -> List[Dict[str, Any]]:
                 SELECT id_cierre, fecha_inicio, fecha_cierre, total_recaudado,
                        total_ingresos, total_salidas, total_banos,
                        total_banos_monto, total_lavados_solos,
-                       total_lavados_solos_monto, total_general, usuario
+                       total_lavados_solos_monto, total_general, total_gastos,
+                       total_neto, usuario
                 FROM cierres_diarios
                 ORDER BY fecha_cierre DESC
                 LIMIT :limit
@@ -179,6 +211,8 @@ def list_cierres(limit: int = 20) -> List[Dict[str, Any]]:
         item["total_lavados_solos"] = int(item.get("total_lavados_solos") or 0)
         item["total_lavados_solos_monto"] = int(item.get("total_lavados_solos_monto") or 0)
         item["total_general"] = int(item.get("total_general") or 0)
+        item["total_gastos"] = int(item.get("total_gastos") or 0)
+        item["total_neto"] = int(item.get("total_neto") or 0)
         items.append(item)
     return items
 
@@ -186,6 +220,8 @@ def list_cierres(limit: int = 20) -> List[Dict[str, Any]]:
 def _serialize_summary(summary: Dict[str, Any]) -> Dict[str, Any]:
     data = dict(summary)
     data.pop("ids_ingresos", None)
+    data.pop("ids_banos", None)
+    data.pop("ids_gastos", None)
     data["fecha_inicio"] = _iso(data.get("fecha_inicio"))
     data["fecha_cierre"] = _iso(data.get("fecha_cierre"))
     return data
@@ -197,3 +233,43 @@ def _iso(value: Any) -> str | None:
     if hasattr(value, "isoformat"):
         return value.isoformat()
     return str(value)
+
+
+def _link_expenses_to_cierre(conn, expense_ids: List[int], id_cierre: int) -> None:
+    if not expense_ids:
+        return
+    params = {"id_cierre": id_cierre}
+    placeholders = []
+    for index, expense_id in enumerate(expense_ids):
+        key = f"expense_id_{index}"
+        placeholders.append(f":{key}")
+        params[key] = expense_id
+    conn.execute(
+        text(f"""
+            UPDATE gastos_operacion
+            SET id_cierre = :id_cierre
+            WHERE id_cierre IS NULL
+              AND id_gasto IN ({', '.join(placeholders)})
+        """),
+        params,
+    )
+
+
+def _link_bathroom_uses_to_cierre(conn, bathroom_use_ids: List[int], id_cierre: int) -> None:
+    if not bathroom_use_ids:
+        return
+    params = {"id_cierre": id_cierre}
+    placeholders = []
+    for index, bathroom_use_id in enumerate(bathroom_use_ids):
+        key = f"bathroom_use_id_{index}"
+        placeholders.append(f":{key}")
+        params[key] = bathroom_use_id
+    conn.execute(
+        text(f"""
+            UPDATE usos_bano
+            SET id_cierre = :id_cierre
+            WHERE id_cierre IS NULL
+              AND id_uso_bano IN ({', '.join(placeholders)})
+        """),
+        params,
+    )

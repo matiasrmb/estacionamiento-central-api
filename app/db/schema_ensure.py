@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 
 _ensured_operaciones_servicio = False
 _ensured_wash_vehicle_types = False
+_ensured_gastos_operacion = False
 
 _DUPLICATE_SCHEMA_ERROR_CODES = {1060, 1061}
 
@@ -89,6 +90,21 @@ def ensure_wash_vehicle_type_schema() -> None:
     except Exception as exc:
         raise SoloLavadoSchemaUnavailable(SOLO_LAVADO_SCHEMA_UNAVAILABLE_MESSAGE) from exc
     _ensured_wash_vehicle_types = True
+
+
+def ensure_gastos_operacion_schema() -> None:
+    """Ensure operational expenses and close accounting columns exist."""
+    global _ensured_gastos_operacion
+    if _ensured_gastos_operacion:
+        return
+
+    try:
+        with db_conn() as conn:
+            _ensure_gastos_operacion_schema_on_connection(conn)
+            conn.commit()
+    except Exception as exc:
+        raise RuntimeError("GASTOS_SCHEMA_UNAVAILABLE") from exc
+    _ensured_gastos_operacion = True
 
 
 def _ensure_wash_vehicle_type_schema_on_connection(conn: Connection) -> None:
@@ -204,4 +220,31 @@ def _ensure_operaciones_servicio_schema_on_connection(conn: Connection) -> None:
         "ALTER TABLE cierres_diarios ADD COLUMN total_lavados_solos INT NOT NULL DEFAULT 0",
         "ALTER TABLE cierres_diarios ADD COLUMN total_lavados_solos_monto INT NOT NULL DEFAULT 0",
         "ALTER TABLE cierres_diarios ADD COLUMN total_general INT NOT NULL DEFAULT 0",
+    ])
+
+
+def _ensure_gastos_operacion_schema_on_connection(conn: Connection) -> None:
+    _execute_schema(conn, """
+        CREATE TABLE IF NOT EXISTS gastos_operacion (
+            id_gasto INT AUTO_INCREMENT PRIMARY KEY,
+            fecha_hora DATETIME NOT NULL,
+            categoria VARCHAR(50) NOT NULL,
+            descripcion VARCHAR(500) NOT NULL,
+            monto INT NOT NULL,
+            usuario VARCHAR(50) NOT NULL,
+            id_cierre INT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_gastos_operacion_pendiente (id_cierre, fecha_hora),
+            INDEX idx_gastos_operacion_cierre (id_cierre),
+            CONSTRAINT fk_gastos_operacion_cierre
+                FOREIGN KEY (id_cierre) REFERENCES cierres_diarios(id_cierre)
+                ON DELETE RESTRICT
+        )
+    """)
+    _execute_many_schema(conn, [
+        "ALTER TABLE cierres_diarios ADD COLUMN total_gastos INT NOT NULL DEFAULT 0",
+        "ALTER TABLE cierres_diarios ADD COLUMN total_neto INT NOT NULL DEFAULT 0",
+        "ALTER TABLE usos_bano ADD COLUMN id_cierre INT NULL",
+        "ALTER TABLE usos_bano ADD INDEX idx_usos_bano_pendiente (id_cierre, fecha_hora)",
+        "ALTER TABLE usos_bano ADD INDEX idx_usos_bano_cierre (id_cierre)",
     ])

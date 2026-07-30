@@ -19,9 +19,10 @@ class FakeDbConn:
 
 
 class FakeResult:
-    def __init__(self, rows=None, scalar_value=None):
+    def __init__(self, rows=None, scalar_value=None, rowcount=0):
         self.rows = rows or []
         self.scalar_value = scalar_value
+        self.rowcount = rowcount
 
     def mappings(self):
         return self
@@ -79,6 +80,7 @@ class MonthlyPaymentsTests(unittest.TestCase):
                     "patente": "AAA111",
                     "tarifa_mensual": 25000,
                     "dia_vencimiento": 31,
+                    "telefono": "1122334455",
                     "id_pago_mensual": 4,
                     "fecha_pago": datetime(2026, 2, 15, 10, 0),
                     "monto_snapshot": 24000,
@@ -92,6 +94,58 @@ class MonthlyPaymentsTests(unittest.TestCase):
         self.assertEqual(items[0]["estado_pago"], "pagado")
         self.assertTrue(items[0]["pagado_periodo_actual"])
         self.assertEqual(items[0]["periodo_actual"], "2026-02-01")
+        self.assertEqual(items[0]["telefono"], "1122334455")
+
+    def test_create_and_update_persist_monthly_phone(self):
+        class MensualConnection:
+            def __init__(self):
+                self.executed = []
+
+            def execute(self, statement, params=None):
+                sql = str(statement)
+                self.executed.append((sql, params))
+                if "SELECT id_vehiculo FROM vehiculos" in sql:
+                    return FakeResult()
+                if "LAST_INSERT_ID" in sql:
+                    return FakeResult(scalar_value=9)
+                return FakeResult(rowcount=1)
+
+            def commit(self):
+                pass
+
+        conn = MensualConnection()
+        with patch.object(mensuales_repo, "db_conn", return_value=FakeDbConn(conn)):
+            mensuales_repo.upsert_mensual("abc123", 25000, 10, "1122334455")
+            mensuales_repo.update_mensual_config(9, 30000, 15, "1198765432")
+
+        insert = next(entry for entry in conn.executed if "INSERT INTO vehiculos" in entry[0])
+        update = next(entry for entry in conn.executed if "UPDATE vehiculos" in entry[0])
+        self.assertIn("telefono", insert[0])
+        self.assertEqual(insert[1]["telefono"], "1122334455")
+        self.assertEqual(insert[1]["dia_vencimiento"], 10)
+        self.assertIn("telefono = COALESCE(:telefono, telefono)", update[0])
+        self.assertEqual(update[1]["telefono"], "1198765432")
+
+    def test_create_and_update_endpoints_forward_phone(self):
+        create = mensuales.MensualIn(
+            patente="ABC123",
+            tarifa_mensual=25000,
+            dia_vencimiento=10,
+            telefono="1122334455",
+        )
+        update = mensuales.MensualConfigIn(
+            tarifa_mensual=30000,
+            dia_vencimiento=15,
+            telefono="1198765432",
+        )
+        with patch.object(mensuales, "upsert_mensual", return_value=9) as upsert, patch.object(
+            mensuales, "update_mensual_config"
+        ) as update_config:
+            self.assertEqual(mensuales.crear_mensual(create), {"id_vehiculo": 9})
+            self.assertEqual(mensuales.actualizar_mensual(9, update), {"ok": True})
+
+        upsert.assert_called_once_with("ABC123", 25000, 10, "1122334455")
+        update_config.assert_called_once_with(9, 30000, 15, "1198765432")
 
     def test_register_payment_snapshots_server_values(self):
         conn = PaymentConnection(vehicle={"tarifa_mensual": 25000, "dia_vencimiento": 15})

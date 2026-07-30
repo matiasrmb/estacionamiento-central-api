@@ -95,13 +95,14 @@ class EndpointAuthTests(unittest.TestCase):
         self.assertEqual(_allowed_roles(tarifas.actualizar_tarifa_personalizada), {"admin"})
         self.assertEqual(_allowed_roles(tarifas.eliminar_tarifa_personalizada), {"admin"})
 
-    def test_mensuales_requires_admin(self):
-        self.assertEqual(_allowed_roles(mensuales.listar_mensuales), {"admin"})
-        self.assertEqual(_allowed_roles(mensuales.crear_mensual), {"admin"})
-        self.assertEqual(_allowed_roles(mensuales.actualizar_tarifa_mensual), {"admin"})
-        self.assertEqual(_allowed_roles(mensuales.actualizar_mensual), {"admin"})
-        self.assertEqual(_allowed_roles(mensuales.registrar_pago_mensual), {"admin"})
-        self.assertEqual(_allowed_roles(mensuales.eliminar_mensual), {"admin"})
+    def test_mensuales_allows_operator_and_admin(self):
+        allowed = {"operador", "admin"}
+        self.assertEqual(_allowed_roles(mensuales.listar_mensuales), allowed)
+        self.assertEqual(_allowed_roles(mensuales.crear_mensual), allowed)
+        self.assertEqual(_allowed_roles(mensuales.actualizar_tarifa_mensual), allowed)
+        self.assertEqual(_allowed_roles(mensuales.actualizar_mensual), allowed)
+        self.assertEqual(_allowed_roles(mensuales.registrar_pago_mensual), allowed)
+        self.assertEqual(_allowed_roles(mensuales.eliminar_mensual), allowed)
 
     def test_operaciones_allows_operator_and_admin(self):
         allowed = {"operador", "admin"}

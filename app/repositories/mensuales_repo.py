@@ -29,7 +29,7 @@ def list_mensuales(today: date | None = None) -> List[Dict[str, Any]]:
     with db_conn() as conn:
         rows = conn.execute(
             text("""
-                SELECT v.id_vehiculo, v.patente, v.tarifa_mensual, v.dia_vencimiento,
+                SELECT v.id_vehiculo, v.patente, v.tarifa_mensual, v.dia_vencimiento, v.telefono,
                        p.id_pago_mensual, p.fecha_pago, p.monto_snapshot
                 FROM vehiculos v
                 LEFT JOIN pagos_mensuales p
@@ -54,7 +54,12 @@ def list_mensuales(today: date | None = None) -> List[Dict[str, Any]]:
     return items
 
 
-def upsert_mensual(patente: str, tarifa_mensual: int | None = None) -> int:
+def upsert_mensual(
+    patente: str,
+    tarifa_mensual: int | None = None,
+    dia_vencimiento: int | None = None,
+    telefono: str | None = None,
+) -> int:
     patente = patente.strip().upper()
     if not patente:
         raise ValueError("INVALID_PLATE")
@@ -72,18 +77,33 @@ def upsert_mensual(patente: str, tarifa_mensual: int | None = None) -> int:
                     UPDATE vehiculos
                     SET tipo_cliente = 'mensual',
                         activo = 1,
-                        tarifa_mensual = COALESCE(:tarifa_mensual, tarifa_mensual)
+                        tarifa_mensual = COALESCE(:tarifa_mensual, tarifa_mensual),
+                        dia_vencimiento = COALESCE(:dia_vencimiento, dia_vencimiento),
+                        telefono = COALESCE(:telefono, telefono)
                     WHERE id_vehiculo = :id_vehiculo
                 """),
-                {"id_vehiculo": id_vehiculo, "tarifa_mensual": tarifa_mensual},
+                {
+                    "id_vehiculo": id_vehiculo,
+                    "tarifa_mensual": tarifa_mensual,
+                    "dia_vencimiento": dia_vencimiento,
+                    "telefono": telefono,
+                },
             )
         else:
             conn.execute(
                 text("""
-                    INSERT INTO vehiculos (patente, tipo_cliente, activo, tarifa_mensual)
-                    VALUES (:patente, 'mensual', 1, :tarifa_mensual)
+                    INSERT INTO vehiculos (
+                        patente, tipo_cliente, activo, tarifa_mensual, dia_vencimiento, telefono
+                    ) VALUES (
+                        :patente, 'mensual', 1, :tarifa_mensual, COALESCE(:dia_vencimiento, 1), :telefono
+                    )
                 """),
-                {"patente": patente, "tarifa_mensual": tarifa_mensual},
+                {
+                    "patente": patente,
+                    "tarifa_mensual": tarifa_mensual,
+                    "dia_vencimiento": dia_vencimiento,
+                    "telefono": telefono,
+                },
             )
             id_vehiculo = int(conn.execute(text("SELECT LAST_INSERT_ID()")).scalar())
 
@@ -91,13 +111,19 @@ def upsert_mensual(patente: str, tarifa_mensual: int | None = None) -> int:
         return id_vehiculo
 
 
-def update_mensual_config(id_vehiculo: int, tarifa_mensual: int, dia_vencimiento: int) -> None:
+def update_mensual_config(
+    id_vehiculo: int,
+    tarifa_mensual: int,
+    dia_vencimiento: int,
+    telefono: str | None = None,
+) -> None:
     with db_conn() as conn:
         result = conn.execute(
             text("""
                 UPDATE vehiculos
                 SET tarifa_mensual = :tarifa_mensual,
-                    dia_vencimiento = :dia_vencimiento
+                    dia_vencimiento = :dia_vencimiento,
+                    telefono = COALESCE(:telefono, telefono)
                 WHERE id_vehiculo = :id_vehiculo
                   AND tipo_cliente = 'mensual'
                   AND activo = 1
@@ -106,6 +132,7 @@ def update_mensual_config(id_vehiculo: int, tarifa_mensual: int, dia_vencimiento
                 "id_vehiculo": id_vehiculo,
                 "tarifa_mensual": tarifa_mensual,
                 "dia_vencimiento": dia_vencimiento,
+                "telefono": telefono,
             },
         )
         conn.commit()
@@ -117,7 +144,7 @@ def update_tarifa_mensual(id_vehiculo: int, tarifa_mensual: int) -> None:
     with db_conn() as conn:
         row = conn.execute(
             text("""
-                SELECT dia_vencimiento
+                SELECT dia_vencimiento, telefono
                 FROM vehiculos
                 WHERE id_vehiculo = :id_vehiculo
                   AND tipo_cliente = 'mensual'
@@ -127,7 +154,12 @@ def update_tarifa_mensual(id_vehiculo: int, tarifa_mensual: int) -> None:
         ).mappings().first()
     if not row:
         raise LookupError("MENSUAL_NOT_FOUND")
-    update_mensual_config(id_vehiculo, tarifa_mensual, int(row["dia_vencimiento"] or 1))
+    update_mensual_config(
+        id_vehiculo,
+        tarifa_mensual,
+        int(row["dia_vencimiento"] or 1),
+        row.get("telefono"),
+    )
 
 
 def register_monthly_payment(

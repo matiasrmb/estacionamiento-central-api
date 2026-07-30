@@ -270,6 +270,7 @@ def _ensure_gastos_operacion_schema_on_connection(conn: Connection) -> None:
 def _ensure_monthly_payments_schema_on_connection(conn: Connection) -> None:
     _execute_many_schema(conn, [
         "ALTER TABLE vehiculos ADD COLUMN dia_vencimiento TINYINT UNSIGNED NOT NULL DEFAULT 1",
+        "ALTER TABLE vehiculos ADD COLUMN telefono VARCHAR(30) NULL",
         "ALTER TABLE cierres_diarios ADD COLUMN total_mensualidades INT NOT NULL DEFAULT 0",
         "ALTER TABLE cierres_diarios ADD COLUMN total_mensualidades_monto INT NOT NULL DEFAULT 0",
     ])

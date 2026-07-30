@@ -84,6 +84,7 @@ class CierresGastosTests(unittest.TestCase):
                     FakeResult(rows=[]),
                     FakeResult(rows=[]),
                     FakeResult(rows=[{"id_uso_bano": 9, "fecha_hora": datetime(2026, 7, 1, 9, 0), "monto": 300}]),
+                    FakeResult(rows=[]),
                 ]
 
             def execute(self, statement, params=None):
@@ -100,6 +101,10 @@ class CierresGastosTests(unittest.TestCase):
         self.assertIn("WHERE id_cierre IS NULL", bathroom_query)
         self.assertIn("FOR UPDATE", bathroom_query)
         self.assertNotIn("MAX(fecha_cierre)", bathroom_query)
+        monthly_payments_query = conn.executed[4][0]
+        self.assertIn("FROM pagos_mensuales", monthly_payments_query)
+        self.assertIn("WHERE id_cierre IS NULL", monthly_payments_query)
+        self.assertIn("FOR UPDATE", monthly_payments_query)
         self.assertTrue(summary["hay_pendiente"])
         self.assertEqual(summary["total_banos_monto"], 300)
         self.assertEqual(summary["fecha_inicio"], datetime(2026, 7, 1, 9, 0))
@@ -126,7 +131,7 @@ class CierresGastosTests(unittest.TestCase):
             "ids_banos": [3, 4],
             "ids_gastos": [5, 8],
         }
-        with patch.object(cierres_repo, "ensure_gastos_operacion_schema"), \
+        with patch.object(cierres_repo, "ensure_monthly_payments_schema"), \
              patch.object(cierres_repo, "db_conn", return_value=FakeDbConn(conn)), \
              patch.object(cierres_repo, "_build_pending_summary", return_value=summary) as build:
             result = cierres_repo.realizar_cierre("admin")
@@ -149,7 +154,7 @@ class CierresGastosTests(unittest.TestCase):
 
     def test_no_pending_close_does_not_link_expenses(self):
         conn = FakeConnection()
-        with patch.object(cierres_repo, "ensure_gastos_operacion_schema"), \
+        with patch.object(cierres_repo, "ensure_monthly_payments_schema"), \
              patch.object(cierres_repo, "db_conn", return_value=FakeDbConn(conn)), \
              patch.object(cierres_repo, "_build_pending_summary", return_value={"hay_pendiente": False}):
             with self.assertRaises(LookupError):

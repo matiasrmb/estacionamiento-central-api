@@ -35,6 +35,7 @@ def obtener_reporte(fecha_inicio: date, fecha_fin: date, patente: str = "") -> D
 
         accounting_items = list(items)
         lavados_solos = []
+        pagos_mensuales = []
         if not patente:
             banos = conn.execute(
                 text("""
@@ -72,9 +73,25 @@ def obtener_reporte(fecha_inicio: date, fecha_fin: date, patente: str = "") -> D
             ).mappings().all()
             for lavado in lavados_solos:
                 items.append(_serialize_solo_lavado(lavado))
+        monthly_payments_query = """
+            SELECT v.patente, p.fecha_pago, p.monto_snapshot, p.usuario,
+                   p.metodo_pago, p.observacion, p.periodo
+            FROM pagos_mensuales p
+            JOIN vehiculos v ON v.id_vehiculo = p.id_vehiculo
+            WHERE DATE(p.fecha_pago) BETWEEN :fecha_inicio AND :fecha_fin
+        """
+        if patente:
+            monthly_payments_query += " AND v.patente = :patente"
+        monthly_payments_query += " ORDER BY p.fecha_pago ASC"
+        pagos_mensuales = conn.execute(
+            text(monthly_payments_query),
+            params,
+        ).mappings().all()
+        for pago in pagos_mensuales:
+            items.append(_serialize_pago_mensual(pago))
 
     items.sort(key=lambda item: item["fecha_hora_salida"] or "")
-    totals = build_report_totals(accounting_items, lavados_solos)
+    totals = build_report_totals(accounting_items, lavados_solos, pagos_mensuales)
     totals["total_movimientos"] = len(items)
     return {
         "fecha_inicio": fecha_inicio.isoformat(),
@@ -105,6 +122,21 @@ def _serialize_solo_lavado(row) -> Dict[str, Any]:
         "minutos": int(row["minutos"] or 0),
         "tarifa_aplicada": int(row["valor_lavado_snapshot"] or 0),
         "usuario": row.get("usuario_fin"),
+    }
+
+
+def _serialize_pago_mensual(row) -> Dict[str, Any]:
+    return {
+        "tipo": "pago_mensual",
+        "patente": row["patente"],
+        "fecha_hora_ingreso": _iso(row["fecha_pago"]),
+        "fecha_hora_salida": _iso(row["fecha_pago"]),
+        "minutos": 0,
+        "tarifa_aplicada": int(row["monto_snapshot"] or 0),
+        "usuario": row.get("usuario"),
+        "metodo_pago": row.get("metodo_pago"),
+        "observacion": row.get("observacion"),
+        "periodo": _iso(row.get("periodo")),
     }
 
 

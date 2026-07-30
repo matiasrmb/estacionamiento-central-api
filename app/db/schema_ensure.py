@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 _ensured_operaciones_servicio = False
 _ensured_wash_vehicle_types = False
 _ensured_gastos_operacion = False
+_ensured_monthly_payments = False
 
 _DUPLICATE_SCHEMA_ERROR_CODES = {1060, 1061}
 
@@ -105,6 +106,22 @@ def ensure_gastos_operacion_schema() -> None:
     except Exception as exc:
         raise RuntimeError("GASTOS_SCHEMA_UNAVAILABLE") from exc
     _ensured_gastos_operacion = True
+
+
+def ensure_monthly_payments_schema() -> None:
+    """Ensure monthly payment events and their close totals exist."""
+    global _ensured_monthly_payments
+    if _ensured_monthly_payments:
+        return
+    try:
+        with db_conn() as conn:
+            if not _ensured_gastos_operacion:
+                _ensure_gastos_operacion_schema_on_connection(conn)
+            _ensure_monthly_payments_schema_on_connection(conn)
+            conn.commit()
+    except Exception as exc:
+        raise RuntimeError("MONTHLY_PAYMENTS_SCHEMA_UNAVAILABLE") from exc
+    _ensured_monthly_payments = True
 
 
 def _ensure_wash_vehicle_type_schema_on_connection(conn: Connection) -> None:
@@ -248,3 +265,33 @@ def _ensure_gastos_operacion_schema_on_connection(conn: Connection) -> None:
         "ALTER TABLE usos_bano ADD INDEX idx_usos_bano_pendiente (id_cierre, fecha_hora)",
         "ALTER TABLE usos_bano ADD INDEX idx_usos_bano_cierre (id_cierre)",
     ])
+
+
+def _ensure_monthly_payments_schema_on_connection(conn: Connection) -> None:
+    _execute_many_schema(conn, [
+        "ALTER TABLE vehiculos ADD COLUMN dia_vencimiento TINYINT UNSIGNED NOT NULL DEFAULT 1",
+        "ALTER TABLE cierres_diarios ADD COLUMN total_mensualidades INT NOT NULL DEFAULT 0",
+        "ALTER TABLE cierres_diarios ADD COLUMN total_mensualidades_monto INT NOT NULL DEFAULT 0",
+    ])
+    _execute_schema(conn, """
+        CREATE TABLE IF NOT EXISTS pagos_mensuales (
+            id_pago_mensual INT AUTO_INCREMENT PRIMARY KEY,
+            id_vehiculo INT NOT NULL,
+            periodo DATE NOT NULL,
+            dia_vencimiento_snapshot TINYINT UNSIGNED NOT NULL,
+            monto_snapshot INT NOT NULL,
+            fecha_pago DATETIME NOT NULL,
+            usuario VARCHAR(50) NOT NULL,
+            metodo_pago VARCHAR(40) NULL,
+            observacion VARCHAR(500) NULL,
+            id_cierre INT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE KEY uq_pagos_mensuales_vehiculo_periodo (id_vehiculo, periodo),
+            INDEX idx_pagos_mensuales_pendiente_cierre (id_cierre, fecha_pago),
+            INDEX idx_pagos_mensuales_periodo (periodo),
+            CONSTRAINT fk_pagos_mensuales_vehiculo
+                FOREIGN KEY (id_vehiculo) REFERENCES vehiculos(id_vehiculo),
+            CONSTRAINT fk_pagos_mensuales_cierre
+                FOREIGN KEY (id_cierre) REFERENCES cierres_diarios(id_cierre)
+        )
+    """)

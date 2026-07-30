@@ -14,8 +14,16 @@ def _install_optional_dependency_stubs():
         sqlalchemy_engine_stub.Connection = object
         sqlalchemy_engine_stub.Engine = object
 
+        sqlalchemy_exc_stub = types.ModuleType("sqlalchemy.exc")
+
+        class IntegrityError(Exception):
+            pass
+
+        sqlalchemy_exc_stub.IntegrityError = IntegrityError
+
         sys.modules["sqlalchemy"] = sqlalchemy_stub
         sys.modules["sqlalchemy.engine"] = sqlalchemy_engine_stub
+        sys.modules["sqlalchemy.exc"] = sqlalchemy_exc_stub
 
     if "jose" not in sys.modules:
         jose_stub = types.ModuleType("jose")
@@ -86,6 +94,8 @@ class EndpointAuthTests(unittest.TestCase):
         self.assertEqual(_allowed_roles(mensuales.listar_mensuales), {"admin"})
         self.assertEqual(_allowed_roles(mensuales.crear_mensual), {"admin"})
         self.assertEqual(_allowed_roles(mensuales.actualizar_tarifa_mensual), {"admin"})
+        self.assertEqual(_allowed_roles(mensuales.actualizar_mensual), {"admin"})
+        self.assertEqual(_allowed_roles(mensuales.registrar_pago_mensual), {"admin"})
         self.assertEqual(_allowed_roles(mensuales.eliminar_mensual), {"admin"})
 
     def test_operaciones_allows_operator_and_admin(self):

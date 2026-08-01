@@ -1,7 +1,7 @@
 import re
 
 
-_VALID_PLATE_PATTERN = re.compile(r"^(?:[A-Z]{4}[0-9]{2}|[A-Z]{3}[0-9]{2}|[A-Z]{2}[0-9]{3}[A-Z]{2}|[A-Z]{3}[0-9]{3})$")
+_VALID_PLATE_PATTERN = re.compile(r"^(?:[A-Z]{4}[0-9]{2}|[A-Z]{3}[0-9]{2}|[A-Z]{2}[0-9]{3}[A-Z]{2}|[A-Z]{3}[0-9]{3}|[A-Z]{2}[0-9]{4})$")
 
 
 def normalize_plate(value: str) -> str:

@@ -9,7 +9,7 @@ from app.core.plates import is_valid_plate, normalize_plate
 
 class PlateTests(unittest.TestCase):
     def test_accepts_all_supported_formats(self):
-        for plate in ("ABCD12", "ABC12", "AB123CD", "ABC123"):
+        for plate in ("ABCD12", "ABC12", "AB123CD", "ABC123", "AB1234"):
             with self.subTest(plate=plate):
                 self.assertTrue(is_valid_plate(plate))
 

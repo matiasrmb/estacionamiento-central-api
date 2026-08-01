@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
 from app.api.deps import require_role
+from app.core.plates import require_valid_plate
 from app.repositories.mensuales_repo import (
     deactivate_mensual,
     list_mensuales,
@@ -46,7 +47,7 @@ def listar_mensuales(_user=Depends(require_role("admin", "operador"))):
 def crear_mensual(payload: MensualIn, _user=Depends(require_role("admin", "operador"))):
     try:
         id_vehiculo = upsert_mensual(
-            payload.patente,
+            require_valid_plate(payload.patente),
             payload.tarifa_mensual,
             payload.dia_vencimiento,
             payload.telefono,

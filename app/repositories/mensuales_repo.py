@@ -6,6 +6,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from app.db.database import db_conn
+from app.core.plates import require_valid_plate
 
 
 def current_period(today: date | None = None) -> date:
@@ -60,9 +61,7 @@ def upsert_mensual(
     dia_vencimiento: int | None = None,
     telefono: str | None = None,
 ) -> int:
-    patente = patente.strip().upper()
-    if not patente:
-        raise ValueError("INVALID_PLATE")
+    patente = require_valid_plate(patente)
 
     with db_conn() as conn:
         row = conn.execute(

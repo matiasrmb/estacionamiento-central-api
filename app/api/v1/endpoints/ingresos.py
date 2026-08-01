@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
 from app.api.deps import require_role
+from app.core.plates import require_valid_plate
 from app.repositories.ingresos_repo import (
     ActiveIngresoAlreadyExists,
     NochesNotAvailable,
@@ -23,7 +24,10 @@ class IngresoRequest(BaseModel):
 
 @router.post("/ingresos", tags=["mvp"])
 def registrar_ingreso(payload: IngresoRequest, user=Depends(require_role("operador", "admin"))):
-    patente = payload.patente.strip().upper()
+    try:
+        patente = require_valid_plate(payload.patente)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
     now = datetime.now()  # hora servidor local
     hora_ingreso_iso = now.isoformat(timespec="seconds")
 

@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import text
 
 from app.db.database import db_conn
+from app.core.plates import require_valid_plate
 from app.db.schema_ensure import ensure_operaciones_servicio_schema, ensure_wash_vehicle_type_schema
 from app.services.print_jobs import crear_print_job_solo_lavado
 
@@ -74,7 +75,7 @@ def _state_value(estado: Any) -> str:
 def iniciar_solo_lavado(patente: str, id_tipo_vehiculo_lavado: int, usuario: str) -> Dict[str, Any]:
     ensure_wash_vehicle_type_schema()
     ensure_operaciones_servicio_schema()
-    patente = patente.strip().upper()
+    patente = require_valid_plate(patente)
     now = datetime.now()
     with db_conn() as conn:
         active_ingreso = conn.execute(text("""

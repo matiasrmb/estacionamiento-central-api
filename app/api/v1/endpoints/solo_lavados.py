@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
 from app.api.deps import require_role
+from app.core.plates import require_valid_plate
 from app.db.schema_ensure import NO_SOLO_LAVADO_PRICE_CONFIG_MESSAGE, SoloLavadoSchemaUnavailable
 from app.repositories.operaciones_servicio_repo import (
     convertir_solo_lavado_a_estadia as repo_convertir_solo_lavado_a_estadia,
@@ -36,7 +37,7 @@ def _handle_solo_lavado_error(exc: Exception) -> None:
 def iniciar_solo_lavado(payload: SoloLavadoInicioIn, user=Depends(require_role("operador", "admin"))):
     try:
         return repo_iniciar_solo_lavado(
-            payload.patente,
+            require_valid_plate(payload.patente),
             payload.id_tipo_vehiculo_lavado,
             user.get("sub") or "",
         )

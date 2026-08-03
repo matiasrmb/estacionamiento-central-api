@@ -451,6 +451,7 @@ def calcular_montos_activos_con_lavados(
     conn: Connection,
     ingresos: list[dict[str, object]],
     calculado_a: datetime,
+    as_of: datetime | None = None,
 ) -> dict[int, tuple[int, int, str, int, int]]:
     """Cotiza activos sin repetir consultas de lavados ni tarifas por ingreso."""
     if not ingresos:
@@ -462,17 +463,19 @@ def calcular_montos_activos_con_lavados(
             SELECT id_ingreso, fecha_hora_inicio, fecha_hora_fin
             FROM lavados
             WHERE id_ingreso IN :ids
+              AND (:as_of IS NULL OR fecha_hora_inicio <= :as_of)
         """).bindparams(bindparam("ids", expanding=True)),
-        {"ids": ids},
+        {"ids": ids, "as_of": as_of},
     ).mappings().all()
     lavado_totales = conn.execute(
         text("""
             SELECT id_ingreso, COALESCE(SUM(valor_lavado), 0) AS total
             FROM lavados
             WHERE id_ingreso IN :ids
+              AND (:as_of IS NULL OR fecha_hora_inicio <= :as_of)
             GROUP BY id_ingreso
         """).bindparams(bindparam("ids", expanding=True)),
-        {"ids": ids},
+        {"ids": ids, "as_of": as_of},
     ).mappings().all()
     convertidos_totales = conn.execute(
         text("""
@@ -480,9 +483,10 @@ def calcular_montos_activos_con_lavados(
             FROM operaciones_servicio
             WHERE id_ingreso_generado IN :ids
               AND estado = 'CONVERTIDO_ESTADIA'
+              AND (:as_of IS NULL OR fecha_hora_fin <= :as_of)
             GROUP BY id_ingreso_generado
         """).bindparams(bindparam("ids", expanding=True)),
-        {"ids": ids},
+        {"ids": ids, "as_of": as_of},
     ).mappings().all()
 
     intervalos_lavado = {id_ingreso: [] for id_ingreso in ids}

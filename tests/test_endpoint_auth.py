@@ -53,7 +53,7 @@ def _install_optional_dependency_stubs():
 
 _install_optional_dependency_stubs()
 
-from app.api.v1.endpoints import activos, asistencias, cierres, configuracion, gastos, ingresos, mensuales, operaciones, reportes, salidas, tarifas, usuarios
+from app.api.v1.endpoints import activos, asistencias, cierres, configuracion, gastos, ingresos, mensuales, operaciones, reportes, resumen_turno, salidas, tarifas, usuarios
 
 
 def _role_dependency(function):
@@ -78,6 +78,9 @@ class EndpointAuthTests(unittest.TestCase):
 
     def test_activos_allows_operator_and_admin(self):
         self.assertEqual(_allowed_roles(activos.listar_activos), {"operador", "admin"})
+
+    def test_resumen_turno_allows_operator_and_admin(self):
+        self.assertEqual(_allowed_roles(resumen_turno.obtener_resumen_turno), {"operador", "admin"})
 
     def test_salida_preview_allows_operator_and_admin(self):
         self.assertEqual(_allowed_roles(salidas.preview_salida), {"operador", "admin"})

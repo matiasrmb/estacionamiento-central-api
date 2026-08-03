@@ -53,57 +53,76 @@ def build_cierre_summary_from_rows(
     }
 
 
-def _build_pending_summary(conn, lock_expenses: bool = False) -> Dict[str, Any]:
+def _build_pending_summary(
+    conn,
+    lock_expenses: bool = False,
+    fecha_cierre: datetime | None = None,
+    as_of: datetime | None = None,
+) -> Dict[str, Any]:
+    fecha_cierre = fecha_cierre or as_of or datetime.now()
+    as_of_params = {"as_of": as_of} if as_of else {}
+    ingresos_as_of = "AND fecha_hora_salida <= :as_of" if as_of else ""
     registros = conn.execute(
-        text("""
+        text(f"""
             SELECT id_ingreso, fecha_hora_ingreso, fecha_hora_salida, tarifa_aplicada
             FROM ingresos
             WHERE fecha_hora_salida IS NOT NULL
               AND cerrado = FALSE
+              {ingresos_as_of}
             ORDER BY fecha_hora_salida ASC
-        """)
+        """),
+        as_of_params,
     ).mappings().all()
 
-    fecha_cierre = datetime.now()
+    lavados_as_of = "AND fecha_hora_fin <= :as_of" if as_of else ""
     lavados_solos = conn.execute(
-        text("""
+        text(f"""
             SELECT id_operacion_servicio, fecha_hora_fin, estado, valor_lavado_snapshot
             FROM operaciones_servicio
             WHERE estado = 'FINALIZADO_COBRADO'
               AND COALESCE(cerrado, FALSE) = FALSE
               AND fecha_hora_fin IS NOT NULL
+              {lavados_as_of}
             ORDER BY fecha_hora_fin ASC
-        """)
+        """),
+        as_of_params,
     ).mappings().all()
 
-    gastos_sql = """
+    gastos_as_of = "AND fecha_hora <= :as_of" if as_of else ""
+    gastos_sql = f"""
         SELECT id_gasto, fecha_hora, monto
         FROM gastos_operacion
         WHERE id_cierre IS NULL
+          {gastos_as_of}
         ORDER BY fecha_hora ASC, id_gasto ASC
     """
     if lock_expenses:
         gastos_sql += " FOR UPDATE"
-    gastos = conn.execute(text(gastos_sql)).mappings().all()
+    gastos = conn.execute(text(gastos_sql), as_of_params).mappings().all()
 
+    banos_as_of = "AND fecha_hora <= :as_of" if as_of else ""
     banos = conn.execute(
-        text("""
+        text(f"""
             SELECT id AS id_uso_bano, fecha_hora, monto
             FROM usos_bano
             WHERE id_cierre IS NULL
+              {banos_as_of}
             ORDER BY fecha_hora ASC, id ASC
         """ + (" FOR UPDATE" if lock_expenses else "")),
+        as_of_params,
     ).mappings().all()
 
-    monthly_payments_sql = """
+    monthly_payments_as_of = "AND fecha_pago <= :as_of" if as_of else ""
+    monthly_payments_sql = f"""
         SELECT id_pago_mensual, fecha_pago, monto_snapshot
         FROM pagos_mensuales
         WHERE id_cierre IS NULL
+          {monthly_payments_as_of}
         ORDER BY fecha_pago ASC, id_pago_mensual ASC
     """
     if lock_expenses:
         monthly_payments_sql += " FOR UPDATE"
-    monthly_payments = conn.execute(text(monthly_payments_sql)).mappings().all()
+    monthly_payments = conn.execute(text(monthly_payments_sql), as_of_params).mappings().all()
 
     night_charges_sql = """
         SELECT id_cobro_noche, fecha_hora_pago, monto_snapshot

@@ -111,6 +111,27 @@ class _BatchConnection:
         raise AssertionError(f"Unexpected query: {sql}")
 
 
+class _AsOfBatchConnection(_BatchConnection):
+    def execute(self, statement, params=None):
+        sql = str(statement)
+        self.queries.append(sql)
+        as_of = params.get("as_of") if params else None
+        if "fecha_hora_inicio, fecha_hora_fin" in sql:
+            rows = [row for row in self.lavado_rows if as_of is None or row["fecha_hora_inicio"] <= as_of]
+            return _BatchResult(rows=rows)
+        if "SUM(valor_lavado)" in sql:
+            rows = [row for row in self.lavado_totals if as_of is None or row["fecha_hora_inicio"] <= as_of]
+            return _BatchResult(rows=rows)
+        if "SUM(valor_lavado_snapshot)" in sql:
+            rows = [row for row in self.convertido_totals if as_of is None or row["fecha_hora_fin"] <= as_of]
+            return _BatchResult(rows=rows)
+        if "FROM configuracion" in sql:
+            return _BatchResult(rows=list(self.config.items()))
+        if "FROM subida_precios" in sql:
+            return _BatchResult()
+        raise AssertionError(f"Unexpected query: {sql}")
+
+
 class _NightConnection(_FakeConnection):
     def __init__(self, config, wash_rows=None, subida=None):
         super().__init__(config, subida=subida)
@@ -420,6 +441,39 @@ class CalcularMontoMvpTests(unittest.TestCase):
         self.assertEqual(monto, 10775)
         self.assertIn("lavados $9000", detalle)
         self.assertIn("incluye solo lavado convertido $9000", detalle)
+
+    def test_active_batch_snapshot_excludes_future_wash_and_conversion(self):
+        consultado_a = datetime(2026, 7, 1, 11, 0)
+        conn = _AsOfBatchConnection(
+            lavado_rows=[{
+                "id_ingreso": 1,
+                "fecha_hora_inicio": datetime(2026, 7, 1, 11, 1),
+                "fecha_hora_fin": datetime(2026, 7, 1, 11, 30),
+            }],
+            lavado_totals=[{
+                "id_ingreso": 1,
+                "fecha_hora_inicio": datetime(2026, 7, 1, 11, 1),
+                "total": 5000,
+            }],
+            convertido_totals=[{
+                "id_ingreso_generado": 1,
+                "fecha_hora_fin": datetime(2026, 7, 1, 11, 1),
+                "total": 9000,
+            }],
+        )
+
+        cotizacion = calcular_montos_activos_con_lavados(
+            conn,
+            [{"id_ingreso": 1, "fecha_hora_ingreso": datetime(2026, 7, 1, 10, 0)}],
+            consultado_a,
+            as_of=consultado_a,
+        )[1]
+
+        self.assertEqual(cotizacion[0], 60)
+        self.assertEqual(cotizacion[2], "Modo minuto")
+        self.assertEqual(cotizacion[4], 0)
+        self.assertNotIn("lavados", cotizacion[2])
+        self.assertTrue(all(":as_of" in query for query in conn.queries[:3]))
 
 
 if __name__ == "__main__":

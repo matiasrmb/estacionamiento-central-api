@@ -118,6 +118,56 @@ class CierresGastosTests(unittest.TestCase):
         self.assertEqual(summary["fecha_inicio"], datetime(2026, 7, 1, 9, 0))
         self.assertEqual(summary["ids_banos"], [9])
 
+    def test_pending_summary_as_of_excludes_operations_after_the_snapshot(self):
+        as_of = datetime(2026, 7, 1, 10, 0)
+        before = datetime(2026, 7, 1, 9, 0)
+        after = datetime(2026, 7, 1, 11, 0)
+
+        class SnapshotConnection:
+            def execute(self, statement, params=None):
+                sql = str(statement)
+                if "FROM ingresos" in sql:
+                    rows, field = [
+                        {"id_ingreso": 1, "fecha_hora_ingreso": before, "fecha_hora_salida": before, "tarifa_aplicada": 1000},
+                        {"id_ingreso": 2, "fecha_hora_ingreso": after, "fecha_hora_salida": after, "tarifa_aplicada": 2000},
+                    ], "fecha_hora_salida"
+                elif "FROM operaciones_servicio" in sql:
+                    rows, field = [
+                        {"id_operacion_servicio": 3, "fecha_hora_fin": before, "estado": "FINALIZADO_COBRADO", "valor_lavado_snapshot": 3000},
+                        {"id_operacion_servicio": 4, "fecha_hora_fin": after, "estado": "FINALIZADO_COBRADO", "valor_lavado_snapshot": 4000},
+                    ], "fecha_hora_fin"
+                elif "FROM gastos_operacion" in sql:
+                    rows, field = [
+                        {"id_gasto": 5, "fecha_hora": before, "monto": 500},
+                        {"id_gasto": 6, "fecha_hora": after, "monto": 600},
+                    ], "fecha_hora"
+                elif "FROM usos_bano" in sql:
+                    rows, field = [
+                        {"id_uso_bano": 7, "fecha_hora": before, "monto": 200},
+                        {"id_uso_bano": 8, "fecha_hora": after, "monto": 300},
+                    ], "fecha_hora"
+                elif "FROM pagos_mensuales" in sql:
+                    rows, field = [
+                        {"id_pago_mensual": 9, "fecha_pago": before, "monto_snapshot": 5000},
+                        {"id_pago_mensual": 10, "fecha_pago": after, "monto_snapshot": 6000},
+                    ], "fecha_pago"
+                else:
+                    rows, field = [], "fecha_hora_pago"
+
+                if ":as_of" in sql:
+                    rows = [row for row in rows if row[field] <= params["as_of"]]
+                return FakeResult(rows=rows)
+
+        summary = cierres_repo._build_pending_summary(SnapshotConnection(), as_of=as_of)
+
+        self.assertEqual(summary["ids_ingresos"], [1])
+        self.assertEqual(summary["ids_operaciones_servicio"], [3])
+        self.assertEqual(summary["ids_gastos"], [5])
+        self.assertEqual(summary["ids_banos"], [7])
+        self.assertEqual(summary["ids_pagos_mensuales"], [9])
+        self.assertEqual(summary["total_general"], 9200)
+        self.assertEqual(summary["total_gastos"], 500)
+
     def test_expense_only_close_is_valid_and_links_only_selected_expenses(self):
         conn = FakeConnection()
         summary = {

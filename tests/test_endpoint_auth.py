@@ -45,6 +45,8 @@ def _install_optional_dependency_stubs():
     if "app.core.security" not in sys.modules:
         security_stub = types.ModuleType("app.core.security")
         security_stub.decode_token = lambda token: {"sub": "tester", "rol": "operador"}
+        security_stub.verify_password = lambda plain, hashed: False
+        security_stub.create_access_token = lambda subject, claims: "token"
 
         class PasswordContextStub:
             def hash(self, value):
@@ -56,7 +58,7 @@ def _install_optional_dependency_stubs():
 
 _install_optional_dependency_stubs()
 
-from app.api.v1.endpoints import activos, asistencias, cierres, configuracion, gastos, ingresos, mensuales, operaciones, reportes, resumen_turno, salidas, tarifas, usuarios
+from app.api.v1.endpoints import activos, asistencias, auth, cierres, configuracion, gastos, ingresos, mensuales, operaciones, reportes, resumen_turno, salidas, tarifas, usuarios
 
 
 def _role_dependency(function):
@@ -134,6 +136,19 @@ class EndpointAuthTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.status_code, 409)
         self.assertEqual(raised.exception.detail, "DAILY_CLOSE_IN_PROGRESS")
+
+    def test_login_siempre_registra_asistencia_aunque_el_cliente_intente_omitirse(self):
+        user = {"usuario": "operador", "activo": 1, "clave_hash": "hash", "rol": "operador", "id_usuario": 4}
+        with (
+            patch.object(auth, "get_user_by_username", return_value=user),
+            patch.object(auth, "verify_password", return_value=True),
+            patch.object(auth, "create_access_token", return_value="token"),
+            patch.object(auth, "registrar_asistencia_inicio") as registrar_asistencia,
+        ):
+            response = auth.login(auth.LoginRequest(usuario="operador", clave="secreta", registrar_asistencia=False))
+
+        self.assertEqual(response.access_token, "token")
+        registrar_asistencia.assert_called_once_with("operador")
 
     def test_gastos_allows_operator_and_admin(self):
         allowed = {"operador", "admin"}

@@ -8,6 +8,13 @@ from app.db.schema_ensure import ensure_monthly_payments_schema, ensure_noches_s
 from app.repositories.accounting_contracts import build_accounting_summary
 
 
+_DAILY_CLOSE_LOCK_NAME = "estacionamiento-central:daily-close"
+
+
+class DailyCloseInProgressError(RuntimeError):
+    """Raised when another API request is already finalizing the daily close."""
+
+
 def build_cierre_summary_from_rows(
     parking_movements,
     bathroom_uses,
@@ -70,7 +77,7 @@ def _build_pending_summary(
               AND cerrado = FALSE
               {ingresos_as_of}
             ORDER BY fecha_hora_salida ASC
-        """),
+        """ + (" FOR UPDATE" if lock_expenses else "")),
         as_of_params,
     ).mappings().all()
 
@@ -84,7 +91,7 @@ def _build_pending_summary(
               AND fecha_hora_fin IS NOT NULL
               {lavados_as_of}
             ORDER BY fecha_hora_fin ASC
-        """),
+        """ + (" FOR UPDATE" if lock_expenses else "")),
         as_of_params,
     ).mappings().all()
 
@@ -193,8 +200,19 @@ def realizar_cierre(usuario: str) -> Dict[str, Any]:
     ensure_monthly_payments_schema()
     ensure_noches_schema()
     with db_conn() as conn:
+        lock_acquired = False
         try:
-            summary = _build_pending_summary(conn, lock_expenses=True)
+            lock_acquired = _acquire_daily_close_lock(conn)
+            if not lock_acquired:
+                raise DailyCloseInProgressError("DAILY_CLOSE_IN_PROGRESS")
+
+            cutoff_at = datetime.now()
+            summary = _build_pending_summary(
+                conn,
+                lock_expenses=True,
+                fecha_cierre=cutoff_at,
+                as_of=cutoff_at,
+            )
             if not summary["hay_pendiente"]:
                 raise LookupError("NO_PENDING_CLOSURE")
 
@@ -226,26 +244,8 @@ def realizar_cierre(usuario: str) -> Dict[str, Any]:
             )
             id_cierre = int(conn.execute(text("SELECT LAST_INSERT_ID()")).scalar())
 
-            conn.execute(
-                text("""
-                    UPDATE ingresos
-                    SET cerrado = TRUE
-                    WHERE fecha_hora_salida IS NOT NULL
-                      AND cerrado = FALSE
-                      AND fecha_hora_salida <= :fecha_cierre
-                """),
-                {"fecha_cierre": summary["fecha_cierre"]},
-            )
-            conn.execute(
-                text("""
-                    UPDATE operaciones_servicio
-                    SET cerrado = TRUE
-                    WHERE estado = 'FINALIZADO_COBRADO'
-                      AND COALESCE(cerrado, FALSE) = FALSE
-                      AND fecha_hora_fin <= :fecha_cierre
-                """),
-                {"fecha_cierre": summary["fecha_cierre"]},
-            )
+            _mark_ingresos_closed(conn, summary["ids_ingresos"])
+            _mark_wash_only_operations_closed(conn, summary["ids_operaciones_servicio"])
             _link_expenses_to_cierre(conn, summary["ids_gastos"], id_cierre)
             _link_bathroom_uses_to_cierre(conn, summary.get("ids_banos", []), id_cierre)
             _link_monthly_payments_to_cierre(conn, summary.get("ids_pagos_mensuales", []), id_cierre)
@@ -254,6 +254,9 @@ def realizar_cierre(usuario: str) -> Dict[str, Any]:
         except Exception:
             conn.rollback()
             raise
+        finally:
+            if lock_acquired:
+                _release_daily_close_lock(conn)
 
     serialized = _serialize_summary(summary)
     serialized["usuario"] = usuario
@@ -316,6 +319,63 @@ def _iso(value: Any) -> str | None:
     if hasattr(value, "isoformat"):
         return value.isoformat()
     return str(value)
+
+
+def _acquire_daily_close_lock(conn) -> bool:
+    result = conn.execute(
+        text("SELECT GET_LOCK(:lock_name, 0)"),
+        {"lock_name": _DAILY_CLOSE_LOCK_NAME},
+    ).scalar()
+    return result == 1
+
+
+def _release_daily_close_lock(conn) -> None:
+    conn.execute(
+        text("SELECT RELEASE_LOCK(:lock_name)"),
+        {"lock_name": _DAILY_CLOSE_LOCK_NAME},
+    )
+
+
+def _mark_ingresos_closed(conn, ingreso_ids: List[int]) -> None:
+    if not ingreso_ids:
+        return
+    params, placeholders = _id_params("ingreso_id", ingreso_ids)
+    conn.execute(
+        text(f"""
+            UPDATE ingresos
+            SET cerrado = TRUE
+            WHERE fecha_hora_salida IS NOT NULL
+              AND cerrado = FALSE
+              AND id_ingreso IN ({', '.join(placeholders)})
+        """),
+        params,
+    )
+
+
+def _mark_wash_only_operations_closed(conn, operation_ids: List[int]) -> None:
+    if not operation_ids:
+        return
+    params, placeholders = _id_params("operation_id", operation_ids)
+    conn.execute(
+        text(f"""
+            UPDATE operaciones_servicio
+            SET cerrado = TRUE
+            WHERE estado = 'FINALIZADO_COBRADO'
+              AND COALESCE(cerrado, FALSE) = FALSE
+              AND id_operacion_servicio IN ({', '.join(placeholders)})
+        """),
+        params,
+    )
+
+
+def _id_params(prefix: str, ids: List[int]) -> tuple[Dict[str, int], List[str]]:
+    params = {}
+    placeholders = []
+    for index, item_id in enumerate(ids):
+        key = f"{prefix}_{index}"
+        placeholders.append(f":{key}")
+        params[key] = item_id
+    return params, placeholders
 
 
 def _link_expenses_to_cierre(conn, expense_ids: List[int], id_cierre: int) -> None:

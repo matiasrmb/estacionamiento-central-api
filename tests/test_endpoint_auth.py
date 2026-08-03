@@ -2,6 +2,9 @@ import inspect
 import sys
 import types
 import unittest
+from unittest.mock import patch
+
+from fastapi import HTTPException
 
 
 def _install_optional_dependency_stubs():
@@ -119,6 +122,18 @@ class EndpointAuthTests(unittest.TestCase):
         self.assertEqual(_allowed_roles(cierres.obtener_cierre_pendiente), allowed)
         self.assertEqual(_allowed_roles(cierres.listar_cierres), allowed)
         self.assertEqual(_allowed_roles(cierres.crear_cierre), allowed)
+
+    def test_cierre_lock_conflict_returns_conflict_response(self):
+        with patch.object(
+            cierres,
+            "realizar_cierre",
+            side_effect=cierres.DailyCloseInProgressError(),
+        ):
+            with self.assertRaises(HTTPException) as raised:
+                cierres.crear_cierre({"sub": "operador"})
+
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertEqual(raised.exception.detail, "DAILY_CLOSE_IN_PROGRESS")
 
     def test_gastos_allows_operator_and_admin(self):
         allowed = {"operador", "admin"}

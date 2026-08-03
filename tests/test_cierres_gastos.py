@@ -40,6 +40,8 @@ class FakeConnection:
     def execute(self, statement, params=None):
         sql = str(statement)
         self.executed.append((sql, params))
+        if "GET_LOCK" in sql:
+            return FakeResult(scalar_value=1)
         if "LAST_INSERT_ID" in sql:
             return FakeResult(scalar_value=31)
         return FakeResult()
@@ -95,6 +97,12 @@ class CierresGastosTests(unittest.TestCase):
         conn = PendingConnection()
         summary = cierres_repo._build_pending_summary(conn, lock_expenses=True)
 
+        ingresos_query = conn.executed[0][0]
+        self.assertIn("FROM ingresos", ingresos_query)
+        self.assertIn("FOR UPDATE", ingresos_query)
+        wash_only_query = conn.executed[1][0]
+        self.assertIn("FROM operaciones_servicio", wash_only_query)
+        self.assertIn("FOR UPDATE", wash_only_query)
         expense_query = conn.executed[2][0]
         self.assertIn("WHERE id_cierre IS NULL", expense_query)
         self.assertIn("FOR UPDATE", expense_query)
@@ -195,7 +203,16 @@ class CierresGastosTests(unittest.TestCase):
              patch.object(cierres_repo, "_build_pending_summary", return_value=summary) as build:
             result = cierres_repo.realizar_cierre("admin")
 
-        build.assert_called_once_with(conn, lock_expenses=True)
+        build.assert_called_once()
+        self.assertEqual(build.call_args.args, (conn,))
+        self.assertEqual(
+            build.call_args.kwargs,
+            {
+                "lock_expenses": True,
+                "fecha_cierre": build.call_args.kwargs["as_of"],
+                "as_of": build.call_args.kwargs["as_of"],
+            },
+        )
         self.assertEqual(result["total_general"], 0)
         self.assertEqual(result["total_neto"], -700)
         expenses_update = next((entry for entry in conn.executed if "UPDATE gastos_operacion" in entry[0]), None)
@@ -210,6 +227,69 @@ class CierresGastosTests(unittest.TestCase):
             {"id_cierre": 31, "bathroom_use_id_0": 3, "bathroom_use_id_1": 4},
         )
         self.assertTrue(conn.committed)
+
+    def test_close_marks_only_the_selected_ingresos_and_wash_operations(self):
+        conn = FakeConnection()
+        summary = {
+            "hay_pendiente": True,
+            "fecha_inicio": datetime(2026, 7, 1, 9, 0),
+            "fecha_cierre": datetime(2026, 7, 1, 10, 0),
+            "total_recaudado": 1000,
+            "total_ingresos": 1,
+            "total_salidas": 1,
+            "total_banos": 0,
+            "total_banos_monto": 0,
+            "total_lavados_solos": 1,
+            "total_lavados_solos_monto": 9000,
+            "total_mensualidades": 0,
+            "total_mensualidades_monto": 0,
+            "total_noches": 0,
+            "total_noches_monto": 0,
+            "total_general": 10000,
+            "total_gastos": 0,
+            "total_neto": 10000,
+            "ids_ingresos": [7],
+            "ids_operaciones_servicio": [11],
+            "ids_banos": [],
+            "ids_gastos": [],
+            "ids_pagos_mensuales": [],
+            "ids_cobros_noches": [],
+        }
+        with patch.object(cierres_repo, "ensure_monthly_payments_schema"), \
+             patch.object(cierres_repo, "ensure_noches_schema"), \
+             patch.object(cierres_repo, "db_conn", return_value=FakeDbConn(conn)), \
+             patch.object(cierres_repo, "_build_pending_summary", return_value=summary):
+            cierres_repo.realizar_cierre("operador")
+
+        ingresos_update = next(entry for entry in conn.executed if "UPDATE ingresos" in entry[0])
+        self.assertIn("id_ingreso IN (:ingreso_id_0)", ingresos_update[0])
+        self.assertNotIn("fecha_hora_salida <=", ingresos_update[0])
+        self.assertEqual(ingresos_update[1], {"ingreso_id_0": 7})
+        wash_update = next(entry for entry in conn.executed if "UPDATE operaciones_servicio" in entry[0])
+        self.assertIn("id_operacion_servicio IN (:operation_id_0)", wash_update[0])
+        self.assertNotIn("fecha_hora_fin <=", wash_update[0])
+        self.assertEqual(wash_update[1], {"operation_id_0": 11})
+
+    def test_close_fails_fast_when_the_database_lock_is_unavailable(self):
+        conn = FakeConnection()
+
+        def unavailable_lock(statement, params=None):
+            conn.executed.append((str(statement), params))
+            if "GET_LOCK" in str(statement):
+                return FakeResult(scalar_value=0)
+            return FakeResult()
+
+        conn.execute = unavailable_lock
+        with patch.object(cierres_repo, "ensure_monthly_payments_schema"), \
+             patch.object(cierres_repo, "ensure_noches_schema"), \
+             patch.object(cierres_repo, "db_conn", return_value=FakeDbConn(conn)), \
+             patch.object(cierres_repo, "_build_pending_summary") as build:
+            with self.assertRaises(cierres_repo.DailyCloseInProgressError):
+                cierres_repo.realizar_cierre("operador")
+
+        build.assert_not_called()
+        self.assertTrue(conn.rolled_back)
+        self.assertFalse(any("RELEASE_LOCK" in sql for sql, _ in conn.executed))
 
     def test_no_pending_close_does_not_link_expenses(self):
         conn = FakeConnection()

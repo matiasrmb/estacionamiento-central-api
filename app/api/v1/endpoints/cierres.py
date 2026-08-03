@@ -1,7 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.api.deps import require_role
-from app.repositories.cierres_repo import get_cierre_pendiente, list_cierres, realizar_cierre
+from app.repositories.cierres_repo import (
+    DailyCloseInProgressError,
+    get_cierre_pendiente,
+    list_cierres,
+    realizar_cierre,
+)
 
 
 router = APIRouter(prefix="/cierres", tags=["cierres"])
@@ -21,5 +26,7 @@ def listar_cierres(_user=Depends(require_role("operador", "admin"))):
 def crear_cierre(user=Depends(require_role("operador", "admin"))):
     try:
         return realizar_cierre(user.get("sub") or "")
+    except DailyCloseInProgressError:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="DAILY_CLOSE_IN_PROGRESS")
     except LookupError:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="NO_PENDING_CLOSURE")

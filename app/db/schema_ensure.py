@@ -14,6 +14,7 @@ _ensured_wash_vehicle_types = False
 _ensured_gastos_operacion = False
 _ensured_monthly_payments = False
 _ensured_noches = False
+_ensured_asistencias = False
 
 _DUPLICATE_SCHEMA_ERROR_CODES = {1060, 1061}
 
@@ -137,6 +138,28 @@ def ensure_noches_schema() -> None:
     except Exception as exc:
         raise RuntimeError("NOCHES_SCHEMA_UNAVAILABLE") from exc
     _ensured_noches = True
+
+
+def ensure_asistencias_schema() -> None:
+    """Ensure attendance rows can be tied to one authenticated device session."""
+    global _ensured_asistencias
+    if _ensured_asistencias:
+        return
+    try:
+        with db_conn() as conn:
+            _ensure_asistencias_schema_on_connection(conn)
+            conn.commit()
+    except Exception as exc:
+        raise RuntimeError("ASISTENCIAS_SCHEMA_UNAVAILABLE") from exc
+    _ensured_asistencias = True
+
+
+def _ensure_asistencias_schema_on_connection(conn: Connection) -> None:
+    _execute_many_schema(conn, [
+        "ALTER TABLE asistencias ADD COLUMN device_id VARCHAR(128) NULL",
+        "ALTER TABLE asistencias ADD COLUMN session_id VARCHAR(64) NULL",
+        "ALTER TABLE asistencias ADD INDEX idx_asistencias_sesion_activa (usuario, session_id, hora_salida)",
+    ])
 
 
 def _ensure_wash_vehicle_type_schema_on_connection(conn: Connection) -> None:

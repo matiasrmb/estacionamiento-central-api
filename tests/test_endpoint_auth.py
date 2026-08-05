@@ -145,10 +145,40 @@ class EndpointAuthTests(unittest.TestCase):
             patch.object(auth, "create_access_token", return_value="token"),
             patch.object(auth, "registrar_asistencia_inicio") as registrar_asistencia,
         ):
-            response = auth.login(auth.LoginRequest(usuario="operador", clave="secreta", registrar_asistencia=False))
+            response = auth.login(auth.LoginRequest(usuario="operador", clave="secreta", device_id="mobile-test"))
 
         self.assertEqual(response.access_token, "token")
-        registrar_asistencia.assert_called_once_with("operador")
+        usuario, device_id, session_id = registrar_asistencia.call_args.args
+        self.assertEqual((usuario, device_id), ("operador", "mobile-test"))
+        self.assertEqual(len(session_id), 32)
+
+    def test_login_generates_legacy_device_and_session_claims_when_device_is_omitted(self):
+        user = {"usuario": "operador", "activo": 1, "clave_hash": "hash", "rol": "operador", "id_usuario": 4}
+        with (
+            patch.object(auth, "get_user_by_username", return_value=user),
+            patch.object(auth, "verify_password", return_value=True),
+            patch.object(auth, "create_access_token", return_value="token") as create_token,
+            patch.object(auth, "registrar_asistencia_inicio"),
+        ):
+            auth.login(auth.LoginRequest(usuario="operador", clave="secreta"))
+
+        claims = create_token.call_args.kwargs["extra_claims"]
+        self.assertEqual(len(claims["sid"]), 32)
+        self.assertEqual(claims["device_id"], f"legacy-{claims['sid']}")
+
+    def test_logout_closes_only_the_session_identified_by_the_token(self):
+        user = {"sub": "operador", "sid": "session-mobile"}
+        with patch.object(auth, "registrar_asistencia_salida", return_value={"cantidad": 0}) as cerrar:
+            response = auth.logout(user)
+
+        cerrar.assert_called_once_with("operador", "session-mobile")
+        self.assertTrue(response["ok"])
+
+    def test_logout_without_session_claim_does_not_target_username_sessions(self):
+        with patch.object(auth, "registrar_asistencia_salida", return_value={"cantidad": 0}) as cerrar:
+            auth.logout({"sub": "operador"})
+
+        cerrar.assert_called_once_with("operador", "")
 
     def test_gastos_allows_operator_and_admin(self):
         allowed = {"operador", "admin"}

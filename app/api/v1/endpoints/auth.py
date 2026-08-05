@@ -1,4 +1,5 @@
 import logging
+from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
@@ -14,6 +15,7 @@ logger = logging.getLogger(__name__)
 class LoginRequest(BaseModel):
     usuario: str = Field(..., min_length=1, max_length=50)
     clave: str = Field(..., min_length=1, max_length=200)
+    device_id: str | None = Field(default=None, max_length=128)
 
 
 class LoginResponse(BaseModel):
@@ -45,7 +47,11 @@ def login(payload: LoginRequest):
         )
 
     rol_api = _map_rol_db_to_api(user["rol"])
-    registrar_asistencia_inicio(user["usuario"])
+    session_id = uuid4().hex
+    device_id = (payload.device_id or f"legacy-{session_id}").strip()
+    if not device_id:
+        device_id = f"legacy-{session_id}"
+    registrar_asistencia_inicio(user["usuario"], device_id, session_id)
 
     token = create_access_token(
         subject=user["usuario"],
@@ -53,6 +59,8 @@ def login(payload: LoginRequest):
             "rol": rol_api,          # rol normalizado para la API
             "rol_db": user["rol"],   # opcional: útil para auditoría
             "id_usuario": user["id_usuario"],
+            "sid": session_id,
+            "device_id": device_id,
         },
     )
 
@@ -65,5 +73,5 @@ def login(payload: LoginRequest):
 
 @router.post("/auth/logout", tags=["auth"])
 def logout(user=Depends(require_role("operador", "admin"))):
-    resumen = registrar_asistencia_salida(user.get("sub") or "")
+    resumen = registrar_asistencia_salida(user.get("sub") or "", user.get("sid") or "")
     return {"ok": True, "resumen": resumen}

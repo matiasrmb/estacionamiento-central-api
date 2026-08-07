@@ -1,6 +1,8 @@
 import unittest
 from datetime import datetime
-from unittest.mock import patch
+from unittest.mock import ANY, patch
+
+from sqlalchemy import create_engine, text
 
 from app.api.v1.endpoints import activos
 
@@ -19,8 +21,10 @@ class _RowsResult:
 class _Connection:
     def __init__(self, rows):
         self.rows = rows
+        self.calls = []
 
     def execute(self, statement, params=None):
+        self.calls.append((str(statement), params))
         return _RowsResult(self.rows)
 
 
@@ -158,6 +162,65 @@ class ActivosEnrichmentTests(unittest.TestCase):
             "usuario": "tester",
             "modo_noche": 0,
         }], consultado_a, as_of=consultado_a)
+
+    def test_excludes_logically_deleted_ingresos_from_the_mobile_active_list(self):
+        engine = create_engine("sqlite://")
+        with engine.begin() as conn:
+            conn.execute(text("""
+                CREATE TABLE ingresos (
+                    id_ingreso INTEGER PRIMARY KEY,
+                    id_vehiculo INTEGER NOT NULL,
+                    fecha_hora_ingreso DATETIME NOT NULL,
+                    fecha_hora_salida DATETIME,
+                    en_espera INTEGER NOT NULL DEFAULT 0,
+                    en_lavado INTEGER NOT NULL DEFAULT 0,
+                    usuario TEXT
+                )
+            """))
+            conn.execute(text("CREATE TABLE vehiculos (id_vehiculo INTEGER PRIMARY KEY, patente TEXT NOT NULL)"))
+            conn.execute(text("""
+                CREATE TABLE ingresos_eliminados (id_ingreso_original INTEGER NOT NULL)
+            """))
+            conn.execute(text("""
+                CREATE TABLE cobros_noches (
+                    id_ingreso INTEGER NOT NULL,
+                    estado TEXT NOT NULL,
+                    fecha_hora_pago DATETIME,
+                    estado_operativo TEXT,
+                    fecha_hora_resolucion DATETIME
+                )
+            """))
+            conn.execute(text("INSERT INTO vehiculos (id_vehiculo, patente) VALUES (1, 'BORR01'), (2, 'ACTIVO1')"))
+            conn.execute(text("""
+                INSERT INTO ingresos (
+                    id_ingreso, id_vehiculo, fecha_hora_ingreso, en_espera, en_lavado, usuario
+                ) VALUES
+                    (1, 1, :ingreso, 0, 0, 'tester'),
+                    (2, 2, :ingreso, 0, 0, 'tester')
+            """), {"ingreso": datetime(2026, 8, 7, 9, 0)})
+            conn.execute(text("INSERT INTO ingresos_eliminados (id_ingreso_original) VALUES (1)"))
+
+            with patch.object(
+                activos,
+                "calcular_montos_activos_con_lavados",
+                return_value={2: (60, 1200, "detalle", 1200, 0)},
+            ) as calcular:
+                items = activos.build_active_items(conn, datetime(2026, 8, 7, 10, 0))
+
+        self.assertEqual([(item["id_ingreso"], item["patente"]) for item in items], [(2, "ACTIVO1")])
+        self.assertEqual(items[0]["monto_acumulado"], 1200)
+        calcular.assert_called_once_with(conn, [
+            {
+                "id_ingreso": 2,
+                "patente": "ACTIVO1",
+                "fecha_hora_ingreso": ANY,
+                "en_espera": 0,
+                "en_lavado": 0,
+                "usuario": "tester",
+                "modo_noche": 0,
+            },
+        ], ANY, as_of=None)
+        engine.dispose()
 
 
 if __name__ == "__main__":

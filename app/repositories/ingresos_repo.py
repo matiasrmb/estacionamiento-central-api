@@ -30,8 +30,12 @@ def find_active_ingreso_by_plate(patente: str) -> Optional[Dict[str, Any]]:
              v.patente
       FROM ingresos i
       JOIN vehiculos v ON v.id_vehiculo = i.id_vehiculo
-      WHERE v.patente = :p
-        AND i.fecha_hora_salida IS NULL
+       WHERE v.patente = :p
+         AND i.fecha_hora_salida IS NULL
+         AND NOT EXISTS (
+             SELECT 1 FROM ingresos_eliminados ie
+             WHERE ie.id_ingreso_original = i.id_ingreso
+         )
       ORDER BY i.id_ingreso DESC
       LIMIT 1
     """
@@ -174,8 +178,12 @@ def _create_ingreso_for_plate_if_no_active(
                              v.patente
                       FROM ingresos i
                       JOIN vehiculos v ON v.id_vehiculo = i.id_vehiculo
-                      WHERE v.patente = :p
-                        AND i.fecha_hora_salida IS NULL
+                       WHERE v.patente = :p
+                         AND i.fecha_hora_salida IS NULL
+                         AND NOT EXISTS (
+                             SELECT 1 FROM ingresos_eliminados ie
+                             WHERE ie.id_ingreso_original = i.id_ingreso
+                         )
                       ORDER BY i.id_ingreso DESC
                       LIMIT 1
                     """

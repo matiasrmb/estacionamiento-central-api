@@ -43,10 +43,11 @@ class UpdateResult:
 
 
 class FakeConnection:
-    def __init__(self, update_rowcount=1, noches_prepagadas=None, fecha_hora_ingreso=None):
+    def __init__(self, update_rowcount=1, noches_prepagadas=None, fecha_hora_ingreso=None, ingreso_row=True):
         self.update_rowcount = update_rowcount
         self.noches_prepagadas = noches_prepagadas or []
         self.fecha_hora_ingreso = fecha_hora_ingreso or datetime(2026, 1, 1, 10, 0, 0)
+        self.ingreso_row = ingreso_row
         self.calls = []
         self.committed = False
         self.rolled_back = False
@@ -56,6 +57,8 @@ class FakeConnection:
         self.calls.append((sql, params or {}))
 
         if "FROM ingresos i" in sql:
+            if not self.ingreso_row:
+                return MappingResult(None)
             return MappingResult(
                 {
                     "id_ingreso": 7,
@@ -129,6 +132,20 @@ class SalidasAtomicConfirmTests(unittest.TestCase):
         self.assertEqual(raised.exception.detail, "NOCHE_PENDIENTE_DE_REVISION")
         calcular.assert_not_called()
 
+    def test_preview_rejects_a_logically_deleted_ingreso_without_calculating_tariff(self):
+        conn = FakeConnection(ingreso_row=False)
+        with patch.object(salidas, "db_conn", return_value=FakeDbConn(conn)), \
+              patch.object(salidas, "calcular_monto_con_lavados") as calcular:
+            with self.assertRaises(HTTPException) as raised:
+                salidas.preview_salida(salidas.SalidaPreviewIn(id_ingreso=7), _user={"sub": "tester"})
+
+        lookup_sql = next(sql for sql, _ in conn.calls if "FROM ingresos i" in sql)
+        self.assertEqual(raised.exception.status_code, 404)
+        self.assertEqual(raised.exception.detail, "INGRESO_NOT_FOUND")
+        self.assertIn("FROM ingresos_eliminados ie", lookup_sql)
+        self.assertIn("ie.id_ingreso_original = i.id_ingreso", lookup_sql)
+        calcular.assert_not_called()
+
     def test_finalize_pending_night_closes_without_exit_charge_or_ticket(self):
         conn = FakeConnection()
         with patch.object(salidas, "db_conn", return_value=FakeDbConn(conn)), \
@@ -186,6 +203,8 @@ class SalidasAtomicConfirmTests(unittest.TestCase):
 
         update_sql = next(sql for sql, _ in conn.calls if "UPDATE ingresos" in sql)
         self.assertIn("fecha_hora_salida IS NULL", update_sql)
+        self.assertIn("FROM ingresos_eliminados ie", update_sql)
+        self.assertIn("ie.id_ingreso_original = ingresos.id_ingreso", update_sql)
 
     def test_confirm_raises_conflict_and_skips_print_jobs_when_update_matches_no_rows(self):
         conn = FakeConnection(update_rowcount=0)

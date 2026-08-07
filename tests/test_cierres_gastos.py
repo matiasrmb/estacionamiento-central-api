@@ -99,6 +99,7 @@ class CierresGastosTests(unittest.TestCase):
 
         ingresos_query = conn.executed[0][0]
         self.assertIn("FROM ingresos", ingresos_query)
+        self.assertIn("fecha_hora_salida IS NOT NULL", ingresos_query)
         self.assertIn("FOR UPDATE", ingresos_query)
         wash_only_query = conn.executed[1][0]
         self.assertIn("FROM operaciones_servicio", wash_only_query)

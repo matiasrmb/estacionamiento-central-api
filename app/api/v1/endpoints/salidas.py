@@ -19,6 +19,10 @@ def _get_ingreso(conn, id_ingreso: int):
             FROM ingresos i
             JOIN vehiculos v ON v.id_vehiculo = i.id_vehiculo
             WHERE i.id_ingreso = :id
+              AND NOT EXISTS (
+                  SELECT 1 FROM ingresos_eliminados ie
+                  WHERE ie.id_ingreso_original = i.id_ingreso
+              )
             LIMIT 1
         """),
         {"id": id_ingreso},
@@ -131,6 +135,10 @@ def confirmar_salida(payload: SalidaConfirmIn, user=Depends(require_role("operad
                     usuario = :usuario
                 WHERE id_ingreso = :id
                   AND fecha_hora_salida IS NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM ingresos_eliminados ie
+                      WHERE ie.id_ingreso_original = ingresos.id_ingreso
+                  )
             """),
             {"salida": ahora, "monto": monto, "usuario": user.get("sub") or "", "id": payload.id_ingreso},
         )
@@ -216,7 +224,12 @@ def finalizar_noche(id_ingreso: int, user=Depends(require_role("operador", "admi
         """), {"ahora": ahora, "id_cobro_noche": noche["id_cobro_noche"]})
         updated = conn.execute(text("""
             UPDATE ingresos SET fecha_hora_salida = :ahora, tarifa_aplicada = 0, usuario = :usuario
-            WHERE id_ingreso = :id_ingreso AND fecha_hora_salida IS NULL
+            WHERE id_ingreso = :id_ingreso
+              AND fecha_hora_salida IS NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM ingresos_eliminados ie
+                  WHERE ie.id_ingreso_original = ingresos.id_ingreso
+              )
         """), {"ahora": ahora, "usuario": user.get("sub") or "", "id_ingreso": id_ingreso})
         if updated.rowcount != 1:
             conn.rollback()
@@ -242,7 +255,12 @@ def convertir_noche_a_ingreso_normal(id_ingreso: int, user=Depends(require_role(
         """), {"ahora": ahora, "id_cobro_noche": noche["id_cobro_noche"]})
         updated = conn.execute(text("""
             UPDATE ingresos SET fecha_hora_ingreso = :inicio_normal, usuario = :usuario
-            WHERE id_ingreso = :id_ingreso AND fecha_hora_salida IS NULL
+            WHERE id_ingreso = :id_ingreso
+              AND fecha_hora_salida IS NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM ingresos_eliminados ie
+                  WHERE ie.id_ingreso_original = ingresos.id_ingreso
+              )
         """), {"inicio_normal": inicio_normal, "usuario": user.get("sub") or "", "id_ingreso": id_ingreso})
         if updated.rowcount != 1:
             conn.rollback()

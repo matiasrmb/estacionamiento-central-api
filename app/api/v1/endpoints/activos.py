@@ -34,15 +34,19 @@ def build_active_items(conn, calculado_a: datetime, as_of: datetime | None = Non
                         ) AS modo_noche
                 FROM ingresos i
                 JOIN vehiculos v ON v.id_vehiculo = i.id_vehiculo
-                WHERE (
-                    (:as_of IS NULL AND i.fecha_hora_salida IS NULL)
-                    OR (
-                        :as_of IS NOT NULL
-                        AND i.fecha_hora_ingreso <= :as_of
-                        AND (i.fecha_hora_salida IS NULL OR i.fecha_hora_salida > :as_of)
-                    )
-                )
-                ORDER BY i.fecha_hora_ingreso ASC
+                 WHERE (
+                     (:as_of IS NULL AND i.fecha_hora_salida IS NULL)
+                     OR (
+                         :as_of IS NOT NULL
+                         AND i.fecha_hora_ingreso <= :as_of
+                         AND (i.fecha_hora_salida IS NULL OR i.fecha_hora_salida > :as_of)
+                     )
+                 )
+                 AND NOT EXISTS (
+                     SELECT 1 FROM ingresos_eliminados ie
+                     WHERE ie.id_ingreso_original = i.id_ingreso
+                 )
+                 ORDER BY i.fecha_hora_ingreso ASC
             """),
         {"as_of": as_of},
     ).mappings().all()

@@ -247,6 +247,8 @@ class IngresosAtomicCreationTests(unittest.TestCase):
         active_lookup_sql = next(sql for sql, _ in conn.calls if "FROM ingresos i" in sql)
         self.assertEqual(raised.exception.active_ingreso["en_espera"], 1)
         self.assertNotIn("i.en_espera = 0", active_lookup_sql)
+        self.assertIn("FROM ingresos_eliminados ie", active_lookup_sql)
+        self.assertIn("ie.id_ingreso_original = i.id_ingreso", active_lookup_sql)
         self.assertTrue(conn.rolled_back)
         self.assertEqual(conn.commit_count, 0)
         self.assertFalse(any("INSERT INTO ingresos" in sql for sql, _ in conn.calls))

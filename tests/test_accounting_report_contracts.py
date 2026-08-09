@@ -1,6 +1,6 @@
 import unittest
 
-from app.repositories.accounting_contracts import build_accounting_summary
+from app.repositories.accounting_contracts import build_accounting_summary, build_report_totals
 
 
 class AccountingReportContractsTests(unittest.TestCase):
@@ -57,6 +57,20 @@ class AccountingReportContractsTests(unittest.TestCase):
         self.assertEqual(summary["total_noches"], 1)
         self.assertEqual(summary["total_noches_monto"], 5000)
         self.assertEqual(summary["total_general"], 6200)
+
+    def test_report_totals_include_bathrooms_expenses_and_net(self):
+        summary = build_report_totals(
+            parking_movements=[{"tarifa_aplicada": 1200}],
+            bathroom_uses=[{"monto": 300}],
+            wash_only_operations=[{"estado": "FINALIZADO_COBRADO", "valor_lavado_snapshot": 800}],
+            expenses=[{"monto": 500}],
+            monthly_payments=[{"monto_snapshot": 2000}],
+            night_charges=[{"monto_snapshot": 1000}],
+        )
+
+        self.assertEqual(summary["total_general"], 5300)
+        self.assertEqual(summary["total_gastos"], 500)
+        self.assertEqual(summary["total_neto"], 4800)
 
 
 if __name__ == "__main__":

@@ -89,9 +89,7 @@ class AsistenciasSessionRepositoryTests(unittest.TestCase):
 
             def execute(self, statement, params=None):
                 self.calls.append((str(statement), params))
-                # Model one shared exit and one bathroom use. They belong to the
-                # first attendance, so the overlapping attendance receives none.
-                if params["id_asistencia"] == 10:
+                if params["id_asistencia"] == 10 and "FROM ingresos i" in str(statement):
                     return Result({"cantidad": 1, "total": 1200})
                 return Result({"cantidad": 0, "total": 0})
 
@@ -103,7 +101,7 @@ class AsistenciasSessionRepositoryTests(unittest.TestCase):
             conn, "operador", 11, datetime(2026, 1, 1, 10), datetime(2026, 1, 1, 11)
         )
 
-        self.assertEqual(first, {"cantidad": 2, "total": 2400})
+        self.assertEqual(first, {"cantidad": 1, "total": 1200})
         self.assertEqual(second, {"cantidad": 0, "total": 0})
         for sql, params in conn.calls:
             self.assertIn("NOT EXISTS", sql)
@@ -133,12 +131,20 @@ class AsistenciasSessionRepositoryTests(unittest.TestCase):
 
         for sql, _ in conn.calls:
             self.assertNotIn("BETWEEN :inicio AND :fin", sql)
-            if "FROM ingresos" in sql:
+            if "FROM ingresos i" in sql:
                 self.assertIn("i.fecha_hora_salida >= :inicio", sql)
-                self.assertIn("i.fecha_hora_salida < :fin", sql)
-            else:
+            elif "FROM usos_bano" in sql:
                 self.assertIn("b.fecha_hora >= :inicio", sql)
                 self.assertIn("b.fecha_hora < :fin", sql)
+            elif "FROM pagos_mensuales" in sql:
+                self.assertIn("p.fecha_pago >= :inicio", sql)
+                self.assertIn("p.fecha_pago < :fin", sql)
+            elif "FROM cobros_noches" in sql:
+                self.assertIn("n.fecha_hora_pago >= :inicio", sql)
+                self.assertIn("n.fecha_hora_pago < :fin", sql)
+            else:
+                self.assertIn("o.fecha_hora_fin >= :inicio", sql)
+                self.assertIn("o.fecha_hora_fin < :fin", sql)
 
     def test_legacy_attendance_yields_to_active_sessionized_attendance(self):
         class Result:
@@ -180,9 +186,11 @@ class AsistenciasSessionRepositoryTests(unittest.TestCase):
 
         class FakeConn:
             def execute(self, statement, params=None):
-                if "FROM ingresos" in str(statement):
+                if "FROM ingresos i" in str(statement):
                     return Result({"cantidad": 2, "total": 2000})
-                return Result({"cantidad": 1, "total": 300})
+                if "FROM usos_bano" in str(statement):
+                    return Result({"cantidad": 1, "total": 300})
+                return Result({"cantidad": 0, "total": 0})
 
         totals = _calcular_totales_turno(
             FakeConn(), "operador", 10, datetime(2026, 1, 1, 9), datetime(2026, 1, 1, 10)

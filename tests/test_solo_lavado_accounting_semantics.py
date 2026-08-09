@@ -30,7 +30,8 @@ class SoloLavadoAccountingSemanticsTests(unittest.TestCase):
 
     def test_report_totals_exclude_converted_solo_lavado_until_parking_exit(self):
         totals = build_report_totals(
-            items=[{"tipo": "vehiculo", "tarifa_aplicada": 10000}],
+            parking_movements=[{"tipo": "vehiculo", "tarifa_aplicada": 10000}],
+            bathroom_uses=[],
             wash_only_operations=[
                 {"estado": "CONVERTIDO_ESTADIA", "valor_lavado_snapshot": 9000},
                 {"estado": "FINALIZADO_COBRADO", "valor_lavado_snapshot": 8000},

@@ -19,6 +19,10 @@ class NochesNotAvailable(Exception):
     pass
 
 
+class IngresoWaitingError(RuntimeError):
+    pass
+
+
 def find_active_ingreso_by_plate(patente: str) -> Optional[Dict[str, Any]]:
     """
     Activo = fecha_hora_salida IS NULL.
@@ -301,3 +305,48 @@ def confirm_salida(id_ingreso: int, fecha_hora_salida, tarifa_aplicada: float) -
         if res.rowcount != 1:
             # No actualizó: ya tenía salida o no existía
             raise RuntimeError("INGRESO_NOT_ACTIVE")
+
+
+def marcar_ingreso_en_espera(id_ingreso: int) -> None:
+    """Atomically hides one open, non-deleted normal ingreso from active flows."""
+    with db_conn() as conn:
+        updated = conn.execute(
+            text("""
+                UPDATE ingresos i
+                SET i.en_espera = TRUE
+                WHERE i.id_ingreso = :id_ingreso
+                  AND i.fecha_hora_salida IS NULL
+                  AND i.en_espera = FALSE
+                  AND NOT EXISTS (
+                      SELECT 1 FROM ingresos_eliminados ie
+                      WHERE ie.id_ingreso_original = i.id_ingreso
+                  )
+            """),
+            {"id_ingreso": id_ingreso},
+        )
+        if updated.rowcount == 1:
+            conn.commit()
+            return
+
+        row = conn.execute(
+            text("""
+                SELECT i.fecha_hora_salida, i.en_espera,
+                       EXISTS (
+                           SELECT 1 FROM ingresos_eliminados ie
+                           WHERE ie.id_ingreso_original = i.id_ingreso
+                       ) AS eliminado
+                FROM ingresos i
+                WHERE i.id_ingreso = :id_ingreso
+            """),
+            {"id_ingreso": id_ingreso},
+        ).mappings().first()
+        conn.rollback()
+    if row is None:
+        raise IngresoWaitingError("INGRESO_NOT_FOUND")
+    if bool(row["eliminado"]):
+        raise IngresoWaitingError("INGRESO_DELETED")
+    if row["fecha_hora_salida"] is not None:
+        raise IngresoWaitingError("INGRESO_CLOSED")
+    if bool(row["en_espera"]):
+        raise IngresoWaitingError("INGRESO_ALREADY_WAITING")
+    raise IngresoWaitingError("INGRESO_NOT_ACTIVE")

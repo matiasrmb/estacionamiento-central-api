@@ -192,108 +192,56 @@ def _calcular_totales_turno(
         "fin": fin,
         "session_id": session_id,
     }
-    salidas = conn.execute(
-        text("""
-            SELECT COUNT(*) AS cantidad, COALESCE(SUM(tarifa_aplicada), 0) AS total
-            FROM ingresos i
-            WHERE i.usuario = :usuario
-              AND i.fecha_hora_salida >= :inicio
-              AND i.fecha_hora_salida < :fin
-              AND (
-                  :session_id IS NOT NULL
-                  OR NOT EXISTS (
-                      SELECT 1
-                      FROM asistencias sessionizada
+    def total_desde(tabla, alias, fecha, monto, extra="", usuario_col="usuario"):
+        ownership = f"""
+            AND (:session_id IS NOT NULL OR NOT EXISTS (
+                SELECT 1 FROM asistencias sessionizada
+                WHERE sessionizada.usuario = :usuario
+                  AND sessionizada.session_id IS NOT NULL
+                  AND sessionizada.hora_inicio <= {alias}.{fecha}
+                  AND (sessionizada.hora_salida IS NULL OR sessionizada.hora_salida > {alias}.{fecha})
+            ))
+            AND NOT EXISTS (
+                SELECT 1 FROM asistencias anterior
+                WHERE anterior.usuario = :usuario
+                  AND anterior.id_asistencia < :id_asistencia
+                  AND anterior.hora_inicio <= {alias}.{fecha}
+                  AND (anterior.hora_salida IS NULL OR anterior.hora_salida > {alias}.{fecha})
+                  AND (anterior.session_id IS NOT NULL OR NOT EXISTS (
+                      SELECT 1 FROM asistencias sessionizada
                       WHERE sessionizada.usuario = :usuario
                         AND sessionizada.session_id IS NOT NULL
-                        AND sessionizada.hora_inicio <= i.fecha_hora_salida
-                        AND (
-                            sessionizada.hora_salida IS NULL
-                            OR sessionizada.hora_salida > i.fecha_hora_salida
-                        )
-                  )
-              )
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM asistencias anterior
-                  WHERE anterior.usuario = :usuario
-                    AND anterior.id_asistencia < :id_asistencia
-                    AND anterior.hora_inicio <= i.fecha_hora_salida
-                    AND (
-                        anterior.hora_salida IS NULL
-                        OR anterior.hora_salida > i.fecha_hora_salida
-                    )
-                    AND (
-                        anterior.session_id IS NOT NULL
-                        OR NOT EXISTS (
-                            SELECT 1
-                            FROM asistencias sessionizada
-                            WHERE sessionizada.usuario = :usuario
-                              AND sessionizada.session_id IS NOT NULL
-                              AND sessionizada.hora_inicio <= i.fecha_hora_salida
-                              AND (
-                                  sessionizada.hora_salida IS NULL
-                                  OR sessionizada.hora_salida > i.fecha_hora_salida
-                              )
-                        )
-                    )
-              )
-        """),
-        params,
-    ).mappings().first()
-    banos = conn.execute(
-        text("""
-            SELECT COUNT(*) AS cantidad, COALESCE(SUM(monto), 0) AS total
-            FROM usos_bano b
-            WHERE b.usuario = :usuario
-              AND b.fecha_hora >= :inicio
-              AND b.fecha_hora < :fin
-              AND (
-                  :session_id IS NOT NULL
-                  OR NOT EXISTS (
-                      SELECT 1
-                      FROM asistencias sessionizada
-                      WHERE sessionizada.usuario = :usuario
-                        AND sessionizada.session_id IS NOT NULL
-                        AND sessionizada.hora_inicio <= b.fecha_hora
-                        AND (
-                            sessionizada.hora_salida IS NULL
-                            OR sessionizada.hora_salida > b.fecha_hora
-                        )
-                  )
-              )
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM asistencias anterior
-                  WHERE anterior.usuario = :usuario
-                    AND anterior.id_asistencia < :id_asistencia
-                    AND anterior.hora_inicio <= b.fecha_hora
-                    AND (
-                        anterior.hora_salida IS NULL
-                        OR anterior.hora_salida > b.fecha_hora
-                    )
-                    AND (
-                        anterior.session_id IS NOT NULL
-                        OR NOT EXISTS (
-                            SELECT 1
-                            FROM asistencias sessionizada
-                            WHERE sessionizada.usuario = :usuario
-                              AND sessionizada.session_id IS NOT NULL
-                              AND sessionizada.hora_inicio <= b.fecha_hora
-                              AND (
-                                  sessionizada.hora_salida IS NULL
-                                  OR sessionizada.hora_salida > b.fecha_hora
-                              )
-                        )
-                    )
-              )
-        """),
-        params,
-    ).mappings().first()
+                        AND sessionizada.hora_inicio <= {alias}.{fecha}
+                        AND (sessionizada.hora_salida IS NULL OR sessionizada.hora_salida > {alias}.{fecha})
+                  ))
+            )
+        """
+        return conn.execute(text(f"""
+            SELECT COUNT(*) AS cantidad, COALESCE(SUM({alias}.{monto}), 0) AS total
+            FROM {tabla} {alias}
+            WHERE {alias}.{usuario_col} = :usuario
+              AND {alias}.{fecha} >= :inicio AND {alias}.{fecha} < :fin
+              {extra} {ownership}
+        """), params).mappings().first() or {}
 
+    movimientos = [
+        total_desde("ingresos", "i", "fecha_hora_salida", "tarifa_aplicada", """
+            AND i.fecha_hora_salida IS NOT NULL
+            AND NOT EXISTS (SELECT 1 FROM ingresos_eliminados ie WHERE ie.id_ingreso_original = i.id_ingreso)
+        """),
+        total_desde("usos_bano", "b", "fecha_hora", "monto"),
+        total_desde("pagos_mensuales", "p", "fecha_pago", "monto_snapshot"),
+        total_desde("cobros_noches", "n", "fecha_hora_pago", "monto_snapshot", """
+            AND n.estado = 'PAGADO'
+            AND NOT EXISTS (SELECT 1 FROM ingresos_eliminados ie WHERE ie.id_ingreso_original = n.id_ingreso)
+        """),
+        total_desde("operaciones_servicio", "o", "fecha_hora_fin", "valor_lavado_snapshot", """
+            AND o.estado = 'FINALIZADO_COBRADO' AND o.id_ingreso_generado IS NULL
+        """, "usuario_fin"),
+    ]
     return {
-        "cantidad": int((salidas or {}).get("cantidad") or 0) + int((banos or {}).get("cantidad") or 0),
-        "total": int((salidas or {}).get("total") or 0) + int((banos or {}).get("total") or 0),
+        "cantidad": sum(int(row.get("cantidad") or 0) for row in movimientos),
+        "total": sum(int(row.get("total") or 0) for row in movimientos),
     }
 
 

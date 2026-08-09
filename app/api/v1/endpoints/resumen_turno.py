@@ -22,8 +22,7 @@ def obtener_resumen_turno(_user=Depends(require_role("operador", "admin"))):
         activos = build_active_items(conn, consultado_a, as_of=consultado_a)
         pendientes = _build_pending_summary(conn, as_of=consultado_a)
 
-    monto_activos = sum(int(item.get("monto_acumulado") or 0) for item in activos)
-    total_salidas = int(pendientes.get("total_recaudado") or 0)
+    total_general = int(pendientes.get("total_general") or 0)
     total_banos = int(pendientes.get("total_banos_monto") or 0)
     total_actual_caja = int(pendientes.get("total_general") or 0)
 
@@ -32,7 +31,7 @@ def obtener_resumen_turno(_user=Depends(require_role("operador", "admin"))):
         "vehiculos_activos": len(activos),
         "usos_banos": int(pendientes.get("total_banos") or 0),
         "usos_banos_monto": total_banos,
-        "total_turno": total_salidas + monto_activos + total_banos,
+        "total_turno": total_general,
         "total_actual_caja": total_actual_caja,
         "neto_caja": int(pendientes.get("total_neto") or 0),
     }

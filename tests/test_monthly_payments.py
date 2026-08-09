@@ -211,7 +211,7 @@ class MonthlyPaymentsTests(unittest.TestCase):
             def execute(self, statement, params=None):
                 sql = str(statement)
                 self.executed.append((sql, params))
-                if "FROM ingresos" in sql:
+                if "FROM ingresos i" in sql:
                     return FakeResult(rows=[{
                         "patente": "AAA111",
                         "fecha_hora_ingreso": datetime(2026, 7, 1, 9, 0),
@@ -229,6 +229,8 @@ class MonthlyPaymentsTests(unittest.TestCase):
                         "observacion": None,
                         "periodo": date(2026, 7, 1),
                     }])
+                if "FROM operaciones_servicio" in sql:
+                    return FakeResult(rows=[])
                 return FakeResult()
 
         conn = ReportConnection()
@@ -243,6 +245,10 @@ class MonthlyPaymentsTests(unittest.TestCase):
         self.assertEqual(report["total_mensualidades_monto"], 25000)
         self.assertEqual(report["total_general"], 26200)
         self.assertEqual(report["total_movimientos"], 2)
+        wash_query, _ = next(entry for entry in conn.executed if "FROM operaciones_servicio" in entry[0])
+        self.assertIn("id_ingreso_generado IS NULL", wash_query)
+        night_query, _ = next(entry for entry in conn.executed if "FROM cobros_noches" in entry[0])
+        self.assertIn("FROM ingresos_eliminados", night_query)
 
 
 if __name__ == "__main__":

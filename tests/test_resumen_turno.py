@@ -14,7 +14,7 @@ class _DbConn:
 
 
 class ResumenTurnoTests(unittest.TestCase):
-    def test_combines_active_quotes_with_pending_close_totals_at_one_timestamp(self):
+    def test_uses_only_collected_pending_cash_for_total_turno(self):
         consultado_a = datetime(2026, 8, 2, 21, 40)
         pendientes = {
             "total_recaudado": 40000,
@@ -42,7 +42,7 @@ class ResumenTurnoTests(unittest.TestCase):
             "vehiculos_activos": 2,
             "usos_banos": 7,
             "usos_banos_monto": 2100,
-            "total_turno": 48200,
+            "total_turno": 60100,
             "total_actual_caja": 60100,
             "neto_caja": 55600,
         })

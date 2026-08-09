@@ -53,8 +53,17 @@ def build_accounting_summary(
     }
 
 
-def build_report_totals(items, wash_only_operations, monthly_payments=None, night_charges=None):
-    total_recaudado = _sum_amount(items, "tarifa_aplicada")
+def build_report_totals(
+    parking_movements,
+    bathroom_uses,
+    wash_only_operations,
+    expenses=None,
+    monthly_payments=None,
+    night_charges=None,
+):
+    """Build report totals with the same categories and net semantics as closures."""
+    total_recaudado = _sum_amount(parking_movements, "tarifa_aplicada")
+    total_banos_monto = _sum_amount(bathroom_uses, "monto")
     charged_wash_only = [
         operation
         for operation in wash_only_operations
@@ -66,21 +75,28 @@ def build_report_totals(items, wash_only_operations, monthly_payments=None, nigh
     night_charges = night_charges or []
     total_noches_monto = _sum_amount(night_charges, "monto_snapshot")
 
+    total_gastos = _sum_amount(expenses or [], "monto")
+    total_general = (
+        total_recaudado
+        + total_banos_monto
+        + total_lavados_solos_monto
+        + total_mensualidades_monto
+        + total_noches_monto
+    )
     return {
         "total_recaudado": total_recaudado,
-        "total_movimientos": len(items),
+        "total_movimientos": len(parking_movements) + len(bathroom_uses) + len(charged_wash_only) + len(monthly_payments) + len(night_charges) + len(expenses or []),
+        "total_banos": len(bathroom_uses),
+        "total_banos_monto": total_banos_monto,
         "total_lavados_solos": len(charged_wash_only),
         "total_lavados_solos_monto": total_lavados_solos_monto,
         "total_mensualidades": len(monthly_payments),
         "total_mensualidades_monto": total_mensualidades_monto,
         "total_noches": len(night_charges),
         "total_noches_monto": total_noches_monto,
-        "total_general": (
-            total_recaudado
-            + total_lavados_solos_monto
-            + total_mensualidades_monto
-            + total_noches_monto
-        ),
+        "total_general": total_general,
+        "total_gastos": total_gastos,
+        "total_neto": total_general - total_gastos,
     }
 
 

@@ -7,9 +7,11 @@ from app.core.plates import require_valid_plate
 from app.repositories.ingresos_repo import (
     ActiveIngresoAlreadyExists,
     NochesNotAvailable,
+    IngresoWaitingError,
     RequiredPrintJobCreationFailed,
     create_ingreso_with_required_pc_pdf_job,
     create_ingreso_with_noches_prepaid_and_required_pc_pdf_job,
+    marcar_ingreso_en_espera,
 )
 from app.services.tickets_service import build_ticket_ingreso_payload
 
@@ -96,3 +98,17 @@ def registrar_ingreso(payload: IngresoRequest, user=Depends(require_role("operad
         },
         "noches": created.get("cobro_noche"),
     }
+
+
+@router.post("/ingresos/{id_ingreso}/marcar-espera", tags=["mvp"])
+def marcar_en_espera(id_ingreso: int, _user=Depends(require_role("operador", "admin"))):
+    try:
+        marcar_ingreso_en_espera(id_ingreso)
+    except IngresoWaitingError as exc:
+        code = str(exc)
+        status_code = status.HTTP_404_NOT_FOUND if code == "INGRESO_NOT_FOUND" else status.HTTP_409_CONFLICT
+        raise HTTPException(
+            status_code=status_code,
+            detail={"error": {"code": code, "message": "El ingreso no se puede marcar en espera."}},
+        )
+    return {"ok": True, "id_ingreso": id_ingreso, "en_espera": True}

@@ -198,6 +198,42 @@ class AsistenciasSessionRepositoryTests(unittest.TestCase):
 
         self.assertEqual(totals, {"cantidad": 3, "total": 2300})
 
+    def test_second_sequential_session_includes_its_paid_vehicle_exit(self):
+        class Result:
+            def __init__(self, row):
+                self.row = row
+
+            def mappings(self):
+                return self
+
+            def first(self):
+                return self.row
+
+        class FakeConn:
+            def __init__(self):
+                self.calls = []
+
+            def execute(self, statement, params=None):
+                sql = str(statement)
+                self.calls.append((sql, params))
+                if "FROM ingresos i" in sql and params["id_asistencia"] == 11:
+                    return Result({"cantidad": 1, "total": 1200})
+                return Result({"cantidad": 0, "total": 0})
+
+        conn = FakeConn()
+        first = _calcular_totales_turno(
+            conn, "operador", 10, datetime(2026, 1, 1, 9), datetime(2026, 1, 1, 10), "session-a"
+        )
+        second = _calcular_totales_turno(
+            conn, "operador", 11, datetime(2026, 1, 1, 10), datetime(2026, 1, 1, 11), "session-b"
+        )
+
+        self.assertEqual(first, {"cantidad": 0, "total": 0})
+        self.assertEqual(second, {"cantidad": 1, "total": 1200})
+        exit_queries = [call for call in conn.calls if "FROM ingresos i" in call[0]]
+        self.assertEqual(exit_queries[1][1]["session_id"], "session-b")
+        self.assertIn("i.usuario = :usuario", exit_queries[1][0])
+
 
 if __name__ == "__main__":
     unittest.main()

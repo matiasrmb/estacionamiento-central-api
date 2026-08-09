@@ -1,6 +1,8 @@
 import unittest
 from datetime import datetime
 
+from sqlalchemy import create_engine, text
+
 from app.db.schema_ensure import _ensure_asistencias_schema_on_connection
 from app.repositories.asistencias_repo import _calcular_totales_turno, _cerrar_asistencias_activas
 
@@ -233,6 +235,75 @@ class AsistenciasSessionRepositoryTests(unittest.TestCase):
         exit_queries = [call for call in conn.calls if "FROM ingresos i" in call[0]]
         self.assertEqual(exit_queries[1][1]["session_id"], "session-b")
         self.assertIn("i.usuario = :usuario", exit_queries[1][0])
+
+    def test_desktop_paid_exit_uses_usuario_and_stays_in_its_sequential_session(self):
+        engine = create_engine("sqlite://")
+        with engine.begin() as conn:
+            conn.execute(text("""
+                CREATE TABLE asistencias (
+                    id_asistencia INTEGER PRIMARY KEY,
+                    usuario TEXT NOT NULL,
+                    hora_inicio DATETIME NOT NULL,
+                    hora_salida DATETIME,
+                    session_id TEXT
+                )
+            """))
+            conn.execute(text("""
+                CREATE TABLE ingresos (
+                    id_ingreso INTEGER PRIMARY KEY,
+                    usuario TEXT,
+                    fecha_hora_salida DATETIME,
+                    tarifa_aplicada INTEGER
+                )
+            """))
+            conn.execute(text("CREATE TABLE ingresos_eliminados (id_ingreso_original INTEGER)"))
+            conn.execute(text("""
+                CREATE TABLE usos_bano (usuario TEXT, fecha_hora DATETIME, monto INTEGER)
+            """))
+            conn.execute(text("""
+                CREATE TABLE pagos_mensuales (usuario TEXT, fecha_pago DATETIME, monto_snapshot INTEGER)
+            """))
+            conn.execute(text("""
+                CREATE TABLE cobros_noches (
+                    usuario TEXT, fecha_hora_pago DATETIME, monto_snapshot INTEGER,
+                    estado TEXT, id_ingreso INTEGER
+                )
+            """))
+            conn.execute(text("""
+                CREATE TABLE operaciones_servicio (
+                    usuario_fin TEXT, fecha_hora_fin DATETIME, valor_lavado_snapshot INTEGER,
+                    estado TEXT, id_ingreso_generado INTEGER
+                )
+            """))
+            conn.execute(text("""
+                INSERT INTO asistencias (id_asistencia, usuario, hora_inicio, hora_salida, session_id)
+                VALUES (10, 'operador', :inicio, :fin, 'session-a'),
+                       (11, 'operador', :fin, NULL, 'session-b')
+            """), {
+                "inicio": datetime(2026, 1, 1, 9),
+                "fin": datetime(2026, 1, 1, 10),
+            })
+            # This is the exact shape persisted by Desktop registrar_salida_detallada.
+            conn.execute(text("""
+                INSERT INTO ingresos (id_ingreso, usuario, fecha_hora_salida, tarifa_aplicada)
+                VALUES (1, 'operador', :salida, 1700)
+            """), {"salida": datetime(2026, 1, 1, 10, 30)})
+            # The wash is already included in tarifa_aplicada and must not be counted separately.
+            conn.execute(text("""
+                INSERT INTO operaciones_servicio (
+                    usuario_fin, fecha_hora_fin, valor_lavado_snapshot, estado, id_ingreso_generado
+                ) VALUES ('operador', :salida, 500, 'FINALIZADO_COBRADO', 1)
+            """), {"salida": datetime(2026, 1, 1, 10, 30)})
+
+            first = _calcular_totales_turno(
+                conn, "operador", 10, datetime(2026, 1, 1, 9), datetime(2026, 1, 1, 10), "session-a"
+            )
+            second = _calcular_totales_turno(
+                conn, "operador", 11, datetime(2026, 1, 1, 10), datetime(2026, 1, 1, 11), "session-b"
+            )
+
+        self.assertEqual(first, {"cantidad": 0, "total": 0})
+        self.assertEqual(second, {"cantidad": 1, "total": 1700})
 
 
 if __name__ == "__main__":

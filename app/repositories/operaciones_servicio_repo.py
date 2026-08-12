@@ -173,6 +173,19 @@ def list_solo_lavados_activos(patente: Optional[str] = None) -> List[Dict[str, A
     ]
 
 
+def total_solo_lavados_activos(conn, as_of: Optional[datetime] = None) -> int:
+    total = conn.execute(text("""
+        SELECT COALESCE(SUM(valor_lavado_snapshot), 0)
+        FROM operaciones_servicio
+        WHERE estado = 'ACTIVO'
+          AND id_ingreso_generado IS NULL
+          AND fecha_hora_fin IS NULL
+          AND COALESCE(cerrado, FALSE) = FALSE
+          AND (:as_of IS NULL OR fecha_hora_inicio <= :as_of)
+    """), {"as_of": as_of}).scalar()
+    return int(total or 0)
+
+
 def finalizar_solo_lavado_cobrar(id_operacion_servicio: int, usuario: str) -> Dict[str, Any]:
     ensure_operaciones_servicio_schema()
     now = datetime.now()

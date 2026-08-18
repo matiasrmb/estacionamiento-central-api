@@ -5,7 +5,11 @@ from pydantic import BaseModel, Field
 
 from app.api.deps import require_role
 from app.core.security import verify_password, create_access_token
-from app.repositories.asistencias_repo import registrar_asistencia_inicio, registrar_asistencia_salida
+from app.repositories.asistencias_repo import (
+    obtener_resumen_sesion,
+    registrar_asistencia_inicio,
+    registrar_asistencia_salida,
+)
 from app.repositories.users_repo import get_user_by_username
 
 router = APIRouter()
@@ -69,6 +73,12 @@ def login(payload: LoginRequest):
         usuario=user["usuario"],
         rol=rol_api,
     )
+
+
+@router.get("/auth/session-summary", tags=["auth"])
+def session_summary(user=Depends(require_role("operador", "admin"))):
+    resumen = obtener_resumen_sesion(user.get("sub") or "", user.get("sid") or "")
+    return {"resumen": resumen}
 
 
 @router.post("/auth/logout", tags=["auth"])

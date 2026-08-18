@@ -174,6 +174,14 @@ class EndpointAuthTests(unittest.TestCase):
         cerrar.assert_called_once_with("operador", "session-mobile")
         self.assertTrue(response["ok"])
 
+    def test_session_summary_uses_only_the_session_identified_by_the_token(self):
+        user = {"sub": "operador", "sid": "session-desktop"}
+        with patch.object(auth, "obtener_resumen_sesion", return_value={"neto_caja": 1200}) as resumen:
+            response = auth.session_summary(user)
+
+        resumen.assert_called_once_with("operador", "session-desktop")
+        self.assertEqual(response["resumen"]["neto_caja"], 1200)
+
     def test_logout_without_session_claim_does_not_target_username_sessions(self):
         with patch.object(auth, "registrar_asistencia_salida", return_value={"cantidad": 0}) as cerrar:
             auth.logout({"sub": "operador"})

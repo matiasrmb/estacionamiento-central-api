@@ -22,11 +22,39 @@ def registrar_asistencia_inicio(usuario: str, device_id: str, session_id: str) -
 def registrar_asistencia_salida(usuario: str, session_id: str) -> Dict[str, Any]:
     now = datetime.now()
     if not session_id.strip():
-        return {"cantidad": 0, "total": 0, "hora_inicio": None}
+        return _resumen_vacio()
     with db_conn() as conn:
         resumen = _cerrar_asistencias_activas(conn, usuario, now, session_id=session_id)
         conn.commit()
     return resumen
+
+
+def obtener_resumen_sesion(usuario: str, session_id: str) -> Dict[str, Any]:
+    """Returns the live summary for exactly the authenticated attendance session."""
+    if not session_id.strip():
+        return _resumen_vacio()
+    with db_conn() as conn:
+        row = conn.execute(
+            text("""
+                SELECT id_asistencia, hora_inicio, hora_salida, session_id
+                FROM asistencias
+                WHERE usuario = :usuario
+                  AND session_id = :session_id
+                ORDER BY hora_inicio DESC
+                LIMIT 1
+            """),
+            {"usuario": usuario, "session_id": session_id},
+        ).mappings().first()
+        if not row:
+            return _resumen_vacio()
+        return _calcular_resumen_sesion(
+            conn,
+            usuario,
+            row["id_asistencia"],
+            row["hora_inicio"],
+            row["hora_salida"] or datetime.now(),
+            row.get("session_id"),
+        )
 
 
 def cerrar_asistencias_activas(usuario: str = "") -> Dict[str, int]:
@@ -119,9 +147,9 @@ def _cerrar_asistencias_activas(
         params,
     ).mappings().all()
 
-    resumen = {"cantidad": 0, "total": 0, "hora_inicio": None}
+    resumen = _resumen_vacio()
     for row in rows:
-        totals = _calcular_totales_turno(
+        resumen = _calcular_resumen_sesion(
             conn,
             usuario,
             row["id_asistencia"],
@@ -139,12 +167,12 @@ def _cerrar_asistencias_activas(
             """),
             {
                 "hora_salida": hora_salida,
-                "total": totals["total"],
-                "cantidad": totals["cantidad"],
+                "total": resumen["total_ingresos"],
+                "cantidad": resumen["cantidad"],
                 "id_asistencia": row["id_asistencia"],
             },
         )
-        resumen = {"cantidad": totals["cantidad"], "total": totals["total"], "hora_inicio": row["hora_inicio"]}
+        resumen["hora_cierre"] = _iso(hora_salida)
     return resumen
 
 
@@ -183,8 +211,38 @@ def _calcular_totales_turno(
     fin: datetime,
     session_id: str | None = None,
 ) -> Dict[str, int]:
-    # Sessionized attendance takes precedence over legacy rows; within each group,
-    # the oldest attendance active at the movement timestamp owns the movement.
+    resumen = _calcular_resumen_sesion(conn, usuario, id_asistencia, inicio, fin, session_id)
+    return {"cantidad": resumen["cantidad"], "total": resumen["total_ingresos"]}
+
+
+def _resumen_vacio() -> Dict[str, Any]:
+    movimientos = {"cantidad": 0, "total": 0}
+    return {
+        "hora_inicio": None,
+        "hora_cierre": None,
+        "ingresos": movimientos.copy(),
+        "usos_bano": movimientos.copy(),
+        "lavados": movimientos.copy(),
+        "mensualidades": movimientos.copy(),
+        "noches": movimientos.copy(),
+        "cantidad": 0,
+        "total": 0,
+        "total_ingresos": 0,
+        "gastos_asociados": 0,
+        "neto_caja": 0,
+    }
+
+
+def _calcular_resumen_sesion(
+    conn,
+    usuario: str,
+    id_asistencia: int,
+    inicio: datetime,
+    fin: datetime,
+    session_id: str | None = None,
+) -> Dict[str, Any]:
+    # Movements do not persist a sid. The oldest attendance active at the movement
+    # timestamp owns it, preventing simultaneous sessions from counting it twice.
     params = {
         "usuario": usuario,
         "id_asistencia": id_asistencia,
@@ -194,26 +252,12 @@ def _calcular_totales_turno(
     }
     def total_desde(tabla, alias, fecha, monto, extra="", usuario_col="usuario"):
         ownership = f"""
-            AND (:session_id IS NOT NULL OR NOT EXISTS (
-                SELECT 1 FROM asistencias sessionizada
-                WHERE sessionizada.usuario = :usuario
-                  AND sessionizada.session_id IS NOT NULL
-                  AND sessionizada.hora_inicio <= {alias}.{fecha}
-                  AND (sessionizada.hora_salida IS NULL OR sessionizada.hora_salida > {alias}.{fecha})
-            ))
             AND NOT EXISTS (
                 SELECT 1 FROM asistencias anterior
                 WHERE anterior.usuario = :usuario
                   AND anterior.id_asistencia < :id_asistencia
                   AND anterior.hora_inicio <= {alias}.{fecha}
                   AND (anterior.hora_salida IS NULL OR anterior.hora_salida > {alias}.{fecha})
-                  AND (anterior.session_id IS NOT NULL OR NOT EXISTS (
-                      SELECT 1 FROM asistencias sessionizada
-                      WHERE sessionizada.usuario = :usuario
-                        AND sessionizada.session_id IS NOT NULL
-                        AND sessionizada.hora_inicio <= {alias}.{fecha}
-                        AND (sessionizada.hora_salida IS NULL OR sessionizada.hora_salida > {alias}.{fecha})
-                  ))
             )
         """
         return conn.execute(text(f"""
@@ -224,24 +268,49 @@ def _calcular_totales_turno(
               {extra} {ownership}
         """), params).mappings().first() or {}
 
-    movimientos = [
-        total_desde("ingresos", "i", "fecha_hora_salida", "tarifa_aplicada", """
+    ingresos = total_desde("ingresos", "i", "fecha_hora_salida", "tarifa_aplicada", """
             AND i.fecha_hora_salida IS NOT NULL
             AND NOT EXISTS (SELECT 1 FROM ingresos_eliminados ie WHERE ie.id_ingreso_original = i.id_ingreso)
-        """),
-        total_desde("usos_bano", "b", "fecha_hora", "monto"),
-        total_desde("pagos_mensuales", "p", "fecha_pago", "monto_snapshot"),
-        total_desde("cobros_noches", "n", "fecha_hora_pago", "monto_snapshot", """
+        """)
+    usos_bano = total_desde("usos_bano", "b", "fecha_hora", "monto")
+    mensualidades = total_desde("pagos_mensuales", "p", "fecha_pago", "monto_snapshot")
+    noches = total_desde("cobros_noches", "n", "fecha_hora_pago", "monto_snapshot", """
             AND n.estado = 'PAGADO'
             AND NOT EXISTS (SELECT 1 FROM ingresos_eliminados ie WHERE ie.id_ingreso_original = n.id_ingreso)
-        """),
-        total_desde("operaciones_servicio", "o", "fecha_hora_fin", "valor_lavado_snapshot", """
+        """)
+    lavados = total_desde("operaciones_servicio", "o", "fecha_hora_fin", "valor_lavado_snapshot", """
             AND o.estado = 'FINALIZADO_COBRADO' AND o.id_ingreso_generado IS NULL
-        """, "usuario_fin"),
-    ]
+        """, "usuario_fin")
+    gastos_row = conn.execute(text("""
+        SELECT COALESCE(SUM(g.monto), 0) AS total
+        FROM gastos_operacion g
+        WHERE g.usuario = :usuario
+          AND g.fecha_hora >= :inicio AND g.fecha_hora < :fin
+          AND NOT EXISTS (
+              SELECT 1 FROM asistencias anterior
+              WHERE anterior.usuario = :usuario
+                AND anterior.id_asistencia < :id_asistencia
+                AND anterior.hora_inicio <= g.fecha_hora
+                AND (anterior.hora_salida IS NULL OR anterior.hora_salida > g.fecha_hora)
+          )
+    """), params).mappings().first() or {}
+    gastos = gastos_row.get("total") or 0
+    movimientos = (ingresos, usos_bano, lavados, mensualidades, noches)
+    total_ingresos = sum(int(row.get("total") or 0) for row in movimientos)
+    cantidad = sum(int(row.get("cantidad") or 0) for row in movimientos)
     return {
-        "cantidad": sum(int(row.get("cantidad") or 0) for row in movimientos),
-        "total": sum(int(row.get("total") or 0) for row in movimientos),
+        "hora_inicio": _iso(inicio),
+        "hora_cierre": _iso(fin),
+        "ingresos": {"cantidad": int(ingresos.get("cantidad") or 0), "total": int(ingresos.get("total") or 0)},
+        "usos_bano": {"cantidad": int(usos_bano.get("cantidad") or 0), "total": int(usos_bano.get("total") or 0)},
+        "lavados": {"cantidad": int(lavados.get("cantidad") or 0), "total": int(lavados.get("total") or 0)},
+        "mensualidades": {"cantidad": int(mensualidades.get("cantidad") or 0), "total": int(mensualidades.get("total") or 0)},
+        "noches": {"cantidad": int(noches.get("cantidad") or 0), "total": int(noches.get("total") or 0)},
+        "cantidad": cantidad,
+        "total": total_ingresos,
+        "total_ingresos": total_ingresos,
+        "gastos_asociados": int(gastos),
+        "neto_caja": total_ingresos - int(gastos),
     }
 
 

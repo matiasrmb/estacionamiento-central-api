@@ -4,7 +4,7 @@ from datetime import datetime
 from sqlalchemy import create_engine, text
 
 from app.db.schema_ensure import _ensure_asistencias_schema_on_connection
-from app.repositories.asistencias_repo import _calcular_totales_turno, _cerrar_asistencias_activas
+from app.repositories.asistencias_repo import _calcular_resumen_sesion, _calcular_totales_turno, _cerrar_asistencias_activas
 
 
 class AsistenciasSessionSchemaTests(unittest.TestCase):
@@ -106,6 +106,10 @@ class AsistenciasSessionRepositoryTests(unittest.TestCase):
         self.assertEqual(first, {"cantidad": 1, "total": 1200})
         self.assertEqual(second, {"cantidad": 0, "total": 0})
         for sql, params in conn.calls:
+            if "FROM gastos_operacion" in sql:
+                self.assertIn("g.fecha_hora >= :inicio", sql)
+                self.assertIn("g.fecha_hora < :fin", sql)
+                continue
             self.assertIn("NOT EXISTS", sql)
             self.assertIn("anterior.id_asistencia < :id_asistencia", sql)
             self.assertEqual(params["usuario"], "operador")
@@ -144,11 +148,14 @@ class AsistenciasSessionRepositoryTests(unittest.TestCase):
             elif "FROM cobros_noches" in sql:
                 self.assertIn("n.fecha_hora_pago >= :inicio", sql)
                 self.assertIn("n.fecha_hora_pago < :fin", sql)
+            elif "FROM gastos_operacion" in sql:
+                self.assertIn("g.fecha_hora >= :inicio", sql)
+                self.assertIn("g.fecha_hora < :fin", sql)
             else:
                 self.assertIn("o.fecha_hora_fin >= :inicio", sql)
                 self.assertIn("o.fecha_hora_fin < :fin", sql)
 
-    def test_legacy_attendance_yields_to_active_sessionized_attendance(self):
+    def test_sessionized_attendance_uses_the_same_deterministic_owner_rule(self):
         class Result:
             def mappings(self):
                 return self
@@ -170,9 +177,9 @@ class AsistenciasSessionRepositoryTests(unittest.TestCase):
         )
 
         for sql, params in conn.calls:
-            self.assertIn(":session_id IS NOT NULL", sql)
-            self.assertIn("anterior.session_id IS NOT NULL", sql)
-            self.assertIn("sessionizada.session_id IS NOT NULL", sql)
+            if "FROM gastos_operacion" in sql:
+                continue
+            self.assertIn("anterior.id_asistencia < :id_asistencia", sql)
             self.assertEqual(params["session_id"], "session-b")
 
     def test_single_session_keeps_all_of_its_movements(self):
@@ -276,9 +283,15 @@ class AsistenciasSessionRepositoryTests(unittest.TestCase):
                 )
             """))
             conn.execute(text("""
+                CREATE TABLE gastos_operacion (
+                    usuario TEXT, fecha_hora DATETIME, monto INTEGER
+                )
+            """))
+            conn.execute(text("""
                 INSERT INTO asistencias (id_asistencia, usuario, hora_inicio, hora_salida, session_id)
                 VALUES (10, 'operador', :inicio, :fin, 'session-a'),
-                       (11, 'operador', :fin, NULL, 'session-b')
+                       (11, 'operador', :fin, NULL, 'session-b'),
+                       (12, 'operador', '2026-01-01 10:15:00', NULL, 'session-c')
             """), {
                 "inicio": datetime(2026, 1, 1, 9),
                 "fin": datetime(2026, 1, 1, 10),
@@ -294,6 +307,15 @@ class AsistenciasSessionRepositoryTests(unittest.TestCase):
                     usuario_fin, fecha_hora_fin, valor_lavado_snapshot, estado, id_ingreso_generado
                 ) VALUES ('operador', :salida, 500, 'FINALIZADO_COBRADO', 1)
             """), {"salida": datetime(2026, 1, 1, 10, 30)})
+            conn.execute(text("""
+                INSERT INTO gastos_operacion (usuario, fecha_hora, monto)
+                VALUES ('operador', :en_sesion, 200),
+                       ('operador', :fuera_sesion, 300),
+                       ('otro', :en_sesion, 400)
+            """), {
+                "en_sesion": datetime(2026, 1, 1, 10, 40),
+                "fuera_sesion": datetime(2026, 1, 1, 11, 10),
+            })
 
             first = _calcular_totales_turno(
                 conn, "operador", 10, datetime(2026, 1, 1, 9), datetime(2026, 1, 1, 10), "session-a"
@@ -301,9 +323,18 @@ class AsistenciasSessionRepositoryTests(unittest.TestCase):
             second = _calcular_totales_turno(
                 conn, "operador", 11, datetime(2026, 1, 1, 10), datetime(2026, 1, 1, 11), "session-b"
             )
+            simultaneous = _calcular_resumen_sesion(
+                conn, "operador", 12, datetime(2026, 1, 1, 10, 15), datetime(2026, 1, 1, 11), "session-c"
+            )
+            summary = _calcular_resumen_sesion(
+                conn, "operador", 11, datetime(2026, 1, 1, 10), datetime(2026, 1, 1, 11), "session-b"
+            )
 
         self.assertEqual(first, {"cantidad": 0, "total": 0})
         self.assertEqual(second, {"cantidad": 1, "total": 1700})
+        self.assertEqual(simultaneous["total_ingresos"], 0)
+        self.assertEqual(summary["gastos_asociados"], 200)
+        self.assertEqual(summary["neto_caja"], 1500)
 
 
 if __name__ == "__main__":

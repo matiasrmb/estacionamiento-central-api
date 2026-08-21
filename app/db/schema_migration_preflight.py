@@ -53,6 +53,16 @@ def evaluate_schema_migration_preflight(
         for migration in plan.get("migrations", [])
         if isinstance(migration, dict) and migration.get("status") == "invalid_contract"
     )
+    blocked_migrations = sorted(
+        str(migration.get("id"))
+        for migration in plan.get("migrations", [])
+        if isinstance(migration, dict) and migration.get("status") == "blocked_prerequisite"
+    )
+    inconsistent_state_migrations = sorted(
+        str(migration.get("id"))
+        for migration in plan.get("migrations", [])
+        if isinstance(migration, dict) and migration.get("status") == "inconsistent_state"
+    )
     statuses = []
     statuses.append(_check("database_name", bool(database), "Database name is present."))
     statuses.append(_check(
@@ -69,6 +79,11 @@ def evaluate_schema_migration_preflight(
         "schema_migrations_contract",
         not invalid_contract_migrations,
         "schema_migrations matches the contract required by migration 001.",
+    ))
+    statuses.append(_check(
+        "migration_state_consistency",
+        not inconsistent_state_migrations,
+        "Recorded migrations have the schema they claim to provide.",
     ))
     statuses.append(_check(
         "backup_confirmed_for_future_apply",
@@ -114,6 +129,8 @@ def evaluate_schema_migration_preflight(
         },
         "unknown_migrations": unknown_migrations,
         "invalid_contract_migrations": invalid_contract_migrations,
+        "blocked_migrations": blocked_migrations,
+        "inconsistent_state_migrations": inconsistent_state_migrations,
         "apply": {
             "available": apply_requested and not has_failures,
             "will_execute": apply_requested and not has_failures and bool(pending_migrations),
@@ -154,7 +171,7 @@ def _destructive_actions(plan: dict[str, Any], apply_requested: bool, has_failur
         if isinstance(migration, dict)
     }
     if "pending" in statuses:
-        return ["CREATE TABLE schema_migrations", "INSERT migration record"]
+        return ["CREATE TABLE or seed mutable configuration", "INSERT migration record"]
     if "repair_required" in statuses:
         return ["INSERT migration record"]
     return []

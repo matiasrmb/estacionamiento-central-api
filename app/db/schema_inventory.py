@@ -120,7 +120,7 @@ def _read_rows(
 
 
 def _json_serializable(row: dict[str, Any]) -> dict[str, Any]:
-    return {key: _json_value(value) for key, value in row.items()}
+    return {key.lower(): _json_value(value) for key, value in row.items()}
 
 
 def _json_value(value: Any) -> Any:

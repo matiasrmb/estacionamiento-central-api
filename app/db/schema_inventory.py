@@ -64,6 +64,10 @@ _CONFIG_SQL = """
     FROM configuracion
     WHERE clave IN :config_keys
 """
+_SCHEMA_MIGRATIONS_SQL = """
+    SELECT migration_id, applied_at
+    FROM schema_migrations
+"""
 
 
 def collect_read_only_schema_inventory(conn: Connection) -> dict[str, Any]:
@@ -83,10 +87,21 @@ def collect_read_only_schema_inventory(conn: Connection) -> dict[str, Any]:
         ("table_name", "constraint_name", "ordinal_position", "column_name"),
     )
     config_available = any(row["table_name"].casefold() == "configuracion" for row in tables)
+    schema_migrations_available = any(
+        row["table_name"].casefold() == "schema_migrations" for row in tables
+    )
     config_values = []
     if config_available:
         config_query = text(_CONFIG_SQL).bindparams(bindparam("config_keys", expanding=True))
         config_values = _read_rows(conn, config_query, {"config_keys": CONFIG_SEED_KEYS}, ("clave",))
+    migration_contract = schema_migrations_contract({
+        "tables": tables,
+        "columns": columns,
+        "indexes": indexes,
+    })
+    migration_records = []
+    if migration_contract["valid"] is True:
+        migration_records = _read_rows(conn, _SCHEMA_MIGRATIONS_SQL, {}, ("migration_id", "applied_at"))
 
     return {
         "inventory_version": SCHEMA_INVENTORY_VERSION,
@@ -100,6 +115,12 @@ def collect_read_only_schema_inventory(conn: Connection) -> dict[str, Any]:
             "available": config_available,
             "values": config_values,
         },
+        "migration_snapshot": {
+            "source_table": "schema_migrations",
+            "available": schema_migrations_available,
+            "contract": migration_contract,
+            "records": migration_records,
+        },
     }
 
 
@@ -107,6 +128,70 @@ def collect_read_only_schema_inventory_from_engine(engine: Engine) -> dict[str, 
     """Collect a read-only inventory using an existing SQLAlchemy engine."""
     with engine.connect() as conn:
         return collect_read_only_schema_inventory(conn)
+
+
+def schema_migrations_contract(inventory: dict[str, Any]) -> dict[str, Any]:
+    """Validate the tracking table shape required by migration 001."""
+    table_names = {
+        str(row.get("table_name", "")).casefold()
+        for row in inventory.get("tables", [])
+        if isinstance(row, dict)
+    }
+    if "schema_migrations" not in table_names:
+        return {"valid": None, "issues": []}
+
+    columns = {
+        str(row.get("column_name", "")).casefold(): row
+        for row in inventory.get("columns", [])
+        if isinstance(row, dict) and str(row.get("table_name", "")).casefold() == "schema_migrations"
+    }
+    indexes = [
+        row for row in inventory.get("indexes", [])
+        if isinstance(row, dict) and str(row.get("table_name", "")).casefold() == "schema_migrations"
+    ]
+    issues = []
+    migration_id = columns.get("migration_id")
+    if migration_id is None:
+        issues.append("migration_id column is missing")
+    else:
+        if str(migration_id.get("column_type", "")).casefold() != "varchar(255)":
+            issues.append("migration_id column_type must be varchar(255)")
+        if str(migration_id.get("is_nullable", "")).casefold() != "no":
+            issues.append("migration_id must be NOT NULL")
+        if not _migration_id_is_primary_key(migration_id, indexes):
+            issues.append("migration_id must be the sole primary key column")
+
+    applied_at = columns.get("applied_at")
+    if applied_at is None:
+        issues.append("applied_at column is missing")
+    else:
+        if (
+            str(applied_at.get("data_type", "")).casefold() != "datetime"
+            and str(applied_at.get("column_type", "")).casefold() != "datetime"
+        ):
+            issues.append("applied_at must be datetime")
+        if str(applied_at.get("is_nullable", "")).casefold() != "no":
+            issues.append("applied_at must be NOT NULL")
+        if not _has_current_timestamp_default(applied_at.get("column_default")):
+            issues.append("applied_at default must be CURRENT_TIMESTAMP")
+    return {"valid": not issues, "issues": issues}
+
+
+def _migration_id_is_primary_key(column: dict[str, Any], indexes: list[dict[str, Any]]) -> bool:
+    primary_key_columns = [
+        index for index in indexes
+        if str(index.get("index_name", "")).casefold() == "primary"
+    ]
+    return (
+        len(primary_key_columns) == 1
+        and str(primary_key_columns[0].get("column_name", "")).casefold() == "migration_id"
+        and str(primary_key_columns[0].get("seq_in_index", "")) == "1"
+        and str(column.get("column_key", "")).casefold() == "pri"
+    )
+
+
+def _has_current_timestamp_default(value: Any) -> bool:
+    return str(value or "").casefold().replace("()", "") == "current_timestamp"
 
 
 def _read_rows(

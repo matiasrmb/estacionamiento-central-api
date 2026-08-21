@@ -30,6 +30,10 @@ def evaluate_schema_migration_preflight(
     database_value = inventory.get("database") or plan.get("database")
     database = str(database_value) if database_value else None
     backup_confirmed = bool(context.get("backup_confirmed", False))
+    dev_database_confirmed = bool(context.get("dev_database_confirmed", False))
+    apply_requested = bool(context.get("apply_requested", False))
+    expected_database_value = context.get("expected_database")
+    expected_database = str(expected_database_value) if expected_database_value else None
     environment_value = context.get("environment")
     environment = str(environment_value) if environment_value is not None else None
     inventory_present = _schema_migrations_present(inventory)
@@ -37,12 +41,17 @@ def evaluate_schema_migration_preflight(
     pending_migrations = sorted(
         str(migration.get("id"))
         for migration in plan.get("migrations", [])
-        if isinstance(migration, dict) and migration.get("status") == "pending"
+        if isinstance(migration, dict) and migration.get("status") in {"pending", "repair_required"}
     )
     unknown_migrations = sorted(
         str(migration.get("id"))
         for migration in plan.get("migrations", [])
         if isinstance(migration, dict) and migration.get("status") == "unknown"
+    )
+    invalid_contract_migrations = sorted(
+        str(migration.get("id"))
+        for migration in plan.get("migrations", [])
+        if isinstance(migration, dict) and migration.get("status") == "invalid_contract"
     )
     statuses = []
     statuses.append(_check("database_name", bool(database), "Database name is present."))
@@ -57,29 +66,42 @@ def evaluate_schema_migration_preflight(
         "All migration statuses are known.",
     ))
     statuses.append(_check(
+        "schema_migrations_contract",
+        not invalid_contract_migrations,
+        "schema_migrations matches the contract required by migration 001.",
+    ))
+    statuses.append(_check(
         "backup_confirmed_for_future_apply",
         not pending_migrations or backup_confirmed,
         "A backup must be confirmed before any future apply with pending migrations.",
     ))
     statuses.append(_check(
-        "apply_mode_unavailable",
-        plan.get("mode") == "dry_run" and all(
-            migration.get("will_execute") is False
-            for migration in plan.get("migrations", [])
-            if isinstance(migration, dict)
-        ),
-        "Apply mode is unavailable and no migration will execute in this slice.",
+        "backup_confirmed_for_apply",
+        not apply_requested or backup_confirmed,
+        "A backup confirmation is required for an apply run.",
+    ))
+    statuses.append(_check(
+        "dev_database_confirmed_for_apply",
+        not apply_requested or dev_database_confirmed,
+        "An explicit development database confirmation is required for an apply run.",
+    ))
+    statuses.append(_check(
+        "expected_database_matches_for_apply",
+        not apply_requested or bool(expected_database) and database == expected_database,
+        "The active database must match the expected database for an apply run.",
     ))
 
     has_failures = any(check["status"] == "BLOCKED" for check in statuses)
     status = "BLOCKED" if has_failures else "READY_FOR_MANUAL_REVIEW" if pending_migrations else "PREFLIGHT_OK"
     return {
         "preflight_version": SCHEMA_MIGRATION_PREFLIGHT_VERSION,
-        "mode": "dry_run",
+        "mode": "apply" if apply_requested else "dry_run",
         "status": status,
         "database": database,
         "runtime_context": {
             "backup_confirmed": backup_confirmed,
+            "dev_database_confirmed": dev_database_confirmed,
+            "expected_database": expected_database,
             "environment": environment,
         },
         "schema_migrations": {
@@ -91,10 +113,11 @@ def evaluate_schema_migration_preflight(
             "ids": pending_migrations,
         },
         "unknown_migrations": unknown_migrations,
+        "invalid_contract_migrations": invalid_contract_migrations,
         "apply": {
-            "available": False,
-            "will_execute": False,
-            "destructive_actions": [],
+            "available": apply_requested and not has_failures,
+            "will_execute": apply_requested and not has_failures and bool(pending_migrations),
+            "destructive_actions": _destructive_actions(plan, apply_requested, has_failures),
         },
         "checks": statuses,
         "future_apply_checklist": list(FUTURE_APPLY_CHECKLIST),
@@ -120,6 +143,21 @@ def _schema_migrations_present(source: dict[str, Any]) -> bool | None:
         isinstance(row, dict) and str(row.get("table_name", "")).casefold() == "schema_migrations"
         for row in tables
     )
+
+
+def _destructive_actions(plan: dict[str, Any], apply_requested: bool, has_failures: bool) -> list[str]:
+    if not apply_requested or has_failures:
+        return []
+    statuses = {
+        migration.get("status")
+        for migration in plan.get("migrations", [])
+        if isinstance(migration, dict)
+    }
+    if "pending" in statuses:
+        return ["CREATE TABLE schema_migrations", "INSERT migration record"]
+    if "repair_required" in statuses:
+        return ["INSERT migration record"]
+    return []
 
 
 def _check(name: str, passed: bool, message: str) -> dict[str, str]:

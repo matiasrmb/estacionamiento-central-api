@@ -68,6 +68,12 @@ _SCHEMA_MIGRATIONS_SQL = """
     SELECT migration_id, applied_at
     FROM schema_migrations
 """
+_TIPOS_LAVADO_SEED_SQL = """
+    SELECT codigo, nombre, activo
+    FROM tipos_lavado
+    WHERE codigo = :codigo
+"""
+TIPOS_LAVADO_SEED_CODE = "lavado_general"
 
 
 def collect_read_only_schema_inventory(conn: Connection) -> dict[str, Any]:
@@ -102,6 +108,16 @@ def collect_read_only_schema_inventory(conn: Connection) -> dict[str, Any]:
     migration_records = []
     if migration_contract["valid"] is True:
         migration_records = _read_rows(conn, _SCHEMA_MIGRATIONS_SQL, {}, ("migration_id", "applied_at"))
+    tipos_contract = tipos_lavado_contract({
+        "tables": tables,
+        "columns": columns,
+        "indexes": indexes,
+    })
+    tipos_lavado_seed = []
+    if tipos_contract["valid"] is True:
+        tipos_lavado_seed = _read_rows(
+            conn, _TIPOS_LAVADO_SEED_SQL, {"codigo": TIPOS_LAVADO_SEED_CODE}, ("codigo",)
+        )
 
     return {
         "inventory_version": SCHEMA_INVENTORY_VERSION,
@@ -120,6 +136,12 @@ def collect_read_only_schema_inventory(conn: Connection) -> dict[str, Any]:
             "available": schema_migrations_available,
             "contract": migration_contract,
             "records": migration_records,
+        },
+        "tipos_lavado_seed_snapshot": {
+            "source_table": "tipos_lavado",
+            "available": tipos_contract["valid"] is True,
+            "contract": tipos_contract,
+            "records": tipos_lavado_seed,
         },
     }
 
@@ -175,6 +197,93 @@ def schema_migrations_contract(inventory: dict[str, Any]) -> dict[str, Any]:
         if not _has_current_timestamp_default(applied_at.get("column_default")):
             issues.append("applied_at default must be CURRENT_TIMESTAMP")
     return {"valid": not issues, "issues": issues}
+
+
+def tipos_lavado_contract(inventory: dict[str, Any]) -> dict[str, Any]:
+    """Validate the mutable wash-type configuration table required by migration 002."""
+    table_names = {
+        str(row.get("table_name", "")).casefold()
+        for row in inventory.get("tables", [])
+        if isinstance(row, dict)
+    }
+    if "tipos_lavado" not in table_names:
+        return {"valid": None, "issues": []}
+
+    columns = {
+        str(row.get("column_name", "")).casefold(): row
+        for row in inventory.get("columns", [])
+        if isinstance(row, dict) and str(row.get("table_name", "")).casefold() == "tipos_lavado"
+    }
+    indexes = [
+        row for row in inventory.get("indexes", [])
+        if isinstance(row, dict) and str(row.get("table_name", "")).casefold() == "tipos_lavado"
+    ]
+    issues = []
+    _require_column(
+        issues, columns, "id_tipo_lavado", "int", nullable=False, primary_key=True,
+        auto_increment=True, indexes=indexes,
+    )
+    _require_column(issues, columns, "codigo", "varchar(50)", nullable=False, unique=True, indexes=indexes)
+    _require_column(issues, columns, "nombre", "varchar(80)", nullable=False)
+    _require_column(issues, columns, "activo", "tinyint(1)", nullable=False, default="1")
+    _require_column(issues, columns, "created_at", "datetime", nullable=False, default="CURRENT_TIMESTAMP")
+    _require_column(
+        issues, columns, "updated_at", "datetime", nullable=False, default="CURRENT_TIMESTAMP", on_update=True
+    )
+    return {"valid": not issues, "issues": issues}
+
+
+def _require_column(
+    issues: list[str], columns: dict[str, dict[str, Any]], name: str, column_type: str, *, nullable: bool,
+    primary_key: bool = False, auto_increment: bool = False, unique: bool = False,
+    indexes: list[dict[str, Any]] | None = None, default: str | None = None, on_update: bool = False,
+) -> None:
+    column = columns.get(name)
+    if column is None:
+        issues.append(f"{name} column is missing")
+        return
+    if str(column.get("column_type", "")).casefold() != column_type:
+        issues.append(f"{name} column_type must be {column_type}")
+    if str(column.get("is_nullable", "")).casefold() != ("yes" if nullable else "no"):
+        issues.append(f"{name} must be {'NULL' if nullable else 'NOT NULL'}")
+    if primary_key and not _single_column_index(column, indexes or [], "primary"):
+        issues.append(f"{name} must be the sole primary key column")
+    if auto_increment and "auto_increment" not in str(column.get("extra", "")).casefold():
+        issues.append(f"{name} must be AUTO_INCREMENT")
+    if unique and not _single_column_unique_index(column, indexes or []):
+        issues.append(f"{name} must be UNIQUE")
+    if default is not None and (
+        not _has_current_timestamp_default(column.get("column_default"))
+        if default == "CURRENT_TIMESTAMP"
+        else str(column.get("column_default")) != default
+    ):
+        issues.append(f"{name} default must be {default}")
+    if on_update and "on update current_timestamp" not in " ".join(str(column.get("extra", "")).casefold().split()):
+        issues.append(f"{name} must update with CURRENT_TIMESTAMP")
+
+
+def _single_column_index(column: dict[str, Any], indexes: list[dict[str, Any]], index_name: str) -> bool:
+    matches = [index for index in indexes if str(index.get("index_name", "")).casefold() == index_name]
+    return (
+        len(matches) == 1
+        and str(matches[0].get("column_name", "")).casefold() == str(column.get("column_name", "")).casefold()
+        and str(matches[0].get("seq_in_index", "")) == "1"
+    )
+
+
+def _single_column_unique_index(column: dict[str, Any], indexes: list[dict[str, Any]]) -> bool:
+    indexes_by_name: dict[str, list[dict[str, Any]]] = {}
+    for index in indexes:
+        index_name = str(index.get("index_name", "")).casefold()
+        indexes_by_name.setdefault(index_name, []).append(index)
+    return any(
+        len(index_columns) == 1
+        and str(index_columns[0].get("column_name", "")).casefold()
+        == str(column.get("column_name", "")).casefold()
+        and str(index_columns[0].get("seq_in_index", "")) == "1"
+        and str(index_columns[0].get("non_unique", "")).casefold() in {"0", "false"}
+        for index_columns in indexes_by_name.values()
+    )
 
 
 def _migration_id_is_primary_key(column: dict[str, Any], indexes: list[dict[str, Any]]) -> bool:

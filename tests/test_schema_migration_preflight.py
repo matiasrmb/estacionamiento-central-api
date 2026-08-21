@@ -49,8 +49,8 @@ class SchemaMigrationPreflightTests(unittest.TestCase):
             _plan(["schema_migrations"], migration_ids=["001_create_schema_migrations"]),
         )
 
-        self.assertEqual(result["status"], "PREFLIGHT_OK")
-        self.assertEqual(result["pending_migrations"], {"count": 0, "ids": []})
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertEqual(result["pending_migrations"], {"count": 1, "ids": ["002_create_tipos_lavado"]})
         self.assertEqual(result["future_apply_checklist"], [
             "Verify a current database backup.",
             "Test restoring the backup.",

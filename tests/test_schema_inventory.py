@@ -1,7 +1,7 @@
 import re
 import unittest
 
-from app.db.schema_inventory import collect_read_only_schema_inventory
+from app.db.schema_inventory import collect_read_only_schema_inventory, tipos_lavado_contract
 
 
 class FakeResult:
@@ -25,11 +25,14 @@ class FakeResult:
 class FakeConnection:
     def __init__(
         self, *, include_config=True, include_schema_migrations=False,
-        migration_records=None, schema_name="parking", uppercase_row_keys=False,
+        migration_records=None, include_tipos_lavado=False, tipos_lavado_records=None,
+        schema_name="parking", uppercase_row_keys=False,
     ):
         self.include_config = include_config
         self.include_schema_migrations = include_schema_migrations
         self.migration_records = migration_records or []
+        self.include_tipos_lavado = include_tipos_lavado
+        self.tipos_lavado_records = tipos_lavado_records or []
         self.schema_name = schema_name
         self.uppercase_row_keys = uppercase_row_keys
         self.statements = []
@@ -47,6 +50,8 @@ class FakeConnection:
                 rows.append({"table_name": "configuracion", "table_type": "BASE TABLE", "engine": "InnoDB", "table_collation": "utf8mb4"})
             if self.include_schema_migrations:
                 rows.append({"table_name": "schema_migrations", "table_type": "BASE TABLE", "engine": "InnoDB", "table_collation": "utf8mb4"})
+            if self.include_tipos_lavado:
+                rows.append({"table_name": "tipos_lavado", "table_type": "BASE TABLE", "engine": "InnoDB", "table_collation": "utf8mb4"})
             return FakeResult(rows, uppercase_row_keys=self.uppercase_row_keys)
         if "information_schema.columns" in sql:
             rows = [
@@ -58,6 +63,15 @@ class FakeConnection:
                     {"table_name": "schema_migrations", "column_name": "migration_id", "ordinal_position": 1, "column_default": None, "is_nullable": "NO", "data_type": "varchar", "column_type": "varchar(255)", "column_key": "PRI", "extra": ""},
                     {"table_name": "schema_migrations", "column_name": "applied_at", "ordinal_position": 2, "column_default": "CURRENT_TIMESTAMP", "is_nullable": "NO", "data_type": "datetime", "column_type": "datetime", "column_key": "", "extra": ""},
                 ])
+            if self.include_tipos_lavado:
+                rows.extend([
+                    {"table_name": "tipos_lavado", "column_name": "id_tipo_lavado", "ordinal_position": 1, "column_default": None, "is_nullable": "NO", "data_type": "int", "column_type": "int", "column_key": "PRI", "extra": "auto_increment"},
+                    {"table_name": "tipos_lavado", "column_name": "codigo", "ordinal_position": 2, "column_default": None, "is_nullable": "NO", "data_type": "varchar", "column_type": "varchar(50)", "column_key": "UNI", "extra": ""},
+                    {"table_name": "tipos_lavado", "column_name": "nombre", "ordinal_position": 3, "column_default": None, "is_nullable": "NO", "data_type": "varchar", "column_type": "varchar(80)", "column_key": "", "extra": ""},
+                    {"table_name": "tipos_lavado", "column_name": "activo", "ordinal_position": 4, "column_default": "1", "is_nullable": "NO", "data_type": "tinyint", "column_type": "tinyint(1)", "column_key": "", "extra": ""},
+                    {"table_name": "tipos_lavado", "column_name": "created_at", "ordinal_position": 5, "column_default": "CURRENT_TIMESTAMP", "is_nullable": "NO", "data_type": "datetime", "column_type": "datetime", "column_key": "", "extra": ""},
+                    {"table_name": "tipos_lavado", "column_name": "updated_at", "ordinal_position": 6, "column_default": "CURRENT_TIMESTAMP", "is_nullable": "NO", "data_type": "datetime", "column_type": "datetime", "column_key": "", "extra": "on update CURRENT_TIMESTAMP"},
+                ])
             return FakeResult(rows, uppercase_row_keys=self.uppercase_row_keys)
         if "information_schema.statistics" in sql:
             rows = [
@@ -66,6 +80,11 @@ class FakeConnection:
             ]
             if self.include_schema_migrations:
                 rows.append({"table_name": "schema_migrations", "index_name": "PRIMARY", "non_unique": 0, "seq_in_index": 1, "column_name": "migration_id", "collation": "A", "index_type": "BTREE"})
+            if self.include_tipos_lavado:
+                rows.extend([
+                    {"table_name": "tipos_lavado", "index_name": "PRIMARY", "non_unique": 0, "seq_in_index": 1, "column_name": "id_tipo_lavado", "collation": "A", "index_type": "BTREE"},
+                    {"table_name": "tipos_lavado", "index_name": "codigo", "non_unique": 0, "seq_in_index": 1, "column_name": "codigo", "collation": "A", "index_type": "BTREE"},
+                ])
             return FakeResult(rows, uppercase_row_keys=self.uppercase_row_keys)
         if "information_schema.referential_constraints" in sql:
             return FakeResult([
@@ -78,6 +97,8 @@ class FakeConnection:
             )
         if "FROM schema_migrations" in sql:
             return FakeResult(self.migration_records, uppercase_row_keys=self.uppercase_row_keys)
+        if "FROM tipos_lavado" in sql:
+            return FakeResult(self.tipos_lavado_records, uppercase_row_keys=self.uppercase_row_keys)
         raise AssertionError(f"Unexpected query: {sql}")
 
 
@@ -103,6 +124,10 @@ class SchemaInventoryTests(unittest.TestCase):
             "available": False,
             "contract": {"valid": None, "issues": []},
             "records": [],
+        })
+        self.assertEqual(inventory["tipos_lavado_seed_snapshot"], {
+            "source_table": "tipos_lavado", "available": False,
+            "contract": {"valid": None, "issues": []}, "records": [],
         })
         self.assertFalse(any("FROM schema_migrations" in statement for statement, _ in conn.statements))
 
@@ -157,6 +182,34 @@ class SchemaInventoryTests(unittest.TestCase):
         self.assertEqual(inventory["indexes"][0]["index_name"], "PRIMARY")
         self.assertEqual(inventory["foreign_keys"][0]["constraint_name"], "fk_vehicle_owner")
         self.assertEqual(inventory["config_seed_snapshot"]["values"][0], {"clave": "modo_cobro", "valor": "hora"})
+
+    def test_collects_tipos_lavado_seed_snapshot_only_for_valid_table(self):
+        conn = FakeConnection(
+            include_tipos_lavado=True,
+            tipos_lavado_records=[{"codigo": "lavado_general", "nombre": "Custom", "activo": 0}],
+        )
+        inventory = collect_read_only_schema_inventory(conn)
+
+        self.assertEqual(inventory["tipos_lavado_seed_snapshot"]["records"], [
+            {"codigo": "lavado_general", "nombre": "Custom", "activo": 0},
+        ])
+        self.assertTrue(inventory["tipos_lavado_seed_snapshot"]["contract"]["valid"])
+        self.assertTrue(any("FROM tipos_lavado" in statement for statement, _ in conn.statements))
+
+    def test_rejects_composite_unique_index_for_codigo(self):
+        inventory = collect_read_only_schema_inventory(FakeConnection(include_tipos_lavado=True))
+        inventory["indexes"] = [
+            index for index in inventory["indexes"]
+            if index["table_name"] != "tipos_lavado"
+        ] + [
+            {"table_name": "tipos_lavado", "index_name": "codigo_otra_columna", "non_unique": 0, "seq_in_index": 1, "column_name": "codigo"},
+            {"table_name": "tipos_lavado", "index_name": "codigo_otra_columna", "non_unique": 0, "seq_in_index": 2, "column_name": "otra_columna"},
+        ]
+
+        contract = tipos_lavado_contract(inventory)
+
+        self.assertFalse(contract["valid"])
+        self.assertIn("codigo must be UNIQUE", contract["issues"])
 
     def test_requires_active_database_name(self):
         conn = FakeConnection(schema_name=None)

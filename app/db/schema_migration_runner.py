@@ -1,4 +1,16 @@
-"""Controlled dry-run and explicit apply support for schema migrations."""
+"""Controlled dry-run and explicit apply support for schema migrations.
+
+Managed migration namespace policy:
+- ``schema_migration_runner.py`` owns logical IDs recorded in
+  ``schema_migrations``.
+- ``app/db/migrations/*.sql`` files are historical, unmanaged references unless
+  explicitly imported into this runner.
+- Numeric prefixes may overlap. The full managed migration ID is authoritative,
+  not its numeric prefix or a historical filename.
+- Future managed IDs must stay descriptive (for example,
+  ``003_widen_pagos_mensuales_metodo_pago``) and do not execute a same-numbered
+  historical SQL file.
+"""
 
 from __future__ import annotations
 
@@ -18,9 +30,8 @@ from app.db.schema_inventory import (
 
 SCHEMA_MIGRATION_PLAN_VERSION = 1
 MIGRATION_001_ID = "001_create_schema_migrations"
-# This logical ID intentionally differs from the unmanaged historical
-# app/db/migrations/002_operaciones_servicio_state.sql file.
 MIGRATION_002_ID = "002_create_tipos_lavado"
+MANAGED_MIGRATION_IDS = (MIGRATION_001_ID, MIGRATION_002_ID)
 MIGRATION_RECORD_SQL = "INSERT INTO schema_migrations (migration_id) VALUES (:migration_id)"
 MIGRATION_001_RECORD_SQL = MIGRATION_RECORD_SQL
 MIGRATION_002_SEED_SQL = (

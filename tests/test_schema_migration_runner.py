@@ -4,9 +4,11 @@ import sys
 import types
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
 from unittest.mock import patch
 
 from app.db.schema_migration_runner import (
+    MANAGED_MIGRATION_IDS,
     MIGRATIONS,
     MIGRATION_001_RECORD_SQL,
     MIGRATION_002_SEED_SQL,
@@ -89,6 +91,44 @@ class ApplyConnection:
 
 
 class SchemaMigrationRunnerTests(unittest.TestCase):
+    def test_managed_migrations_use_full_logical_ids(self):
+        self.assertEqual(MANAGED_MIGRATION_IDS, (
+            "001_create_schema_migrations",
+            "002_create_tipos_lavado",
+        ))
+        self.assertEqual(
+            [migration.migration_id for migration in MIGRATIONS],
+            list(MANAGED_MIGRATION_IDS),
+        )
+        self.assertNotIn("001", MANAGED_MIGRATION_IDS)
+        self.assertNotIn("002", MANAGED_MIGRATION_IDS)
+
+    def test_historical_002_sql_is_not_a_managed_migration_statement(self):
+        historical_sql = (
+            Path(__file__).resolve().parents[1]
+            / "app" / "db" / "migrations" / "002_operaciones_servicio_state.sql"
+        ).read_text(encoding="utf-8")
+
+        self.assertNotIn(historical_sql, [statement for migration in MIGRATIONS for statement in migration.statements])
+
+    def test_historical_002_full_id_does_not_mark_managed_002_as_applied(self):
+        plan = plan_schema_migrations(_inventory(
+            ["schema_migrations"],
+            migration_ids=["001_create_schema_migrations", "002_operaciones_servicio_state"],
+        ))
+
+        self.assertEqual(plan["migrations"][1]["id"], "002_create_tipos_lavado")
+        self.assertEqual(plan["migrations"][1]["status"], "pending")
+
+    def test_historical_bare_002_does_not_mark_managed_002_as_applied(self):
+        plan = plan_schema_migrations(_inventory(
+            ["schema_migrations"],
+            migration_ids=["001_create_schema_migrations", "002"],
+        ))
+
+        self.assertEqual(plan["migrations"][1]["id"], "002_create_tipos_lavado")
+        self.assertEqual(plan["migrations"][1]["status"], "pending")
+
     def test_refuses_without_dry_run(self):
         error = io.StringIO()
 

@@ -44,7 +44,10 @@ class SchemaMigrationPreflightTests(unittest.TestCase):
         self.assertEqual(result["apply"]["destructive_actions"], [])
 
     def test_no_pending_migrations_is_ok_for_current_dry_run_state(self):
-        result = evaluate_schema_migration_preflight(_inventory(["schema_migrations"]), _plan(["schema_migrations"]))
+        result = evaluate_schema_migration_preflight(
+            _inventory(["schema_migrations"], migration_ids=["001_create_schema_migrations"]),
+            _plan(["schema_migrations"], migration_ids=["001_create_schema_migrations"]),
+        )
 
         self.assertEqual(result["status"], "PREFLIGHT_OK")
         self.assertEqual(result["pending_migrations"], {"count": 0, "ids": []})
@@ -54,6 +57,14 @@ class SchemaMigrationPreflightTests(unittest.TestCase):
             "Complete a staging migration run.",
             "Confirm the database is not production unless explicitly approved.",
         ])
+
+    def test_invalid_schema_migrations_contract_blocks_preflight(self):
+        inventory = _inventory(["schema_migrations"], migration_id_column=False)
+        result = evaluate_schema_migration_preflight(inventory, plan_schema_migrations(inventory))
+
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertEqual(result["invalid_contract_migrations"], ["001_create_schema_migrations"])
+        self.assertEqual(_check_status(result, "schema_migrations_contract"), "BLOCKED")
 
     def test_cli_refuses_without_dry_run(self):
         error = io.StringIO()
@@ -94,16 +105,30 @@ class SchemaMigrationPreflightTests(unittest.TestCase):
         collect_inventory.assert_called_once()
 
 
-def _inventory(tables, database="parking"):
-    return {
+def _inventory(tables, database="parking", migration_ids=None, migration_id_column=True):
+    inventory = {
         "inventory_version": 1,
         "database": database,
         "tables": [{"table_name": table} for table in tables],
     }
+    if any(table.casefold() == "schema_migrations" for table in tables):
+        inventory["columns"] = [
+            {"table_name": "schema_migrations", "column_name": "migration_id", "column_type": "varchar(255)", "column_key": "PRI", "is_nullable": "NO"},
+            {"table_name": "schema_migrations", "column_name": "applied_at", "column_type": "datetime", "column_default": "CURRENT_TIMESTAMP", "is_nullable": "NO"},
+        ]
+        if not migration_id_column:
+            inventory["columns"] = inventory["columns"][1:]
+        inventory["indexes"] = [{"table_name": "schema_migrations", "index_name": "PRIMARY", "column_name": "migration_id", "seq_in_index": 1}]
+        inventory["migration_snapshot"] = {
+            "source_table": "schema_migrations",
+            "available": True,
+            "records": [{"migration_id": migration_id} for migration_id in migration_ids or []],
+        }
+    return inventory
 
 
-def _plan(tables, database="parking"):
-    return plan_schema_migrations(_inventory(tables, database))
+def _plan(tables, database="parking", migration_ids=None):
+    return plan_schema_migrations(_inventory(tables, database, migration_ids))
 
 
 def _check_status(result, name):

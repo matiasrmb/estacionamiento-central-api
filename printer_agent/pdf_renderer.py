@@ -111,6 +111,14 @@ def _ticket_lines(payload: Dict[str, Any]) -> list[str]:
     if hora_ingreso and kind != "TICKET_SOLO_LAVADO":
         lines.append(f"INGRESO: {hora_ingreso}")
 
+    if kind == "TICKET_INGRESO" and payload.get("noches"):
+        noches = payload["noches"]
+        lines.extend([
+            "------------------------",
+            f"NOCHES PREPAGADAS: ${_format_amount(noches.get('monto_snapshot'))}",
+            f"REFERENCIA: {noches.get('hora_inicio_snapshot')} A {noches.get('hora_fin_snapshot')}",
+        ])
+
     if kind == "TICKET_SALIDA":
         if hora_salida:
             lines.append(f"SALIDA: {hora_salida}")
@@ -137,9 +145,14 @@ def _ticket_lines(payload: Dict[str, Any]) -> list[str]:
         if det.get("total_lavados"):
             lines.append(f"LAVADOS: ${det.get('total_lavados')}")
         lines.extend(_detail_section_lines(det.get("secciones")))
+        for noche in payload.get("noches_prepagadas") or []:
+            lines.extend([
+                f"NOCHES YA PAGADAS: ${_format_amount(noche.get('monto_snapshot'))}",
+                f"REFERENCIA NOCHES: {noche.get('hora_inicio_snapshot')} A {noche.get('hora_fin_snapshot')}",
+            ])
         lines.extend([
             "------------------------",
-            f"TOTAL: ${payload.get('monto_final', payload.get('monto', ''))}",
+            f"A COBRAR AHORA: ${payload.get('monto_final', payload.get('monto', ''))}",
         ])
 
     if kind == "TICKET_SOLO_LAVADO":

@@ -19,6 +19,10 @@ def obtener_reporte(fecha_inicio: date, fecha_fin: date, patente: str = "") -> D
         FROM ingresos i
         JOIN vehiculos v ON i.id_vehiculo = v.id_vehiculo
         WHERE i.fecha_hora_salida IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM ingresos_eliminados ie
+              WHERE ie.id_ingreso_original = i.id_ingreso
+          )
           AND DATE(i.fecha_hora_salida) BETWEEN :fecha_inicio AND :fecha_fin
     """
     params: Dict[str, Any] = {"fecha_inicio": fecha_inicio, "fecha_fin": fecha_fin}
@@ -33,9 +37,11 @@ def obtener_reporte(fecha_inicio: date, fecha_fin: date, patente: str = "") -> D
         rows = conn.execute(text(query), params).mappings().all()
         items = [_serialize_movimiento(row) for row in rows]
 
-        accounting_items = list(items)
+        parking_movements = list(items)
+        banos = []
         lavados_solos = []
         pagos_mensuales = []
+        cobros_noches = []
         if not patente:
             banos = conn.execute(
                 text("""
@@ -58,21 +64,22 @@ def obtener_reporte(fecha_inicio: date, fecha_fin: date, patente: str = "") -> D
                         "usuario": bano.get("usuario"),
                     }
                 )
-            lavados_solos = conn.execute(
-                text("""
-                    SELECT patente, fecha_hora_inicio, fecha_hora_fin,
-                           TIMESTAMPDIFF(MINUTE, fecha_hora_inicio, fecha_hora_fin) AS minutos,
-                           valor_lavado_snapshot, estado, usuario_fin
-                    FROM operaciones_servicio
-                    WHERE estado = 'FINALIZADO_COBRADO'
-                      AND fecha_hora_fin IS NOT NULL
-                      AND DATE(fecha_hora_fin) BETWEEN :fecha_inicio AND :fecha_fin
-                    ORDER BY fecha_hora_fin ASC
-                """),
-                params,
-            ).mappings().all()
-            for lavado in lavados_solos:
-                items.append(_serialize_solo_lavado(lavado))
+        wash_query = """
+            SELECT patente, fecha_hora_inicio, fecha_hora_fin,
+                   TIMESTAMPDIFF(MINUTE, fecha_hora_inicio, fecha_hora_fin) AS minutos,
+                   valor_lavado_snapshot, estado, usuario_fin
+            FROM operaciones_servicio
+            WHERE estado = 'FINALIZADO_COBRADO'
+              AND id_ingreso_generado IS NULL
+              AND fecha_hora_fin IS NOT NULL
+              AND DATE(fecha_hora_fin) BETWEEN :fecha_inicio AND :fecha_fin
+        """
+        if patente:
+            wash_query += " AND patente = :patente"
+        wash_query += " ORDER BY fecha_hora_fin ASC"
+        lavados_solos = conn.execute(text(wash_query), params).mappings().all()
+        for lavado in lavados_solos:
+            items.append(_serialize_solo_lavado(lavado))
         monthly_payments_query = """
             SELECT v.patente, p.fecha_pago, p.monto_snapshot, p.usuario,
                    p.metodo_pago, p.observacion, p.periodo
@@ -89,9 +96,43 @@ def obtener_reporte(fecha_inicio: date, fecha_fin: date, patente: str = "") -> D
         ).mappings().all()
         for pago in pagos_mensuales:
             items.append(_serialize_pago_mensual(pago))
+        night_charges_query = """
+            SELECT v.patente, c.fecha_hora_pago, c.monto_snapshot, c.usuario,
+                   c.hora_inicio_snapshot, c.hora_fin_snapshot
+            FROM cobros_noches c
+            JOIN ingresos i ON i.id_ingreso = c.id_ingreso
+            JOIN vehiculos v ON v.id_vehiculo = i.id_vehiculo
+            WHERE c.estado = 'PAGADO'
+              AND NOT EXISTS (
+                  SELECT 1 FROM ingresos_eliminados ie
+                  WHERE ie.id_ingreso_original = i.id_ingreso
+              )
+              AND DATE(c.fecha_hora_pago) BETWEEN :fecha_inicio AND :fecha_fin
+        """
+        if patente:
+            night_charges_query += " AND v.patente = :patente"
+        night_charges_query += " ORDER BY c.fecha_hora_pago ASC, c.id_cobro_noche ASC"
+        cobros_noches = conn.execute(text(night_charges_query), params).mappings().all()
+        for cobro in cobros_noches:
+            items.append(_serialize_cobro_noche(cobro))
+        gastos = []
+        if not patente:
+            gastos = conn.execute(
+                text("""
+                    SELECT fecha_hora, monto, descripcion
+                    FROM gastos_operacion
+                    WHERE DATE(fecha_hora) BETWEEN :fecha_inicio AND :fecha_fin
+                    ORDER BY fecha_hora ASC
+                """),
+                params,
+            ).mappings().all()
+            for gasto in gastos:
+                items.append(_serialize_gasto(gasto))
 
     items.sort(key=lambda item: item["fecha_hora_salida"] or "")
-    totals = build_report_totals(accounting_items, lavados_solos, pagos_mensuales)
+    totals = build_report_totals(
+        parking_movements, banos, lavados_solos, gastos, pagos_mensuales, cobros_noches
+    )
     totals["total_movimientos"] = len(items)
     return {
         "fecha_inicio": fecha_inicio.isoformat(),
@@ -137,6 +178,32 @@ def _serialize_pago_mensual(row) -> Dict[str, Any]:
         "metodo_pago": row.get("metodo_pago"),
         "observacion": row.get("observacion"),
         "periodo": _iso(row.get("periodo")),
+    }
+
+
+def _serialize_cobro_noche(row) -> Dict[str, Any]:
+    return {
+        "tipo": "noche",
+        "patente": row["patente"],
+        "fecha_hora_ingreso": _iso(row["fecha_hora_pago"]),
+        "fecha_hora_salida": _iso(row["fecha_hora_pago"]),
+        "minutos": 0,
+        "tarifa_aplicada": int(row["monto_snapshot"] or 0),
+        "usuario": row.get("usuario"),
+        "hora_inicio_snapshot": _iso(row.get("hora_inicio_snapshot")),
+        "hora_fin_snapshot": _iso(row.get("hora_fin_snapshot")),
+    }
+
+
+def _serialize_gasto(row) -> Dict[str, Any]:
+    return {
+        "tipo": "gasto",
+        "patente": "[GASTO]",
+        "fecha_hora_ingreso": _iso(row["fecha_hora"]),
+        "fecha_hora_salida": _iso(row["fecha_hora"]),
+        "minutos": 0,
+        "tarifa_aplicada": -int(row["monto"] or 0),
+        "descripcion": row.get("descripcion"),
     }
 
 

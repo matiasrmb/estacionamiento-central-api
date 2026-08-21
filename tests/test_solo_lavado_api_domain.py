@@ -64,7 +64,7 @@ class SoloLavadoApiDomainTests(unittest.TestCase):
         self.assertEqual(result["patente"], "AA111AA")
         self.assertEqual(result["estado"], "ACTIVO")
         self.assertEqual(result["valor_lavado_snapshot"], 9000)
-        repo_start.assert_called_once_with("aa111aa", 7, "operador")
+        repo_start.assert_called_once_with("AA111AA", 7, "operador")
 
     def test_finalize_solo_lavado_charge_now_returns_separate_revenue_state(self):
         with patch.object(solo_lavados, "repo_finalizar_solo_lavado_cobrar") as repo_finish:

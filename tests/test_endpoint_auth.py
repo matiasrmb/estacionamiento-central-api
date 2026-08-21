@@ -2,6 +2,9 @@ import inspect
 import sys
 import types
 import unittest
+from unittest.mock import patch
+
+from fastapi import HTTPException
 
 
 def _install_optional_dependency_stubs():
@@ -42,6 +45,8 @@ def _install_optional_dependency_stubs():
     if "app.core.security" not in sys.modules:
         security_stub = types.ModuleType("app.core.security")
         security_stub.decode_token = lambda token: {"sub": "tester", "rol": "operador"}
+        security_stub.verify_password = lambda plain, hashed: False
+        security_stub.create_access_token = lambda subject, claims: "token"
 
         class PasswordContextStub:
             def hash(self, value):
@@ -53,7 +58,7 @@ def _install_optional_dependency_stubs():
 
 _install_optional_dependency_stubs()
 
-from app.api.v1.endpoints import activos, asistencias, cierres, configuracion, gastos, ingresos, mensuales, operaciones, reportes, salidas, tarifas, usuarios
+from app.api.v1.endpoints import activos, asistencias, auth, cierres, configuracion, gastos, ingresos, mensuales, operaciones, reportes, resumen_turno, salidas, tarifas, usuarios
 
 
 def _role_dependency(function):
@@ -78,6 +83,9 @@ class EndpointAuthTests(unittest.TestCase):
 
     def test_activos_allows_operator_and_admin(self):
         self.assertEqual(_allowed_roles(activos.listar_activos), {"operador", "admin"})
+
+    def test_resumen_turno_allows_operator_and_admin(self):
+        self.assertEqual(_allowed_roles(resumen_turno.obtener_resumen_turno), {"operador", "admin"})
 
     def test_salida_preview_allows_operator_and_admin(self):
         self.assertEqual(_allowed_roles(salidas.preview_salida), {"operador", "admin"})
@@ -116,6 +124,69 @@ class EndpointAuthTests(unittest.TestCase):
         self.assertEqual(_allowed_roles(cierres.obtener_cierre_pendiente), allowed)
         self.assertEqual(_allowed_roles(cierres.listar_cierres), allowed)
         self.assertEqual(_allowed_roles(cierres.crear_cierre), allowed)
+
+    def test_cierre_lock_conflict_returns_conflict_response(self):
+        with patch.object(
+            cierres,
+            "realizar_cierre",
+            side_effect=cierres.DailyCloseInProgressError(),
+        ):
+            with self.assertRaises(HTTPException) as raised:
+                cierres.crear_cierre({"sub": "operador"})
+
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertEqual(raised.exception.detail, "DAILY_CLOSE_IN_PROGRESS")
+
+    def test_login_siempre_registra_asistencia_aunque_el_cliente_intente_omitirse(self):
+        user = {"usuario": "operador", "activo": 1, "clave_hash": "hash", "rol": "operador", "id_usuario": 4}
+        with (
+            patch.object(auth, "get_user_by_username", return_value=user),
+            patch.object(auth, "verify_password", return_value=True),
+            patch.object(auth, "create_access_token", return_value="token"),
+            patch.object(auth, "registrar_asistencia_inicio") as registrar_asistencia,
+        ):
+            response = auth.login(auth.LoginRequest(usuario="operador", clave="secreta", device_id="mobile-test"))
+
+        self.assertEqual(response.access_token, "token")
+        usuario, device_id, session_id = registrar_asistencia.call_args.args
+        self.assertEqual((usuario, device_id), ("operador", "mobile-test"))
+        self.assertEqual(len(session_id), 32)
+
+    def test_login_generates_legacy_device_and_session_claims_when_device_is_omitted(self):
+        user = {"usuario": "operador", "activo": 1, "clave_hash": "hash", "rol": "operador", "id_usuario": 4}
+        with (
+            patch.object(auth, "get_user_by_username", return_value=user),
+            patch.object(auth, "verify_password", return_value=True),
+            patch.object(auth, "create_access_token", return_value="token") as create_token,
+            patch.object(auth, "registrar_asistencia_inicio"),
+        ):
+            auth.login(auth.LoginRequest(usuario="operador", clave="secreta"))
+
+        claims = create_token.call_args.kwargs["extra_claims"]
+        self.assertEqual(len(claims["sid"]), 32)
+        self.assertEqual(claims["device_id"], f"legacy-{claims['sid']}")
+
+    def test_logout_closes_only_the_session_identified_by_the_token(self):
+        user = {"sub": "operador", "sid": "session-mobile"}
+        with patch.object(auth, "registrar_asistencia_salida", return_value={"cantidad": 0}) as cerrar:
+            response = auth.logout(user)
+
+        cerrar.assert_called_once_with("operador", "session-mobile")
+        self.assertTrue(response["ok"])
+
+    def test_session_summary_uses_only_the_session_identified_by_the_token(self):
+        user = {"sub": "operador", "sid": "session-desktop"}
+        with patch.object(auth, "obtener_resumen_sesion", return_value={"neto_caja": 1200}) as resumen:
+            response = auth.session_summary(user)
+
+        resumen.assert_called_once_with("operador", "session-desktop")
+        self.assertEqual(response["resumen"]["neto_caja"], 1200)
+
+    def test_logout_without_session_claim_does_not_target_username_sessions(self):
+        with patch.object(auth, "registrar_asistencia_salida", return_value={"cantidad": 0}) as cerrar:
+            auth.logout({"sub": "operador"})
+
+        cerrar.assert_called_once_with("operador", "")
 
     def test_gastos_allows_operator_and_admin(self):
         allowed = {"operador", "admin"}

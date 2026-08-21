@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import text
 
 from app.db.database import db_conn
+from app.core.plates import require_valid_plate
 from app.db.schema_ensure import ensure_operaciones_servicio_schema, ensure_wash_vehicle_type_schema
 from app.services.print_jobs import crear_print_job_solo_lavado
 
@@ -74,7 +75,7 @@ def _state_value(estado: Any) -> str:
 def iniciar_solo_lavado(patente: str, id_tipo_vehiculo_lavado: int, usuario: str) -> Dict[str, Any]:
     ensure_wash_vehicle_type_schema()
     ensure_operaciones_servicio_schema()
-    patente = patente.strip().upper()
+    patente = require_valid_plate(patente)
     now = datetime.now()
     with db_conn() as conn:
         active_ingreso = conn.execute(text("""
@@ -170,6 +171,19 @@ def list_solo_lavados_activos(patente: Optional[str] = None) -> List[Dict[str, A
         }
         for row in rows
     ]
+
+
+def total_solo_lavados_activos(conn, as_of: Optional[datetime] = None) -> int:
+    total = conn.execute(text("""
+        SELECT COALESCE(SUM(valor_lavado_snapshot), 0)
+        FROM operaciones_servicio
+        WHERE estado = 'ACTIVO'
+          AND id_ingreso_generado IS NULL
+          AND fecha_hora_fin IS NULL
+          AND COALESCE(cerrado, FALSE) = FALSE
+          AND (:as_of IS NULL OR fecha_hora_inicio <= :as_of)
+    """), {"as_of": as_of}).scalar()
+    return int(total or 0)
 
 
 def finalizar_solo_lavado_cobrar(id_operacion_servicio: int, usuario: str) -> Dict[str, Any]:

@@ -6,26 +6,55 @@ from sqlalchemy import text
 from app.db.database import db_conn
 
 
-def registrar_asistencia_inicio(usuario: str) -> None:
+def registrar_asistencia_inicio(usuario: str, device_id: str, session_id: str) -> None:
     now = datetime.now()
     with db_conn() as conn:
-        _cerrar_asistencias_activas(conn, usuario, now)
         conn.execute(
             text("""
-                INSERT INTO asistencias (usuario, hora_inicio)
-                VALUES (:usuario, :hora_inicio)
+                INSERT INTO asistencias (usuario, device_id, session_id, hora_inicio)
+                VALUES (:usuario, :device_id, :session_id, :hora_inicio)
             """),
-            {"usuario": usuario, "hora_inicio": now},
+            {"usuario": usuario, "device_id": device_id, "session_id": session_id, "hora_inicio": now},
         )
         conn.commit()
 
 
-def registrar_asistencia_salida(usuario: str) -> Dict[str, Any]:
+def registrar_asistencia_salida(usuario: str, session_id: str) -> Dict[str, Any]:
     now = datetime.now()
+    if not session_id.strip():
+        return _resumen_vacio()
     with db_conn() as conn:
-        resumen = _cerrar_asistencias_activas(conn, usuario, now)
+        resumen = _cerrar_asistencias_activas(conn, usuario, now, session_id=session_id)
         conn.commit()
     return resumen
+
+
+def obtener_resumen_sesion(usuario: str, session_id: str) -> Dict[str, Any]:
+    """Returns the live summary for exactly the authenticated attendance session."""
+    if not session_id.strip():
+        return _resumen_vacio()
+    with db_conn() as conn:
+        row = conn.execute(
+            text("""
+                SELECT id_asistencia, hora_inicio, hora_salida, session_id
+                FROM asistencias
+                WHERE usuario = :usuario
+                  AND session_id = :session_id
+                ORDER BY hora_inicio DESC
+                LIMIT 1
+            """),
+            {"usuario": usuario, "session_id": session_id},
+        ).mappings().first()
+        if not row:
+            return _resumen_vacio()
+        return _calcular_resumen_sesion(
+            conn,
+            usuario,
+            row["id_asistencia"],
+            row["hora_inicio"],
+            row["hora_salida"] or datetime.now(),
+            row.get("session_id"),
+        )
 
 
 def cerrar_asistencias_activas(usuario: str = "") -> Dict[str, int]:
@@ -62,7 +91,7 @@ def cerrar_asistencias_activas(usuario: str = "") -> Dict[str, int]:
 
 def obtener_asistencias(usuario: str = "", fecha_inicio: date | None = None, fecha_fin: date | None = None) -> Dict[str, Any]:
     query = """
-        SELECT usuario, hora_inicio, hora_salida, cantidad_movimientos, total_recaudado
+        SELECT id_asistencia, usuario, hora_inicio, hora_salida, cantidad_movimientos, total_recaudado
         FROM asistencias
         WHERE 1=1
     """
@@ -98,21 +127,36 @@ def obtener_asistencias(usuario: str = "", fecha_inicio: date | None = None, fec
     }
 
 
-def _cerrar_asistencias_activas(conn, usuario: str, hora_salida: datetime) -> Dict[str, Any]:
+def _cerrar_asistencias_activas(
+    conn, usuario: str, hora_salida: datetime, session_id: str | None = None
+) -> Dict[str, Any]:
+    session_filter = ""
+    params = {"usuario": usuario}
+    if session_id:
+        session_filter = " AND session_id = :session_id"
+        params["session_id"] = session_id
     rows = conn.execute(
         text("""
-            SELECT id_asistencia, hora_inicio
+            SELECT id_asistencia, hora_inicio, session_id
             FROM asistencias
             WHERE usuario = :usuario
               AND hora_salida IS NULL
+        """ + session_filter + """
             ORDER BY hora_inicio ASC
         """),
-        {"usuario": usuario},
+        params,
     ).mappings().all()
 
-    resumen = {"cantidad": 0, "total": 0, "hora_inicio": None}
+    resumen = _resumen_vacio()
     for row in rows:
-        totals = _calcular_totales_turno(conn, usuario, row["hora_inicio"], hora_salida)
+        resumen = _calcular_resumen_sesion(
+            conn,
+            usuario,
+            row["id_asistencia"],
+            row["hora_inicio"],
+            hora_salida,
+            row.get("session_id"),
+        )
         conn.execute(
             text("""
                 UPDATE asistencias
@@ -123,19 +167,26 @@ def _cerrar_asistencias_activas(conn, usuario: str, hora_salida: datetime) -> Di
             """),
             {
                 "hora_salida": hora_salida,
-                "total": totals["total"],
-                "cantidad": totals["cantidad"],
+                "total": resumen["total_ingresos"],
+                "cantidad": resumen["cantidad"],
                 "id_asistencia": row["id_asistencia"],
             },
         )
-        resumen = {"cantidad": totals["cantidad"], "total": totals["total"], "hora_inicio": row["hora_inicio"]}
+        resumen["hora_cierre"] = _iso(hora_salida)
     return resumen
 
 
 def _serialize(conn, row, now: datetime) -> Dict[str, Any]:
     activa = row["hora_salida"] is None
     if activa:
-        totals = _calcular_totales_turno(conn, row["usuario"], row["hora_inicio"], now)
+        totals = _calcular_totales_turno(
+            conn,
+            row["usuario"],
+            row["id_asistencia"],
+            row["hora_inicio"],
+            now,
+            row.get("session_id"),
+        )
         cantidad = totals["cantidad"]
         total = totals["total"]
     else:
@@ -152,29 +203,114 @@ def _serialize(conn, row, now: datetime) -> Dict[str, Any]:
     }
 
 
-def _calcular_totales_turno(conn, usuario: str, inicio: datetime, fin: datetime) -> Dict[str, int]:
-    salidas = conn.execute(
-        text("""
-            SELECT COUNT(*) AS cantidad, COALESCE(SUM(tarifa_aplicada), 0) AS total
-            FROM ingresos
-            WHERE usuario = :usuario
-              AND fecha_hora_salida BETWEEN :inicio AND :fin
-        """),
-        {"usuario": usuario, "inicio": inicio, "fin": fin},
-    ).mappings().first()
-    banos = conn.execute(
-        text("""
-            SELECT COUNT(*) AS cantidad, COALESCE(SUM(monto), 0) AS total
-            FROM usos_bano
-            WHERE usuario = :usuario
-              AND fecha_hora BETWEEN :inicio AND :fin
-        """),
-        {"usuario": usuario, "inicio": inicio, "fin": fin},
-    ).mappings().first()
+def _calcular_totales_turno(
+    conn,
+    usuario: str,
+    id_asistencia: int,
+    inicio: datetime,
+    fin: datetime,
+    session_id: str | None = None,
+) -> Dict[str, int]:
+    resumen = _calcular_resumen_sesion(conn, usuario, id_asistencia, inicio, fin, session_id)
+    return {"cantidad": resumen["cantidad"], "total": resumen["total_ingresos"]}
 
+
+def _resumen_vacio() -> Dict[str, Any]:
+    movimientos = {"cantidad": 0, "total": 0}
     return {
-        "cantidad": int((salidas or {}).get("cantidad") or 0) + int((banos or {}).get("cantidad") or 0),
-        "total": int((salidas or {}).get("total") or 0) + int((banos or {}).get("total") or 0),
+        "hora_inicio": None,
+        "hora_cierre": None,
+        "ingresos": movimientos.copy(),
+        "usos_bano": movimientos.copy(),
+        "lavados": movimientos.copy(),
+        "mensualidades": movimientos.copy(),
+        "noches": movimientos.copy(),
+        "cantidad": 0,
+        "total": 0,
+        "total_ingresos": 0,
+        "gastos_asociados": 0,
+        "neto_caja": 0,
+    }
+
+
+def _calcular_resumen_sesion(
+    conn,
+    usuario: str,
+    id_asistencia: int,
+    inicio: datetime,
+    fin: datetime,
+    session_id: str | None = None,
+) -> Dict[str, Any]:
+    # Movements do not persist a sid. The oldest attendance active at the movement
+    # timestamp owns it, preventing simultaneous sessions from counting it twice.
+    params = {
+        "usuario": usuario,
+        "id_asistencia": id_asistencia,
+        "inicio": inicio,
+        "fin": fin,
+        "session_id": session_id,
+    }
+    def total_desde(tabla, alias, fecha, monto, extra="", usuario_col="usuario"):
+        ownership = f"""
+            AND NOT EXISTS (
+                SELECT 1 FROM asistencias anterior
+                WHERE anterior.usuario = :usuario
+                  AND anterior.id_asistencia < :id_asistencia
+                  AND anterior.hora_inicio <= {alias}.{fecha}
+                  AND (anterior.hora_salida IS NULL OR anterior.hora_salida > {alias}.{fecha})
+            )
+        """
+        return conn.execute(text(f"""
+            SELECT COUNT(*) AS cantidad, COALESCE(SUM({alias}.{monto}), 0) AS total
+            FROM {tabla} {alias}
+            WHERE {alias}.{usuario_col} = :usuario
+              AND {alias}.{fecha} >= :inicio AND {alias}.{fecha} < :fin
+              {extra} {ownership}
+        """), params).mappings().first() or {}
+
+    ingresos = total_desde("ingresos", "i", "fecha_hora_salida", "tarifa_aplicada", """
+            AND i.fecha_hora_salida IS NOT NULL
+            AND NOT EXISTS (SELECT 1 FROM ingresos_eliminados ie WHERE ie.id_ingreso_original = i.id_ingreso)
+        """)
+    usos_bano = total_desde("usos_bano", "b", "fecha_hora", "monto")
+    mensualidades = total_desde("pagos_mensuales", "p", "fecha_pago", "monto_snapshot")
+    noches = total_desde("cobros_noches", "n", "fecha_hora_pago", "monto_snapshot", """
+            AND n.estado = 'PAGADO'
+            AND NOT EXISTS (SELECT 1 FROM ingresos_eliminados ie WHERE ie.id_ingreso_original = n.id_ingreso)
+        """)
+    lavados = total_desde("operaciones_servicio", "o", "fecha_hora_fin", "valor_lavado_snapshot", """
+            AND o.estado = 'FINALIZADO_COBRADO' AND o.id_ingreso_generado IS NULL
+        """, "usuario_fin")
+    gastos_row = conn.execute(text("""
+        SELECT COALESCE(SUM(g.monto), 0) AS total
+        FROM gastos_operacion g
+        WHERE g.usuario = :usuario
+          AND g.fecha_hora >= :inicio AND g.fecha_hora < :fin
+          AND NOT EXISTS (
+              SELECT 1 FROM asistencias anterior
+              WHERE anterior.usuario = :usuario
+                AND anterior.id_asistencia < :id_asistencia
+                AND anterior.hora_inicio <= g.fecha_hora
+                AND (anterior.hora_salida IS NULL OR anterior.hora_salida > g.fecha_hora)
+          )
+    """), params).mappings().first() or {}
+    gastos = gastos_row.get("total") or 0
+    movimientos = (ingresos, usos_bano, lavados, mensualidades, noches)
+    total_ingresos = sum(int(row.get("total") or 0) for row in movimientos)
+    cantidad = sum(int(row.get("cantidad") or 0) for row in movimientos)
+    return {
+        "hora_inicio": _iso(inicio),
+        "hora_cierre": _iso(fin),
+        "ingresos": {"cantidad": int(ingresos.get("cantidad") or 0), "total": int(ingresos.get("total") or 0)},
+        "usos_bano": {"cantidad": int(usos_bano.get("cantidad") or 0), "total": int(usos_bano.get("total") or 0)},
+        "lavados": {"cantidad": int(lavados.get("cantidad") or 0), "total": int(lavados.get("total") or 0)},
+        "mensualidades": {"cantidad": int(mensualidades.get("cantidad") or 0), "total": int(mensualidades.get("total") or 0)},
+        "noches": {"cantidad": int(noches.get("cantidad") or 0), "total": int(noches.get("total") or 0)},
+        "cantidad": cantidad,
+        "total": total_ingresos,
+        "total_ingresos": total_ingresos,
+        "gastos_asociados": int(gastos),
+        "neto_caja": total_ingresos - int(gastos),
     }
 
 

@@ -1,6 +1,8 @@
 import unittest
 from datetime import datetime
-from unittest.mock import patch
+from unittest.mock import ANY, patch
+
+from sqlalchemy import create_engine, text
 
 from app.api.v1.endpoints import activos
 
@@ -19,8 +21,10 @@ class _RowsResult:
 class _Connection:
     def __init__(self, rows):
         self.rows = rows
+        self.calls = []
 
     def execute(self, statement, params=None):
+        self.calls.append((str(statement), params))
         return _RowsResult(self.rows)
 
 
@@ -33,6 +37,42 @@ class _DbConn:
 
     def __exit__(self, exc_type, exc, tb):
         return False
+
+
+class _SnapshotConnection:
+    def __init__(self, consultado_a):
+        self.consultado_a = consultado_a
+        self.calls = []
+
+    def execute(self, statement, params=None):
+        query = str(statement)
+        self.calls.append((query, params))
+        if params != {"as_of": self.consultado_a}:
+            raise AssertionError(f"Unexpected snapshot parameters: {params}")
+        if "i.fecha_hora_ingreso <= :as_of" not in query:
+            raise AssertionError("Snapshot query must exclude future ingresos")
+        rows = [{
+            "id_ingreso": 1,
+            "patente": "PAST01",
+            "fecha_hora_ingreso": datetime(2026, 8, 2, 20, 0),
+            "en_espera": 0,
+            "en_lavado": 0,
+            "usuario": "tester",
+            # A paid night charge after consultado_a must not suppress this quote.
+            "modo_noche": 0,
+        }, {
+            "id_ingreso": 2,
+            "patente": "FUTURE1",
+            "fecha_hora_ingreso": datetime(2026, 8, 2, 21, 41),
+            "en_espera": 0,
+            "en_lavado": 0,
+            "usuario": "tester",
+            "modo_noche": 0,
+        }]
+        return _RowsResult([
+            row for row in rows
+            if row["fecha_hora_ingreso"] <= self.consultado_a
+        ])
 
 
 class ActivosEnrichmentTests(unittest.TestCase):
@@ -78,6 +118,109 @@ class ActivosEnrichmentTests(unittest.TestCase):
         self.assertIsInstance(item["calculado_a"], str)
         calcular.assert_called_once()
         self.assertEqual(calcular.call_args.args[:2], (conn, []))
+
+    def test_pending_night_is_not_quoted_as_normal_parking_after_ten(self):
+        conn = _Connection([{
+            "id_ingreso": 9,
+            "patente": "NIGHT01",
+            "fecha_hora_ingreso": datetime(2026, 7, 1, 19, 30),
+            "en_espera": 0,
+            "en_lavado": 0,
+            "usuario": "tester",
+            "modo_noche": 1,
+        }])
+
+        with patch.object(activos, "db_conn", return_value=_DbConn(conn)), \
+             patch.object(activos, "calcular_montos_activos_con_lavados", return_value={}) as calcular:
+            result = activos.listar_activos()
+
+        item = result["items"][0]
+        self.assertEqual(item["monto_acumulado"], 0)
+        self.assertEqual(item["minutos_cobrables"], 0)
+        calcular.assert_called_once()
+        self.assertEqual(calcular.call_args.args[:2], (conn, []))
+
+    def test_snapshot_excludes_future_ingresos_and_night_state(self):
+        consultado_a = datetime(2026, 8, 2, 21, 40)
+        conn = _SnapshotConnection(consultado_a)
+
+        with patch.object(activos, "calcular_montos_activos_con_lavados", return_value={1: (100, 2500, "detalle", 2500, 0)}) as calcular:
+            items = activos.build_active_items(conn, consultado_a, as_of=consultado_a)
+
+        self.assertEqual([(item["id_ingreso"], item["monto_acumulado"]) for item in items], [(1, 2500)])
+        query, params = conn.calls[0]
+        self.assertIn("i.fecha_hora_ingreso <= :as_of", query)
+        self.assertIn("i.fecha_hora_salida > :as_of", query)
+        self.assertIn("cn.fecha_hora_pago <= :as_of", query)
+        self.assertEqual(params, {"as_of": consultado_a})
+        calcular.assert_called_once_with(conn, [{
+            "id_ingreso": 1,
+            "patente": "PAST01",
+            "fecha_hora_ingreso": datetime(2026, 8, 2, 20, 0),
+            "en_espera": 0,
+            "en_lavado": 0,
+            "usuario": "tester",
+            "modo_noche": 0,
+        }], consultado_a, as_of=consultado_a)
+
+    def test_excludes_logically_deleted_ingresos_from_the_mobile_active_list(self):
+        engine = create_engine("sqlite://")
+        with engine.begin() as conn:
+            conn.execute(text("""
+                CREATE TABLE ingresos (
+                    id_ingreso INTEGER PRIMARY KEY,
+                    id_vehiculo INTEGER NOT NULL,
+                    fecha_hora_ingreso DATETIME NOT NULL,
+                    fecha_hora_salida DATETIME,
+                    en_espera INTEGER NOT NULL DEFAULT 0,
+                    en_lavado INTEGER NOT NULL DEFAULT 0,
+                    usuario TEXT
+                )
+            """))
+            conn.execute(text("CREATE TABLE vehiculos (id_vehiculo INTEGER PRIMARY KEY, patente TEXT NOT NULL)"))
+            conn.execute(text("""
+                CREATE TABLE ingresos_eliminados (id_ingreso_original INTEGER NOT NULL)
+            """))
+            conn.execute(text("""
+                CREATE TABLE cobros_noches (
+                    id_ingreso INTEGER NOT NULL,
+                    estado TEXT NOT NULL,
+                    fecha_hora_pago DATETIME,
+                    estado_operativo TEXT,
+                    fecha_hora_resolucion DATETIME
+                )
+            """))
+            conn.execute(text("INSERT INTO vehiculos (id_vehiculo, patente) VALUES (1, 'BORR01'), (2, 'ACTIVO1')"))
+            conn.execute(text("""
+                INSERT INTO ingresos (
+                    id_ingreso, id_vehiculo, fecha_hora_ingreso, en_espera, en_lavado, usuario
+                ) VALUES
+                    (1, 1, :ingreso, 0, 0, 'tester'),
+                    (2, 2, :ingreso, 0, 0, 'tester')
+            """), {"ingreso": datetime(2026, 8, 7, 9, 0)})
+            conn.execute(text("INSERT INTO ingresos_eliminados (id_ingreso_original) VALUES (1)"))
+
+            with patch.object(
+                activos,
+                "calcular_montos_activos_con_lavados",
+                return_value={2: (60, 1200, "detalle", 1200, 0)},
+            ) as calcular:
+                items = activos.build_active_items(conn, datetime(2026, 8, 7, 10, 0))
+
+        self.assertEqual([(item["id_ingreso"], item["patente"]) for item in items], [(2, "ACTIVO1")])
+        self.assertEqual(items[0]["monto_acumulado"], 1200)
+        calcular.assert_called_once_with(conn, [
+            {
+                "id_ingreso": 2,
+                "patente": "ACTIVO1",
+                "fecha_hora_ingreso": ANY,
+                "en_espera": 0,
+                "en_lavado": 0,
+                "usuario": "tester",
+                "modo_noche": 0,
+            },
+        ], ANY, as_of=None)
+        engine.dispose()
 
 
 if __name__ == "__main__":

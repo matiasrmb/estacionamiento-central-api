@@ -1,0 +1,341 @@
+import unittest
+from datetime import datetime
+
+from sqlalchemy import create_engine, text
+
+from app.db.schema_ensure import _ensure_asistencias_schema_on_connection
+from app.repositories.asistencias_repo import _calcular_resumen_sesion, _calcular_totales_turno, _cerrar_asistencias_activas
+
+
+class AsistenciasSessionSchemaTests(unittest.TestCase):
+    def test_runtime_schema_adds_device_and_session_columns(self):
+        class FakeConn:
+            def __init__(self):
+                self.statements = []
+
+            def execute(self, statement, params=None):
+                self.statements.append(str(statement))
+
+        conn = FakeConn()
+        _ensure_asistencias_schema_on_connection(conn)
+
+        sql = "\n".join(conn.statements)
+        self.assertIn("device_id VARCHAR(128) NULL", sql)
+        self.assertIn("session_id VARCHAR(64) NULL", sql)
+        self.assertIn("idx_asistencias_sesion_activa", sql)
+
+    def test_migration_declares_device_scoped_attendance(self):
+        from pathlib import Path
+
+        migration = Path(__file__).resolve().parents[1].joinpath(
+            "app", "db", "migrations", "007_asistencias_por_sesion.sql"
+        ).read_text(encoding="utf-8")
+        self.assertIn("device_id VARCHAR(128) NULL", migration)
+        self.assertIn("session_id VARCHAR(64) NULL", migration)
+
+
+class AsistenciasSessionRepositoryTests(unittest.TestCase):
+    def test_closing_one_session_filters_by_session_id(self):
+        class Result:
+            def __init__(self, rows):
+                self.rows = rows
+
+            def mappings(self):
+                return self
+
+            def all(self):
+                return self.rows
+
+            def first(self):
+                return self.rows[0] if self.rows else None
+
+        class FakeConn:
+            def __init__(self):
+                self.calls = []
+
+            def execute(self, statement, params=None):
+                sql = str(statement)
+                self.calls.append((sql, params))
+                if "SELECT id_asistencia" in sql:
+                    return Result([{"id_asistencia": 8, "hora_inicio": datetime(2026, 1, 1, 9)}])
+                return Result([{"cantidad": 0, "total": 0}])
+
+        conn = FakeConn()
+        _cerrar_asistencias_activas(
+            conn,
+            "operador",
+            datetime(2026, 1, 1, 10),
+            session_id="mobile-session",
+        )
+
+        select_sql, select_params = conn.calls[0]
+        self.assertIn("AND session_id = :session_id", select_sql)
+        self.assertEqual(select_params["session_id"], "mobile-session")
+        updates = [sql for sql, _ in conn.calls if "UPDATE asistencias" in sql]
+        self.assertEqual(len(updates), 1)
+
+    def test_overlapping_sessions_assign_movements_to_the_oldest_active_attendance(self):
+        class Result:
+            def __init__(self, row):
+                self.row = row
+
+            def mappings(self):
+                return self
+
+            def first(self):
+                return self.row
+
+        class FakeConn:
+            def __init__(self):
+                self.calls = []
+
+            def execute(self, statement, params=None):
+                self.calls.append((str(statement), params))
+                if params["id_asistencia"] == 10 and "FROM ingresos i" in str(statement):
+                    return Result({"cantidad": 1, "total": 1200})
+                return Result({"cantidad": 0, "total": 0})
+
+        conn = FakeConn()
+        first = _calcular_totales_turno(
+            conn, "operador", 10, datetime(2026, 1, 1, 9), datetime(2026, 1, 1, 11)
+        )
+        second = _calcular_totales_turno(
+            conn, "operador", 11, datetime(2026, 1, 1, 10), datetime(2026, 1, 1, 11)
+        )
+
+        self.assertEqual(first, {"cantidad": 1, "total": 1200})
+        self.assertEqual(second, {"cantidad": 0, "total": 0})
+        for sql, params in conn.calls:
+            if "FROM gastos_operacion" in sql:
+                self.assertIn("g.fecha_hora >= :inicio", sql)
+                self.assertIn("g.fecha_hora < :fin", sql)
+                continue
+            self.assertIn("NOT EXISTS", sql)
+            self.assertIn("anterior.id_asistencia < :id_asistencia", sql)
+            self.assertEqual(params["usuario"], "operador")
+
+    def test_closed_attendance_excludes_movements_at_its_logout_boundary(self):
+        class Result:
+            def mappings(self):
+                return self
+
+            def first(self):
+                return {"cantidad": 0, "total": 0}
+
+        class FakeConn:
+            def __init__(self):
+                self.calls = []
+
+            def execute(self, statement, params=None):
+                self.calls.append((str(statement), params))
+                return Result()
+
+        conn = FakeConn()
+        _calcular_totales_turno(
+            conn, "operador", 10, datetime(2026, 1, 1, 9), datetime(2026, 1, 1, 10), "session-a"
+        )
+
+        for sql, _ in conn.calls:
+            self.assertNotIn("BETWEEN :inicio AND :fin", sql)
+            if "FROM ingresos i" in sql:
+                self.assertIn("i.fecha_hora_salida >= :inicio", sql)
+            elif "FROM usos_bano" in sql:
+                self.assertIn("b.fecha_hora >= :inicio", sql)
+                self.assertIn("b.fecha_hora < :fin", sql)
+            elif "FROM pagos_mensuales" in sql:
+                self.assertIn("p.fecha_pago >= :inicio", sql)
+                self.assertIn("p.fecha_pago < :fin", sql)
+            elif "FROM cobros_noches" in sql:
+                self.assertIn("n.fecha_hora_pago >= :inicio", sql)
+                self.assertIn("n.fecha_hora_pago < :fin", sql)
+            elif "FROM gastos_operacion" in sql:
+                self.assertIn("g.fecha_hora >= :inicio", sql)
+                self.assertIn("g.fecha_hora < :fin", sql)
+            else:
+                self.assertIn("o.fecha_hora_fin >= :inicio", sql)
+                self.assertIn("o.fecha_hora_fin < :fin", sql)
+
+    def test_sessionized_attendance_uses_the_same_deterministic_owner_rule(self):
+        class Result:
+            def mappings(self):
+                return self
+
+            def first(self):
+                return {"cantidad": 0, "total": 0}
+
+        class FakeConn:
+            def __init__(self):
+                self.calls = []
+
+            def execute(self, statement, params=None):
+                self.calls.append((str(statement), params))
+                return Result()
+
+        conn = FakeConn()
+        _calcular_totales_turno(
+            conn, "operador", 11, datetime(2026, 1, 1, 10), datetime(2026, 1, 1, 11), "session-b"
+        )
+
+        for sql, params in conn.calls:
+            if "FROM gastos_operacion" in sql:
+                continue
+            self.assertIn("anterior.id_asistencia < :id_asistencia", sql)
+            self.assertEqual(params["session_id"], "session-b")
+
+    def test_single_session_keeps_all_of_its_movements(self):
+        class Result:
+            def __init__(self, row):
+                self.row = row
+
+            def mappings(self):
+                return self
+
+            def first(self):
+                return self.row
+
+        class FakeConn:
+            def execute(self, statement, params=None):
+                if "FROM ingresos i" in str(statement):
+                    return Result({"cantidad": 2, "total": 2000})
+                if "FROM usos_bano" in str(statement):
+                    return Result({"cantidad": 1, "total": 300})
+                return Result({"cantidad": 0, "total": 0})
+
+        totals = _calcular_totales_turno(
+            FakeConn(), "operador", 10, datetime(2026, 1, 1, 9), datetime(2026, 1, 1, 10)
+        )
+
+        self.assertEqual(totals, {"cantidad": 3, "total": 2300})
+
+    def test_second_sequential_session_includes_its_paid_vehicle_exit(self):
+        class Result:
+            def __init__(self, row):
+                self.row = row
+
+            def mappings(self):
+                return self
+
+            def first(self):
+                return self.row
+
+        class FakeConn:
+            def __init__(self):
+                self.calls = []
+
+            def execute(self, statement, params=None):
+                sql = str(statement)
+                self.calls.append((sql, params))
+                if "FROM ingresos i" in sql and params["id_asistencia"] == 11:
+                    return Result({"cantidad": 1, "total": 1200})
+                return Result({"cantidad": 0, "total": 0})
+
+        conn = FakeConn()
+        first = _calcular_totales_turno(
+            conn, "operador", 10, datetime(2026, 1, 1, 9), datetime(2026, 1, 1, 10), "session-a"
+        )
+        second = _calcular_totales_turno(
+            conn, "operador", 11, datetime(2026, 1, 1, 10), datetime(2026, 1, 1, 11), "session-b"
+        )
+
+        self.assertEqual(first, {"cantidad": 0, "total": 0})
+        self.assertEqual(second, {"cantidad": 1, "total": 1200})
+        exit_queries = [call for call in conn.calls if "FROM ingresos i" in call[0]]
+        self.assertEqual(exit_queries[1][1]["session_id"], "session-b")
+        self.assertIn("i.usuario = :usuario", exit_queries[1][0])
+
+    def test_desktop_paid_exit_uses_usuario_and_stays_in_its_sequential_session(self):
+        engine = create_engine("sqlite://")
+        with engine.begin() as conn:
+            conn.execute(text("""
+                CREATE TABLE asistencias (
+                    id_asistencia INTEGER PRIMARY KEY,
+                    usuario TEXT NOT NULL,
+                    hora_inicio DATETIME NOT NULL,
+                    hora_salida DATETIME,
+                    session_id TEXT
+                )
+            """))
+            conn.execute(text("""
+                CREATE TABLE ingresos (
+                    id_ingreso INTEGER PRIMARY KEY,
+                    usuario TEXT,
+                    fecha_hora_salida DATETIME,
+                    tarifa_aplicada INTEGER
+                )
+            """))
+            conn.execute(text("CREATE TABLE ingresos_eliminados (id_ingreso_original INTEGER)"))
+            conn.execute(text("""
+                CREATE TABLE usos_bano (usuario TEXT, fecha_hora DATETIME, monto INTEGER)
+            """))
+            conn.execute(text("""
+                CREATE TABLE pagos_mensuales (usuario TEXT, fecha_pago DATETIME, monto_snapshot INTEGER)
+            """))
+            conn.execute(text("""
+                CREATE TABLE cobros_noches (
+                    usuario TEXT, fecha_hora_pago DATETIME, monto_snapshot INTEGER,
+                    estado TEXT, id_ingreso INTEGER
+                )
+            """))
+            conn.execute(text("""
+                CREATE TABLE operaciones_servicio (
+                    usuario_fin TEXT, fecha_hora_fin DATETIME, valor_lavado_snapshot INTEGER,
+                    estado TEXT, id_ingreso_generado INTEGER
+                )
+            """))
+            conn.execute(text("""
+                CREATE TABLE gastos_operacion (
+                    usuario TEXT, fecha_hora DATETIME, monto INTEGER
+                )
+            """))
+            conn.execute(text("""
+                INSERT INTO asistencias (id_asistencia, usuario, hora_inicio, hora_salida, session_id)
+                VALUES (10, 'operador', :inicio, :fin, 'session-a'),
+                       (11, 'operador', :fin, NULL, 'session-b'),
+                       (12, 'operador', '2026-01-01 10:15:00', NULL, 'session-c')
+            """), {
+                "inicio": datetime(2026, 1, 1, 9),
+                "fin": datetime(2026, 1, 1, 10),
+            })
+            # This is the exact shape persisted by Desktop registrar_salida_detallada.
+            conn.execute(text("""
+                INSERT INTO ingresos (id_ingreso, usuario, fecha_hora_salida, tarifa_aplicada)
+                VALUES (1, 'operador', :salida, 1700)
+            """), {"salida": datetime(2026, 1, 1, 10, 30)})
+            # The wash is already included in tarifa_aplicada and must not be counted separately.
+            conn.execute(text("""
+                INSERT INTO operaciones_servicio (
+                    usuario_fin, fecha_hora_fin, valor_lavado_snapshot, estado, id_ingreso_generado
+                ) VALUES ('operador', :salida, 500, 'FINALIZADO_COBRADO', 1)
+            """), {"salida": datetime(2026, 1, 1, 10, 30)})
+            conn.execute(text("""
+                INSERT INTO gastos_operacion (usuario, fecha_hora, monto)
+                VALUES ('operador', :en_sesion, 200),
+                       ('operador', :fuera_sesion, 300),
+                       ('otro', :en_sesion, 400)
+            """), {
+                "en_sesion": datetime(2026, 1, 1, 10, 40),
+                "fuera_sesion": datetime(2026, 1, 1, 11, 10),
+            })
+
+            first = _calcular_totales_turno(
+                conn, "operador", 10, datetime(2026, 1, 1, 9), datetime(2026, 1, 1, 10), "session-a"
+            )
+            second = _calcular_totales_turno(
+                conn, "operador", 11, datetime(2026, 1, 1, 10), datetime(2026, 1, 1, 11), "session-b"
+            )
+            simultaneous = _calcular_resumen_sesion(
+                conn, "operador", 12, datetime(2026, 1, 1, 10, 15), datetime(2026, 1, 1, 11), "session-c"
+            )
+            summary = _calcular_resumen_sesion(
+                conn, "operador", 11, datetime(2026, 1, 1, 10), datetime(2026, 1, 1, 11), "session-b"
+            )
+
+        self.assertEqual(first, {"cantidad": 0, "total": 0})
+        self.assertEqual(second, {"cantidad": 1, "total": 1700})
+        self.assertEqual(simultaneous["total_ingresos"], 0)
+        self.assertEqual(summary["gastos_asociados"], 200)
+        self.assertEqual(summary["neto_caja"], 1500)
+
+
+if __name__ == "__main__":
+    unittest.main()

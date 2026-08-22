@@ -66,6 +66,26 @@ class SchemaMigrationPreflightTests(unittest.TestCase):
         self.assertEqual(result["invalid_contract_migrations"], ["001_create_schema_migrations"])
         self.assertEqual(_check_status(result, "schema_migrations_contract"), "BLOCKED")
 
+    def test_reports_blocked_inconsistent_and_invalid_migrations(self):
+        inventory = _inventory(["schema_migrations"], migration_ids=["001_create_schema_migrations"])
+        plan = {
+            "database": "parking",
+            "schema_migrations": {"present": True},
+            "migrations": [
+                {"id": "003_widen_pagos_mensuales_metodo_pago", "status": "blocked_prerequisite"},
+                {"id": "other", "status": "inconsistent_state"},
+                {"id": "another", "status": "invalid_contract"},
+            ],
+        }
+
+        result = evaluate_schema_migration_preflight(inventory, plan)
+
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertEqual(result["blocked_migrations"], ["003_widen_pagos_mensuales_metodo_pago"])
+        self.assertEqual(result["inconsistent_state_migrations"], ["other"])
+        self.assertEqual(result["invalid_contract_migrations"], ["another"])
+        self.assertEqual(_check_status(result, "migration_state_consistency"), "BLOCKED")
+
     def test_cli_refuses_without_dry_run(self):
         error = io.StringIO()
 

@@ -38,7 +38,8 @@ _TABLES_SQL = """
 """
 _COLUMNS_SQL = """
     SELECT table_name, column_name, ordinal_position, column_default,
-           is_nullable, data_type, column_type, column_key, extra
+            is_nullable, data_type, column_type, column_key, extra,
+            character_set_name, collation_name
     FROM information_schema.columns
     WHERE table_schema = :schema_name
 """
@@ -233,6 +234,56 @@ def tipos_lavado_contract(inventory: dict[str, Any]) -> dict[str, Any]:
     return {"valid": not issues, "issues": issues}
 
 
+def pagos_mensuales_metodo_pago_contract(inventory: dict[str, Any]) -> dict[str, Any]:
+    """Classify the monthly-payment method column for the controlled widen."""
+    table_names = {
+        str(row.get("table_name", "")).casefold()
+        for row in inventory.get("tables", [])
+        if isinstance(row, dict)
+    }
+    if "pagos_mensuales" not in table_names:
+        return {"valid": None, "widen_safe": False, "state": "missing_table", "issues": []}
+
+    column = next((
+        row for row in inventory.get("columns", [])
+        if isinstance(row, dict)
+        and str(row.get("table_name", "")).casefold() == "pagos_mensuales"
+        and str(row.get("column_name", "")).casefold() == "metodo_pago"
+    ), None)
+    if column is None:
+        return {"valid": False, "widen_safe": False, "state": "missing_column", "issues": ["metodo_pago column is missing"]}
+
+    issues = []
+    table = next((
+        row for row in inventory.get("tables", [])
+        if isinstance(row, dict)
+        and str(row.get("table_name", "")).casefold() == "pagos_mensuales"
+    ), None)
+    if str(column.get("data_type", "")).casefold() != "varchar":
+        issues.append("metodo_pago data_type must be varchar")
+    if str(column.get("is_nullable", "")).casefold() != "yes":
+        issues.append("metodo_pago must be NULL")
+    if column.get("column_default") is not None:
+        issues.append("metodo_pago default must be NULL")
+    if str(column.get("extra") or "").strip():
+        issues.append("metodo_pago extra must be empty")
+    table_collation = str(table.get("table_collation") or "").casefold() if table else ""
+    column_collation = str(column.get("collation_name") or "").casefold()
+    if not table_collation or not column_collation or column_collation != table_collation:
+        issues.append("metodo_pago collation must match the table default")
+    character_set = str(column.get("character_set_name") or "").casefold()
+    if not character_set or character_set != _charset_from_collation(table_collation):
+        issues.append("metodo_pago character set must match the table default")
+    column_type = str(column.get("column_type", "")).casefold()
+    if not issues and column_type == "varchar(50)":
+        return {"valid": True, "widen_safe": False, "state": "valid", "issues": []}
+    if not issues and column_type == "varchar(40)":
+        return {"valid": False, "widen_safe": True, "state": "widen_safe", "issues": []}
+    if not issues:
+        issues.append("metodo_pago column_type must be varchar(40) or varchar(50)")
+    return {"valid": False, "widen_safe": False, "state": "invalid", "issues": issues}
+
+
 def _require_column(
     issues: list[str], columns: dict[str, dict[str, Any]], name: str, column_type: str, *, nullable: bool,
     primary_key: bool = False, auto_increment: bool = False, unique: bool = False,
@@ -301,6 +352,10 @@ def _migration_id_is_primary_key(column: dict[str, Any], indexes: list[dict[str,
 
 def _has_current_timestamp_default(value: Any) -> bool:
     return str(value or "").casefold().replace("()", "") == "current_timestamp"
+
+
+def _charset_from_collation(collation: str) -> str:
+    return collation.split("_", 1)[0]
 
 
 def _read_rows(

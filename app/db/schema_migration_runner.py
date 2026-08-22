@@ -10,6 +10,8 @@ Managed migration namespace policy:
 - Future managed IDs must stay descriptive (for example,
   ``003_widen_pagos_mensuales_metodo_pago``) and do not execute a same-numbered
   historical SQL file.
+- Historical ``005_monthly_payments.sql`` defines ``VARCHAR(40)``; managed 003
+  is the authoritative corrective migration to the baseline ``VARCHAR(50)``.
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ from sqlalchemy import text
 
 from app.db.schema_inventory import (
     collect_read_only_schema_inventory_from_engine,
+    pagos_mensuales_metodo_pago_contract,
     schema_migrations_contract,
     tipos_lavado_contract,
 )
@@ -31,7 +34,8 @@ from app.db.schema_inventory import (
 SCHEMA_MIGRATION_PLAN_VERSION = 1
 MIGRATION_001_ID = "001_create_schema_migrations"
 MIGRATION_002_ID = "002_create_tipos_lavado"
-MANAGED_MIGRATION_IDS = (MIGRATION_001_ID, MIGRATION_002_ID)
+MIGRATION_003_ID = "003_widen_pagos_mensuales_metodo_pago"
+MANAGED_MIGRATION_IDS = (MIGRATION_001_ID, MIGRATION_002_ID, MIGRATION_003_ID)
 MIGRATION_RECORD_SQL = "INSERT INTO schema_migrations (migration_id) VALUES (:migration_id)"
 MIGRATION_001_RECORD_SQL = MIGRATION_RECORD_SQL
 MIGRATION_002_SEED_SQL = (
@@ -69,6 +73,11 @@ MIGRATIONS: tuple[MigrationMetadata, ...] = (
             ")",
         ),
     ),
+    MigrationMetadata(
+        MIGRATION_003_ID,
+        "Widen pagos_mensuales.metodo_pago while preserving its nullable, no-default contract.",
+        ("ALTER TABLE pagos_mensuales MODIFY COLUMN metodo_pago VARCHAR(50) NULL",),
+    ),
 )
 
 
@@ -79,6 +88,7 @@ def plan_schema_migrations(inventory: dict[str, Any]) -> dict[str, Any]:
     statuses = {
         MIGRATION_001_ID: _migration_001_status(inventory, table_names, complete),
         MIGRATION_002_ID: _migration_002_status(inventory, table_names, complete),
+        MIGRATION_003_ID: _migration_003_status(inventory, table_names, complete),
     }
     migrations = [
         {
@@ -113,6 +123,7 @@ def plan_schema_migrations(inventory: dict[str, Any]) -> dict[str, Any]:
             "contract": tipos_lavado_contract(inventory),
             "seed": _tipos_lavado_seed_present(inventory),
         },
+        "pagos_mensuales_metodo_pago": pagos_mensuales_metodo_pago_contract(inventory),
         "migrations": migrations,
         "prerequisites": [
             "Review this plan and take a database backup before any future apply run.",
@@ -134,6 +145,11 @@ def apply_001_create_schema_migrations(engine: Any, **kwargs: Any) -> dict[str, 
 def apply_002_create_tipos_lavado(engine: Any, **kwargs: Any) -> dict[str, Any]:
     """Apply only migration 002 without overwriting mutable seed values."""
     return _apply(engine, MIGRATION_002_ID, **kwargs)
+
+
+def apply_003_widen_pagos_mensuales_metodo_pago(engine: Any, **kwargs: Any) -> dict[str, Any]:
+    """Apply only the controlled monthly-payment method widen."""
+    return _apply(engine, MIGRATION_003_ID, **kwargs)
 
 
 def _apply(
@@ -163,7 +179,9 @@ def _apply(
         return _result(migration_id, "refused", [], ["Preflight is BLOCKED; no SQL was executed."], preflight)
     if migration_id == MIGRATION_001_ID:
         return _apply_001(engine, migration["status"], preflight)
-    return _apply_002(engine, migration["status"], _table_names(inventory) or set(), preflight)
+    if migration_id == MIGRATION_002_ID:
+        return _apply_002(engine, migration["status"], _table_names(inventory) or set(), preflight)
+    return _apply_003(engine, migration["status"], preflight)
 
 
 def _apply_001(engine: Any, status: str, preflight: dict[str, Any]) -> dict[str, Any]:
@@ -205,6 +223,24 @@ def _apply_002(engine: Any, status: str, table_names: set[str], preflight: dict[
         status = "failed_after_create" if executed == ["CREATE TABLE"] else "failed_after_seed" if "INSERT seed" in executed else "failed"
         return _result(MIGRATION_002_ID, status, executed, [f"Migration 002 failed after {', '.join(executed) or 'no SQL'}: {error}"], preflight)
     return _result(MIGRATION_002_ID, "applied", executed, [], preflight)
+
+
+def _apply_003(engine: Any, status: str, preflight: dict[str, Any]) -> dict[str, Any]:
+    if status == "repair_required":
+        return _record(engine, MIGRATION_003_ID, "repaired", [], preflight)
+    if status != "pending":
+        return _result(MIGRATION_003_ID, "refused", [], ["Migration is not pending; no SQL was executed."], preflight)
+    executed: list[str] = []
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(MIGRATIONS[2].statements[0]))
+            executed.append("ALTER TABLE")
+            conn.execute(text(MIGRATION_RECORD_SQL), {"migration_id": MIGRATION_003_ID})
+            executed.append("INSERT migration record")
+    except Exception as error:
+        status = "failed_after_alter" if executed == ["ALTER TABLE"] else "failed"
+        return _result(MIGRATION_003_ID, status, executed, [f"Migration 003 failed: {error}"], preflight)
+    return _result(MIGRATION_003_ID, "applied", executed, [], preflight)
 
 
 def _record(engine: Any, migration_id: str, status: str, executed: list[str], preflight: dict[str, Any]) -> dict[str, Any]:
@@ -255,6 +291,26 @@ def _migration_002_status(inventory: dict[str, Any], tables: set[str] | None, co
     return "unknown"
 
 
+def _migration_003_status(inventory: dict[str, Any], tables: set[str] | None, complete: bool) -> str:
+    if not complete:
+        return "unknown"
+    if _migration_recorded(inventory, MIGRATION_001_ID) is not True or _migration_recorded(inventory, MIGRATION_002_ID) is not True:
+        return "blocked_prerequisite"
+    contract = pagos_mensuales_metodo_pago_contract(inventory)
+    recorded = _migration_recorded(inventory, MIGRATION_003_ID)
+    if recorded is True:
+        if contract["valid"] is True:
+            return "applied"
+        if contract["state"] in {"missing_table", "missing_column", "widen_safe"}:
+            return "inconsistent_state"
+        return "invalid_contract"
+    if contract["valid"] is True:
+        return "repair_required"
+    if contract["widen_safe"] is True:
+        return "pending"
+    return "invalid_contract"
+
+
 def _migration_recorded(inventory: dict[str, Any], migration_id: str) -> bool | None:
     snapshot = inventory.get("migration_snapshot")
     if not isinstance(snapshot, dict) or snapshot.get("available") is not True or not isinstance(snapshot.get("records"), list):
@@ -285,6 +341,8 @@ def _planned_sql(migration: MigrationMetadata, status: str, tables: set[str] | N
         return [MIGRATION_002_SEED_SQL, MIGRATION_RECORD_SQL]
     if migration.migration_id == MIGRATION_002_ID:
         return [*migration.statements, MIGRATION_002_SEED_SQL, MIGRATION_RECORD_SQL]
+    if migration.migration_id == MIGRATION_003_ID:
+        return [*migration.statements, MIGRATION_RECORD_SQL]
     return list(migration.statements)
 
 
@@ -293,11 +351,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--apply-001-create-schema-migrations", action="store_true")
     parser.add_argument("--apply-002-create-tipos-lavado", action="store_true")
+    parser.add_argument("--apply-003-widen-pagos-mensuales-metodo-pago", action="store_true")
     parser.add_argument("--confirm-dev-db", action="store_true")
     parser.add_argument("--backup-confirmed", action="store_true")
     parser.add_argument("--expected-database")
     args = parser.parse_args(argv)
-    apply_flags = [args.apply_001_create_schema_migrations, args.apply_002_create_tipos_lavado]
+    apply_flags = [args.apply_001_create_schema_migrations, args.apply_002_create_tipos_lavado, args.apply_003_widen_pagos_mensuales_metodo_pago]
     if args.dry_run and any(apply_flags) or sum(apply_flags) > 1:
         parser.error("choose exactly one of --dry-run or one explicit apply flag")
     if not args.dry_run and not any(apply_flags):
@@ -312,7 +371,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.dry_run:
         result = collect_dry_run_plan(engine)
     else:
-        apply = apply_001_create_schema_migrations if args.apply_001_create_schema_migrations else apply_002_create_tipos_lavado
+        apply = (
+            apply_001_create_schema_migrations if args.apply_001_create_schema_migrations
+            else apply_002_create_tipos_lavado if args.apply_002_create_tipos_lavado
+            else apply_003_widen_pagos_mensuales_metodo_pago
+        )
         result = apply(engine, backup_confirmed=args.backup_confirmed, dev_database_confirmed=args.confirm_dev_db, expected_database=args.expected_database)
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if args.dry_run or result.get("status") in SUCCESSFUL_APPLY_STATUSES else 1

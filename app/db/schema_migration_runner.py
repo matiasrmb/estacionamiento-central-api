@@ -26,6 +26,7 @@ from sqlalchemy import text
 from app.db.schema_inventory import (
     collect_read_only_schema_inventory_from_engine,
     operaciones_servicio_ingreso_generado_fk_contract,
+    operaciones_servicio_tipo_vehiculo_lavado_fk_contract,
     pagos_mensuales_metodo_pago_contract,
     schema_migrations_contract,
     tipos_lavado_contract,
@@ -37,7 +38,8 @@ MIGRATION_001_ID = "001_create_schema_migrations"
 MIGRATION_002_ID = "002_create_tipos_lavado"
 MIGRATION_003_ID = "003_widen_pagos_mensuales_metodo_pago"
 MIGRATION_004_ID = "004_add_operaciones_servicio_ingreso_generado_fk"
-MANAGED_MIGRATION_IDS = (MIGRATION_001_ID, MIGRATION_002_ID, MIGRATION_003_ID, MIGRATION_004_ID)
+MIGRATION_005_ID = "005_add_operaciones_servicio_tipo_vehiculo_lavado_fk"
+MANAGED_MIGRATION_IDS = (MIGRATION_001_ID, MIGRATION_002_ID, MIGRATION_003_ID, MIGRATION_004_ID, MIGRATION_005_ID)
 MIGRATION_RECORD_SQL = "INSERT INTO schema_migrations (migration_id) VALUES (:migration_id)"
 MIGRATION_001_RECORD_SQL = MIGRATION_RECORD_SQL
 MIGRATION_002_SEED_SQL = (
@@ -85,6 +87,17 @@ MIGRATIONS: tuple[MigrationMetadata, ...] = (
         "Add the restrictive operaciones_servicio generated-ingreso foreign key.",
         ("ALTER TABLE operaciones_servicio ADD CONSTRAINT fk_operaciones_servicio_ingreso_generado FOREIGN KEY (id_ingreso_generado) REFERENCES ingresos (id_ingreso)",),
     ),
+    MigrationMetadata(
+        MIGRATION_005_ID,
+        "Add the restrictive operaciones_servicio wash-vehicle-type foreign key and its child index.",
+        (
+            "ALTER TABLE operaciones_servicio\n"
+            "    ADD INDEX idx_operaciones_servicio_tipo_vehiculo_lavado (id_tipo_vehiculo_lavado),\n"
+            "    ADD CONSTRAINT fk_operaciones_servicio_tipo_vehiculo_lavado\n"
+            "        FOREIGN KEY (id_tipo_vehiculo_lavado)\n"
+            "        REFERENCES tipos_vehiculo_lavado (id_tipo_vehiculo_lavado)",
+        ),
+    ),
 )
 
 
@@ -97,6 +110,7 @@ def plan_schema_migrations(inventory: dict[str, Any]) -> dict[str, Any]:
         MIGRATION_002_ID: _migration_002_status(inventory, table_names, complete),
         MIGRATION_003_ID: _migration_003_status(inventory, table_names, complete),
         MIGRATION_004_ID: _migration_004_status(inventory, table_names, complete),
+        MIGRATION_005_ID: _migration_005_status(inventory, table_names, complete),
     }
     migrations = [
         {
@@ -133,6 +147,7 @@ def plan_schema_migrations(inventory: dict[str, Any]) -> dict[str, Any]:
         },
         "pagos_mensuales_metodo_pago": pagos_mensuales_metodo_pago_contract(inventory),
         "operaciones_servicio_ingreso_generado_fk": operaciones_servicio_ingreso_generado_fk_contract(inventory),
+        "operaciones_servicio_tipo_vehiculo_lavado_fk": operaciones_servicio_tipo_vehiculo_lavado_fk_contract(inventory),
         "migrations": migrations,
         "prerequisites": [
             "Review this plan and take a database backup before any future apply run.",
@@ -166,6 +181,11 @@ def apply_004_add_operaciones_servicio_ingreso_generado_fk(engine: Any, **kwargs
     return _apply(engine, MIGRATION_004_ID, **kwargs)
 
 
+def apply_005_add_operaciones_servicio_tipo_vehiculo_lavado_fk(engine: Any, **kwargs: Any) -> dict[str, Any]:
+    """Apply only the controlled wash-vehicle-type foreign key and index."""
+    return _apply(engine, MIGRATION_005_ID, **kwargs)
+
+
 def _apply(
     engine: Any, migration_id: str, *, backup_confirmed: bool, dev_database_confirmed: bool,
     expected_database: str | None = None,
@@ -195,7 +215,11 @@ def _apply(
         return _apply_001(engine, migration["status"], preflight)
     if migration_id == MIGRATION_002_ID:
         return _apply_002(engine, migration["status"], _table_names(inventory) or set(), preflight)
-    return _apply_003(engine, migration["status"], preflight) if migration_id == MIGRATION_003_ID else _apply_004(engine, migration["status"], preflight)
+    if migration_id == MIGRATION_003_ID:
+        return _apply_003(engine, migration["status"], preflight)
+    if migration_id == MIGRATION_004_ID:
+        return _apply_004(engine, migration["status"], preflight)
+    return _apply_005(engine, migration["status"], preflight)
 
 
 def _apply_001(engine: Any, status: str, preflight: dict[str, Any]) -> dict[str, Any]:
@@ -279,6 +303,30 @@ def _apply_004(engine: Any, status: str, preflight: dict[str, Any]) -> dict[str,
             )
         return _result(MIGRATION_004_ID, "failed", [], [f"Migration 004 failed: {error}"], preflight)
     return _result(MIGRATION_004_ID, "applied", ["ALTER TABLE", "INSERT migration record"], [], preflight)
+
+
+def _apply_005(engine: Any, status: str, preflight: dict[str, Any]) -> dict[str, Any]:
+    if status == "repair_required":
+        return _record(engine, MIGRATION_005_ID, "repaired", [], preflight)
+    if status != "pending":
+        return _result(MIGRATION_005_ID, "refused", [], ["Migration is not pending; no SQL was executed."], preflight)
+    executed: list[str] = []
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(MIGRATIONS[4].statements[0]))
+            executed.append("ALTER TABLE")
+            conn.execute(text(MIGRATION_RECORD_SQL), {"migration_id": MIGRATION_005_ID})
+    except Exception as error:
+        if executed:
+            return _result(
+                MIGRATION_005_ID, "failed_after_alter", executed,
+                [
+                    "ALTER TABLE succeeded, but the migration record INSERT failed; MySQL DDL may already be committed.",
+                    f"Retry may record migration 005 only if a fresh inventory sees the valid index and FK: {error}",
+                ], preflight,
+            )
+        return _result(MIGRATION_005_ID, "failed", [], [f"Migration 005 failed: {error}"], preflight)
+    return _result(MIGRATION_005_ID, "applied", ["ALTER TABLE", "INSERT migration record"], [], preflight)
 
 
 def _record(engine: Any, migration_id: str, status: str, executed: list[str], preflight: dict[str, Any]) -> dict[str, Any]:
@@ -367,6 +415,26 @@ def _migration_004_status(inventory: dict[str, Any], tables: set[str] | None, co
     return "blocked_prerequisite" if contract["state"] == "blocked_orphans" else "invalid_contract" if contract["state"] == "invalid" else "unknown"
 
 
+def _migration_005_status(inventory: dict[str, Any], tables: set[str] | None, complete: bool) -> str:
+    if not complete:
+        return "unknown"
+    if any(_migration_recorded(inventory, migration_id) is not True for migration_id in (MIGRATION_001_ID, MIGRATION_002_ID, MIGRATION_003_ID, MIGRATION_004_ID)):
+        return "blocked_prerequisite"
+    contract = operaciones_servicio_tipo_vehiculo_lavado_fk_contract(inventory)
+    if any(issue.endswith("table is missing") or issue.endswith("column is missing") for issue in contract["issues"]):
+        return "blocked_prerequisite"
+    recorded = _migration_recorded(inventory, MIGRATION_005_ID)
+    if recorded is True:
+        if contract["valid"] is True:
+            return "applied"
+        return "inconsistent_state" if contract["state"] in {"safe_to_add", "blocked_orphans", "unknown"} else "invalid_contract"
+    if contract["valid"] is True:
+        return "repair_required"
+    if contract["add_safe"] is True:
+        return "pending"
+    return "blocked_prerequisite" if contract["state"] == "blocked_orphans" else "invalid_contract" if contract["state"] in {"invalid", "name_collision"} else "unknown"
+
+
 def _migration_recorded(inventory: dict[str, Any], migration_id: str) -> bool | None:
     snapshot = inventory.get("migration_snapshot")
     if not isinstance(snapshot, dict) or snapshot.get("available") is not True or not isinstance(snapshot.get("records"), list):
@@ -397,7 +465,7 @@ def _planned_sql(migration: MigrationMetadata, status: str, tables: set[str] | N
         return [MIGRATION_002_SEED_SQL, MIGRATION_RECORD_SQL]
     if migration.migration_id == MIGRATION_002_ID:
         return [*migration.statements, MIGRATION_002_SEED_SQL, MIGRATION_RECORD_SQL]
-    if migration.migration_id in {MIGRATION_003_ID, MIGRATION_004_ID}:
+    if migration.migration_id in {MIGRATION_003_ID, MIGRATION_004_ID, MIGRATION_005_ID}:
         return [*migration.statements, MIGRATION_RECORD_SQL]
     return list(migration.statements)
 
@@ -409,11 +477,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--apply-002-create-tipos-lavado", action="store_true")
     parser.add_argument("--apply-003-widen-pagos-mensuales-metodo-pago", action="store_true")
     parser.add_argument("--apply-004-add-operaciones-servicio-ingreso-generado-fk", action="store_true")
+    parser.add_argument("--apply-005-add-operaciones-servicio-tipo-vehiculo-lavado-fk", action="store_true")
     parser.add_argument("--confirm-dev-db", action="store_true")
     parser.add_argument("--backup-confirmed", action="store_true")
     parser.add_argument("--expected-database")
     args = parser.parse_args(argv)
-    apply_flags = [args.apply_001_create_schema_migrations, args.apply_002_create_tipos_lavado, args.apply_003_widen_pagos_mensuales_metodo_pago, args.apply_004_add_operaciones_servicio_ingreso_generado_fk]
+    apply_flags = [args.apply_001_create_schema_migrations, args.apply_002_create_tipos_lavado, args.apply_003_widen_pagos_mensuales_metodo_pago, args.apply_004_add_operaciones_servicio_ingreso_generado_fk, args.apply_005_add_operaciones_servicio_tipo_vehiculo_lavado_fk]
     if args.dry_run and any(apply_flags) or sum(apply_flags) > 1:
         parser.error("choose exactly one of --dry-run or one explicit apply flag")
     if not args.dry_run and not any(apply_flags):
@@ -432,7 +501,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             apply_001_create_schema_migrations if args.apply_001_create_schema_migrations
             else apply_002_create_tipos_lavado if args.apply_002_create_tipos_lavado
             else apply_003_widen_pagos_mensuales_metodo_pago if args.apply_003_widen_pagos_mensuales_metodo_pago
-            else apply_004_add_operaciones_servicio_ingreso_generado_fk
+            else apply_004_add_operaciones_servicio_ingreso_generado_fk if args.apply_004_add_operaciones_servicio_ingreso_generado_fk
+            else apply_005_add_operaciones_servicio_tipo_vehiculo_lavado_fk
         )
         result = apply(engine, backup_confirmed=args.backup_confirmed, dev_database_confirmed=args.confirm_dev_db, expected_database=args.expected_database)
     print(json.dumps(result, indent=2, sort_keys=True))

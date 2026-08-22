@@ -171,7 +171,7 @@ def _destructive_actions(plan: dict[str, Any], apply_requested: bool, has_failur
         if isinstance(migration, dict)
     }
     if "pending" in statuses:
-        return ["CREATE TABLE or seed mutable configuration", "INSERT migration record"]
+        return ["CREATE TABLE, ALTER TABLE, or seed mutable configuration", "INSERT migration record"]
     if "repair_required" in statuses:
         return ["INSERT migration record"]
     return []

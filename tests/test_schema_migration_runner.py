@@ -12,8 +12,10 @@ from app.db.schema_migration_runner import (
     MIGRATIONS,
     MIGRATION_001_RECORD_SQL,
     MIGRATION_002_SEED_SQL,
+    MIGRATION_003_ID,
     apply_001_create_schema_migrations,
     apply_002_create_tipos_lavado,
+    apply_003_widen_pagos_mensuales_metodo_pago,
     collect_dry_run_plan,
     main,
     plan_schema_migrations,
@@ -71,10 +73,11 @@ class InventoryConnection:
 
 
 class ApplyConnection:
-    def __init__(self, *, fail_insert=False, fail_seed=False):
+    def __init__(self, *, fail_insert=False, fail_seed=False, fail_alter=False):
         self.statements = []
         self.fail_insert = fail_insert
         self.fail_seed = fail_seed
+        self.fail_alter = fail_alter
 
     def __enter__(self):
         return self
@@ -84,6 +87,8 @@ class ApplyConnection:
 
     def execute(self, statement, params=None):
         self.statements.append((str(statement), params))
+        if self.fail_alter and str(statement).startswith("ALTER TABLE pagos_mensuales"):
+            raise RuntimeError("simulated alter failure")
         if self.fail_insert and "INSERT INTO schema_migrations" in str(statement):
             raise RuntimeError("simulated insert failure")
         if self.fail_seed and "INSERT INTO tipos_lavado" in str(statement):
@@ -95,6 +100,7 @@ class SchemaMigrationRunnerTests(unittest.TestCase):
         self.assertEqual(MANAGED_MIGRATION_IDS, (
             "001_create_schema_migrations",
             "002_create_tipos_lavado",
+            "003_widen_pagos_mensuales_metodo_pago",
         ))
         self.assertEqual(
             [migration.migration_id for migration in MIGRATIONS],
@@ -102,6 +108,7 @@ class SchemaMigrationRunnerTests(unittest.TestCase):
         )
         self.assertNotIn("001", MANAGED_MIGRATION_IDS)
         self.assertNotIn("002", MANAGED_MIGRATION_IDS)
+        self.assertNotIn("003", MANAGED_MIGRATION_IDS)
 
     def test_historical_002_sql_is_not_a_managed_migration_statement(self):
         historical_sql = (
@@ -128,6 +135,17 @@ class SchemaMigrationRunnerTests(unittest.TestCase):
 
         self.assertEqual(plan["migrations"][1]["id"], "002_create_tipos_lavado")
         self.assertEqual(plan["migrations"][1]["status"], "pending")
+
+    def test_historical_005_or_bare_003_does_not_mark_managed_003_as_applied(self):
+        for historical_id in ("005_monthly_payments", "003"):
+            with self.subTest(historical_id=historical_id):
+                plan = plan_schema_migrations(_inventory(
+                    ["schema_migrations", "tipos_lavado", "pagos_mensuales"],
+                    migration_ids=["001_create_schema_migrations", "002_create_tipos_lavado", historical_id],
+                    metodo_pago_type="varchar(40)",
+                ))
+
+                self.assertEqual(plan["migrations"][2]["status"], "pending")
 
     def test_refuses_without_dry_run(self):
         error = io.StringIO()
@@ -568,6 +586,129 @@ class SchemaMigrationRunnerTests(unittest.TestCase):
             result = apply_002_create_tipos_lavado(FakeEngine(retry_record), backup_confirmed=True, dev_database_confirmed=True, expected_database="parking")
         self.assertEqual(retry_record.statements, [(MIGRATION_001_RECORD_SQL, {"migration_id": "002_create_tipos_lavado"})])
 
+    def test_003_is_pending_for_safe_varchar_40_after_prerequisites(self):
+        plan = plan_schema_migrations(_inventory(
+            ["schema_migrations", "tipos_lavado", "pagos_mensuales"],
+            migration_ids=["001_create_schema_migrations", "002_create_tipos_lavado"],
+            metodo_pago_type="varchar(40)",
+        ))
+
+        self.assertEqual(plan["migrations"][2]["status"], "pending")
+        self.assertEqual(plan["migrations"][2]["sql"], [
+            "ALTER TABLE pagos_mensuales MODIFY COLUMN metodo_pago VARCHAR(50) NULL",
+            MIGRATION_001_RECORD_SQL,
+        ])
+
+    def test_003_is_blocked_when_either_prerequisite_is_missing(self):
+        for migration_ids in ([], ["001_create_schema_migrations"]):
+            with self.subTest(migration_ids=migration_ids):
+                plan = plan_schema_migrations(_inventory(
+                    ["schema_migrations", "tipos_lavado", "pagos_mensuales"],
+                    migration_ids=migration_ids,
+                    metodo_pago_type="varchar(40)",
+                ))
+                self.assertEqual(plan["migrations"][2]["status"], "blocked_prerequisite")
+
+    def test_003_applies_alter_then_record_for_safe_varchar_40(self):
+        connection = ApplyConnection()
+        inventory = _inventory(
+            ["schema_migrations", "tipos_lavado", "pagos_mensuales"],
+            migration_ids=["001_create_schema_migrations", "002_create_tipos_lavado"],
+            metodo_pago_type="varchar(40)",
+        )
+        with patch("app.db.schema_migration_runner.collect_read_only_schema_inventory_from_engine", return_value=inventory):
+            result = apply_003_widen_pagos_mensuales_metodo_pago(
+                FakeEngine(connection), backup_confirmed=True, dev_database_confirmed=True, expected_database="parking"
+            )
+
+        self.assertEqual(result["status"], "applied")
+        self.assertEqual(connection.statements, [
+            ("ALTER TABLE pagos_mensuales MODIFY COLUMN metodo_pago VARCHAR(50) NULL", None),
+            (MIGRATION_001_RECORD_SQL, {"migration_id": MIGRATION_003_ID}),
+        ])
+
+    def test_003_valid_unrecorded_repairs_by_recording_only(self):
+        connection = ApplyConnection()
+        inventory = _inventory(
+            ["schema_migrations", "tipos_lavado", "pagos_mensuales"],
+            migration_ids=["001_create_schema_migrations", "002_create_tipos_lavado"],
+            metodo_pago_type="varchar(50)",
+        )
+        with patch("app.db.schema_migration_runner.collect_read_only_schema_inventory_from_engine", return_value=inventory):
+            result = apply_003_widen_pagos_mensuales_metodo_pago(FakeEngine(connection), backup_confirmed=True, dev_database_confirmed=True, expected_database="parking")
+
+        self.assertEqual(result["status"], "repaired")
+        self.assertEqual(connection.statements, [(MIGRATION_001_RECORD_SQL, {"migration_id": MIGRATION_003_ID})])
+
+    def test_003_recorded_with_valid_column_noops(self):
+        connection = ApplyConnection()
+        inventory = _inventory(
+            ["schema_migrations", "tipos_lavado", "pagos_mensuales"],
+            migration_ids=["001_create_schema_migrations", "002_create_tipos_lavado", MIGRATION_003_ID],
+            metodo_pago_type="varchar(50)",
+        )
+        with patch("app.db.schema_migration_runner.collect_read_only_schema_inventory_from_engine", return_value=inventory):
+            result = apply_003_widen_pagos_mensuales_metodo_pago(FakeEngine(connection), backup_confirmed=True, dev_database_confirmed=True, expected_database="parking")
+
+        self.assertEqual(result["status"], "noop")
+        self.assertEqual(connection.statements, [])
+
+    def test_003_recorded_with_narrow_missing_or_incompatible_column_refuses(self):
+        for metodo_pago_type in ("varchar(40)", None, "int"):
+            with self.subTest(metodo_pago_type=metodo_pago_type):
+                connection = ApplyConnection()
+                inventory = _inventory(
+                    ["schema_migrations", "tipos_lavado", "pagos_mensuales"],
+                    migration_ids=["001_create_schema_migrations", "002_create_tipos_lavado", MIGRATION_003_ID],
+                    metodo_pago_type=metodo_pago_type,
+                )
+                with patch("app.db.schema_migration_runner.collect_read_only_schema_inventory_from_engine", return_value=inventory):
+                    result = apply_003_widen_pagos_mensuales_metodo_pago(FakeEngine(connection), backup_confirmed=True, dev_database_confirmed=True, expected_database="parking")
+
+                self.assertIn(result["status"], {"refused", "invalid_contract"})
+                self.assertEqual(result["executed_statements_count"], 0)
+                self.assertEqual(connection.statements, [])
+
+    def test_003_refuses_extra_or_nondefault_collation_without_sql(self):
+        for overrides in (
+            {"metodo_pago_extra": "INVISIBLE"},
+            {"metodo_pago_collation": "utf8mb4_bin"},
+            {"metodo_pago_character_set": "latin1"},
+        ):
+            with self.subTest(overrides=overrides):
+                connection = ApplyConnection()
+                inventory = _inventory(
+                    ["schema_migrations", "tipos_lavado", "pagos_mensuales"],
+                    migration_ids=["001_create_schema_migrations", "002_create_tipos_lavado"],
+                    metodo_pago_type="varchar(40)",
+                    **overrides,
+                )
+                with patch("app.db.schema_migration_runner.collect_read_only_schema_inventory_from_engine", return_value=inventory):
+                    result = apply_003_widen_pagos_mensuales_metodo_pago(
+                        FakeEngine(connection), backup_confirmed=True, dev_database_confirmed=True, expected_database="parking"
+                    )
+
+                self.assertEqual(result["status"], "invalid_contract")
+                self.assertEqual(result["executed_statements_count"], 0)
+                self.assertEqual(connection.statements, [])
+
+    def test_003_alter_failure_reports_no_executed_alter(self):
+        connection = ApplyConnection(fail_alter=True)
+        inventory = _inventory(
+            ["schema_migrations", "tipos_lavado", "pagos_mensuales"],
+            migration_ids=["001_create_schema_migrations", "002_create_tipos_lavado"],
+            metodo_pago_type="varchar(40)",
+        )
+        with patch("app.db.schema_migration_runner.collect_read_only_schema_inventory_from_engine", return_value=inventory):
+            result = apply_003_widen_pagos_mensuales_metodo_pago(
+                FakeEngine(connection), backup_confirmed=True, dev_database_confirmed=True, expected_database="parking"
+            )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["executed_statements_count"], 0)
+        self.assertEqual(result["executed_statement_types"], [])
+        self.assertEqual(len(connection.statements), 1)
+
     def test_cli_apply_requires_expected_database_before_importing_database(self):
         error = io.StringIO()
 
@@ -587,6 +728,38 @@ class SchemaMigrationRunnerTests(unittest.TestCase):
                     main(["--apply-002-create-tipos-lavado"])
 
         self.assertIn("--expected-database is required for apply", error.getvalue())
+
+    def test_cli_003_apply_requires_flags_before_importing_database(self):
+        error = io.StringIO()
+
+        with patch.dict(sys.modules, {"app.db.database": None}):
+            with redirect_stderr(error):
+                with self.assertRaisesRegex(SystemExit, "2"):
+                    main(["--apply-003-widen-pagos-mensuales-metodo-pago"])
+
+        self.assertIn("--expected-database is required for apply", error.getvalue())
+
+        error = io.StringIO()
+        with patch.dict(sys.modules, {"app.db.database": None}):
+            with redirect_stderr(error):
+                with self.assertRaisesRegex(SystemExit, "2"):
+                    main(["--apply-003-widen-pagos-mensuales-metodo-pago", "--expected-database", "parking"])
+        self.assertIn("--confirm-dev-db is required for apply", error.getvalue())
+
+    def test_003_refuses_database_mismatch_without_sql(self):
+        connection = ApplyConnection()
+        inventory = _inventory(
+            ["schema_migrations", "tipos_lavado", "pagos_mensuales"],
+            migration_ids=["001_create_schema_migrations", "002_create_tipos_lavado"],
+            metodo_pago_type="varchar(40)",
+        )
+        with patch("app.db.schema_migration_runner.collect_read_only_schema_inventory_from_engine", return_value=inventory):
+            result = apply_003_widen_pagos_mensuales_metodo_pago(
+                FakeEngine(connection), backup_confirmed=True, dev_database_confirmed=True, expected_database="other"
+            )
+
+        self.assertEqual(result["status"], "refused")
+        self.assertEqual(connection.statements, [])
 
     def test_cli_apply_requires_dev_database_confirmation_before_importing_database(self):
         error = io.StringIO()
@@ -655,11 +828,13 @@ def _inventory(
     applied_at_type="datetime", applied_at_default="CURRENT_TIMESTAMP",
     composite_primary_key=False, migration_id_nullable=False, applied_at_nullable=False,
     tipos_lavado_seed=None, tipos_lavado_valid=True, tipos_lavado_composite_codigo_unique=False,
+    metodo_pago_type=None, metodo_pago_nullable=True, metodo_pago_default=None,
+    metodo_pago_extra="", metodo_pago_character_set="utf8mb4", metodo_pago_collation="utf8mb4_0900_ai_ci",
 ):
     inventory = {
         "inventory_version": 1,
         "database": database,
-        "tables": [{"table_name": table} for table in tables],
+        "tables": [{"table_name": table, "table_collation": "utf8mb4_0900_ai_ci"} for table in tables],
     }
     if any(table.casefold() == "schema_migrations" for table in tables):
         columns = []
@@ -718,6 +893,17 @@ def _inventory(
             "source_table": "tipos_lavado", "available": tipos_lavado_valid,
             "records": [{"codigo": "lavado_general", "nombre": "Modified", "activo": 0}] if tipos_lavado_seed else [],
         }
+    if any(table.casefold() == "pagos_mensuales" for table in tables) and metodo_pago_type is not None:
+        inventory.setdefault("columns", []).append({
+            "table_name": "pagos_mensuales", "column_name": "metodo_pago",
+            "data_type": "varchar" if metodo_pago_type.startswith("varchar") else metodo_pago_type,
+            "column_type": metodo_pago_type,
+            "is_nullable": "YES" if metodo_pago_nullable else "NO",
+            "column_default": metodo_pago_default,
+            "extra": metodo_pago_extra,
+            "character_set_name": metodo_pago_character_set,
+            "collation_name": metodo_pago_collation,
+        })
     return inventory
 
 

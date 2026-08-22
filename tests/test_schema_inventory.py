@@ -1,7 +1,11 @@
 import re
 import unittest
 
-from app.db.schema_inventory import collect_read_only_schema_inventory, tipos_lavado_contract
+from app.db.schema_inventory import (
+    collect_read_only_schema_inventory,
+    pagos_mensuales_metodo_pago_contract,
+    tipos_lavado_contract,
+)
 
 
 class FakeResult:
@@ -55,7 +59,7 @@ class FakeConnection:
             return FakeResult(rows, uppercase_row_keys=self.uppercase_row_keys)
         if "information_schema.columns" in sql:
             rows = [
-                {"table_name": "vehiculos", "column_name": "patente", "ordinal_position": 2, "column_default": None, "is_nullable": "NO", "data_type": "varchar", "column_type": "varchar(10)", "column_key": "", "extra": ""},
+                {"table_name": "vehiculos", "column_name": "patente", "ordinal_position": 2, "column_default": None, "is_nullable": "NO", "data_type": "varchar", "column_type": "varchar(10)", "column_key": "", "extra": "", "character_set_name": "utf8mb4", "collation_name": "utf8mb4"},
                 {"table_name": "vehiculos", "column_name": "id_vehiculo", "ordinal_position": 1, "column_default": None, "is_nullable": "NO", "data_type": "int", "column_type": "int", "column_key": "PRI", "extra": "auto_increment"},
             ]
             if self.include_schema_migrations:
@@ -112,6 +116,9 @@ class SchemaInventoryTests(unittest.TestCase):
         self.assertEqual(inventory["database"], "parking")
         self.assertEqual([row["table_name"] for row in inventory["tables"]], ["configuracion", "vehiculos"])
         self.assertEqual([row["column_name"] for row in inventory["columns"]], ["id_vehiculo", "patente"])
+        columns_query = next(statement for statement, _ in conn.statements if "information_schema.columns" in statement)
+        self.assertIn("character_set_name", columns_query)
+        self.assertIn("collation_name", columns_query)
         self.assertEqual([row["index_name"] for row in inventory["indexes"]], ["PRIMARY", "idx_patente"])
         self.assertEqual(inventory["foreign_keys"][0]["constraint_name"], "fk_vehicle_owner")
         self.assertEqual(inventory["config_seed_snapshot"], {
@@ -216,6 +223,49 @@ class SchemaInventoryTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "active database name"):
             collect_read_only_schema_inventory(conn)
+
+    def test_classifies_monthly_payment_method_widen_contract(self):
+        base = {"tables": [{"table_name": "pagos_mensuales"}]}
+        for column, expected in (
+            (None, (False, False, "missing_column")),
+            ({"data_type": "varchar", "column_type": "varchar(40)", "is_nullable": "YES", "column_default": None, "extra": "", "character_set_name": "utf8mb4", "collation_name": "utf8mb4"}, (False, True, "widen_safe")),
+            ({"data_type": "varchar", "column_type": "varchar(50)", "is_nullable": "YES", "column_default": None, "extra": "", "character_set_name": "utf8mb4", "collation_name": "utf8mb4"}, (True, False, "valid")),
+            ({"data_type": "varchar", "column_type": "varchar(60)", "is_nullable": "YES", "column_default": None}, (False, False, "invalid")),
+            ({"data_type": "int", "column_type": "int", "is_nullable": "YES", "column_default": None}, (False, False, "invalid")),
+            ({"data_type": "varchar", "column_type": "varchar(40)", "is_nullable": "NO", "column_default": None}, (False, False, "invalid")),
+            ({"data_type": "varchar", "column_type": "varchar(40)", "is_nullable": "YES", "column_default": "cash"}, (False, False, "invalid")),
+        ):
+            with self.subTest(column=column):
+                inventory = {"tables": [{"table_name": "pagos_mensuales", "table_collation": "utf8mb4"}]}
+                inventory["columns"] = [] if column is None else [{
+                    "table_name": "pagos_mensuales", "column_name": "metodo_pago", **column,
+                }]
+                contract = pagos_mensuales_metodo_pago_contract(inventory)
+                self.assertEqual(
+                    (contract["valid"], contract["widen_safe"], contract["state"]), expected
+                )
+
+    def test_rejects_monthly_payment_method_widen_with_extra_or_nondefault_collation(self):
+        base = {
+            "tables": [{"table_name": "pagos_mensuales", "table_collation": "utf8mb4_0900_ai_ci"}],
+            "columns": [{
+                "table_name": "pagos_mensuales", "column_name": "metodo_pago",
+                "data_type": "varchar", "column_type": "varchar(40)", "is_nullable": "YES",
+                "column_default": None, "extra": "", "character_set_name": "utf8mb4",
+                "collation_name": "utf8mb4_0900_ai_ci",
+            }],
+        }
+        for field, value, issue in (
+            ("extra", "INVISIBLE", "metodo_pago extra must be empty"),
+            ("collation_name", "utf8mb4_bin", "metodo_pago collation must match the table default"),
+            ("character_set_name", "latin1", "metodo_pago character set must match the table default"),
+        ):
+            with self.subTest(field=field):
+                inventory = {**base, "columns": [{**base["columns"][0], field: value}]}
+                contract = pagos_mensuales_metodo_pago_contract(inventory)
+
+                self.assertEqual((contract["valid"], contract["widen_safe"], contract["state"]), (False, False, "invalid"))
+                self.assertIn(issue, contract["issues"])
 
 
 if __name__ == "__main__":

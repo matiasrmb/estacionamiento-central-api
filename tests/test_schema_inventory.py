@@ -5,6 +5,7 @@ from app.db.schema_inventory import (
     collect_read_only_schema_inventory,
     pagos_mensuales_metodo_pago_contract,
     operaciones_servicio_ingreso_generado_fk_contract,
+    operaciones_servicio_tipo_vehiculo_lavado_fk_contract,
     tipos_lavado_contract,
 )
 
@@ -32,7 +33,7 @@ class FakeConnection:
         self, *, include_config=True, include_schema_migrations=False,
         migration_records=None, include_tipos_lavado=False, tipos_lavado_records=None,
         schema_name="parking", uppercase_row_keys=False, include_operaciones_fk_prerequisites=False,
-        orphan_count=0,
+        include_tipo_vehiculo_lavado_fk_prerequisites=False, orphan_count=0,
     ):
         self.include_config = include_config
         self.include_schema_migrations = include_schema_migrations
@@ -42,6 +43,7 @@ class FakeConnection:
         self.schema_name = schema_name
         self.uppercase_row_keys = uppercase_row_keys
         self.include_operaciones_fk_prerequisites = include_operaciones_fk_prerequisites
+        self.include_tipo_vehiculo_lavado_fk_prerequisites = include_tipo_vehiculo_lavado_fk_prerequisites
         self.orphan_count = orphan_count
         self.statements = []
 
@@ -65,6 +67,10 @@ class FakeConnection:
                     {"table_name": "operaciones_servicio", "table_type": "BASE TABLE", "engine": "InnoDB", "table_collation": "utf8mb4"},
                     {"table_name": "ingresos", "table_type": "BASE TABLE", "engine": "InnoDB", "table_collation": "utf8mb4"},
                 ])
+            if self.include_tipo_vehiculo_lavado_fk_prerequisites:
+                rows.append({"table_name": "tipos_vehiculo_lavado", "table_type": "BASE TABLE", "engine": "InnoDB", "table_collation": "utf8mb4"})
+                if not self.include_operaciones_fk_prerequisites:
+                    rows.append({"table_name": "operaciones_servicio", "table_type": "BASE TABLE", "engine": "InnoDB", "table_collation": "utf8mb4"})
             return FakeResult(rows, uppercase_row_keys=self.uppercase_row_keys)
         if "information_schema.columns" in sql:
             rows = [
@@ -90,6 +96,11 @@ class FakeConnection:
                     {"table_name": "operaciones_servicio", "column_name": "id_ingreso_generado", "ordinal_position": 1, "column_default": None, "is_nullable": "YES", "data_type": "int", "column_type": "int", "column_key": "", "extra": ""},
                     {"table_name": "ingresos", "column_name": "id_ingreso", "ordinal_position": 1, "column_default": None, "is_nullable": "NO", "data_type": "int", "column_type": "int", "column_key": "PRI", "extra": ""},
                 ])
+            if self.include_tipo_vehiculo_lavado_fk_prerequisites:
+                rows.extend([
+                    {"table_name": "operaciones_servicio", "column_name": "id_tipo_vehiculo_lavado", "ordinal_position": 2, "column_default": None, "is_nullable": "YES", "data_type": "int", "column_type": "int", "column_key": "", "extra": ""},
+                    {"table_name": "tipos_vehiculo_lavado", "column_name": "id_tipo_vehiculo_lavado", "ordinal_position": 1, "column_default": None, "is_nullable": "NO", "data_type": "int", "column_type": "int", "column_key": "PRI", "extra": ""},
+                ])
             return FakeResult(rows, uppercase_row_keys=self.uppercase_row_keys)
         if "information_schema.statistics" in sql:
             rows = [
@@ -108,6 +119,8 @@ class FakeConnection:
                     {"table_name": "operaciones_servicio", "index_name": "idx_operaciones_servicio_ingreso_generado", "non_unique": 1, "seq_in_index": 1, "column_name": "id_ingreso_generado", "collation": "A", "index_type": "BTREE"},
                     {"table_name": "ingresos", "index_name": "PRIMARY", "non_unique": 0, "seq_in_index": 1, "column_name": "id_ingreso", "collation": "A", "index_type": "BTREE"},
                 ])
+            if self.include_tipo_vehiculo_lavado_fk_prerequisites:
+                rows.append({"table_name": "tipos_vehiculo_lavado", "index_name": "PRIMARY", "non_unique": 0, "seq_in_index": 1, "column_name": "id_tipo_vehiculo_lavado", "collation": "A", "index_type": "BTREE"})
             return FakeResult(rows, uppercase_row_keys=self.uppercase_row_keys)
         if "information_schema.referential_constraints" in sql:
             return FakeResult([
@@ -267,6 +280,26 @@ class SchemaInventoryTests(unittest.TestCase):
         self.assertEqual(contract["state"], "invalid")
         self.assertIn("idx_operaciones_servicio_ingreso_generado index is missing", contract["issues"])
 
+    def test_wash_vehicle_type_fk_contract_allows_absent_child_index_only_while_pending(self):
+        inventory = {
+            "tables": [
+                {"table_name": "operaciones_servicio", "engine": "InnoDB"},
+                {"table_name": "tipos_vehiculo_lavado", "engine": "InnoDB"},
+            ],
+            "columns": [
+                {"table_name": "operaciones_servicio", "column_name": "id_tipo_vehiculo_lavado", "data_type": "int", "column_type": "int", "is_nullable": "YES"},
+                {"table_name": "tipos_vehiculo_lavado", "column_name": "id_tipo_vehiculo_lavado", "data_type": "int", "column_type": "int", "is_nullable": "NO"},
+            ],
+            "indexes": [{"table_name": "tipos_vehiculo_lavado", "index_name": "PRIMARY", "column_name": "id_tipo_vehiculo_lavado", "seq_in_index": 1}],
+            "foreign_keys": [],
+            "operaciones_servicio_tipo_vehiculo_lavado_orphans": {"available": True, "count": 0},
+        }
+        self.assertEqual(operaciones_servicio_tipo_vehiculo_lavado_fk_contract(inventory)["state"], "safe_to_add")
+        inventory["indexes"].append({"table_name": "operaciones_servicio", "index_name": "idx_operaciones_servicio_tipo_vehiculo_lavado", "column_name": "other_id", "seq_in_index": 1})
+        contract = operaciones_servicio_tipo_vehiculo_lavado_fk_contract(inventory)
+        self.assertEqual(contract["state"], "invalid")
+        self.assertFalse(contract["add_safe"])
+
     def test_fk_contract_accepts_restrictive_no_action_or_restrict_rules(self):
         inventory = {
             "tables": [{"table_name": "operaciones_servicio", "engine": "InnoDB"}, {"table_name": "ingresos", "engine": "InnoDB"}],
@@ -386,6 +419,16 @@ class SchemaInventoryTests(unittest.TestCase):
         inventory = collect_read_only_schema_inventory(available)
         self.assertEqual(inventory["operaciones_servicio_ingreso_generado_orphans"], {"available": True, "count": 2})
         self.assertTrue(any("FROM operaciones_servicio AS child" in statement for statement, _ in available.statements))
+
+    def test_collects_wash_vehicle_type_orphans_only_after_its_columns_exist(self):
+        unavailable = FakeConnection()
+        inventory = collect_read_only_schema_inventory(unavailable)
+        self.assertEqual(inventory["operaciones_servicio_tipo_vehiculo_lavado_orphans"], {"available": False, "count": None})
+        self.assertFalse(any("tipos_vehiculo_lavado AS parent" in statement for statement, _ in unavailable.statements))
+        available = FakeConnection(include_tipo_vehiculo_lavado_fk_prerequisites=True, orphan_count=2)
+        inventory = collect_read_only_schema_inventory(available)
+        self.assertEqual(inventory["operaciones_servicio_tipo_vehiculo_lavado_orphans"], {"available": True, "count": 2})
+        self.assertTrue(any("tipos_vehiculo_lavado AS parent" in statement for statement, _ in available.statements))
 
     def test_classifies_monthly_payment_method_widen_contract(self):
         base = {"tables": [{"table_name": "pagos_mensuales"}]}

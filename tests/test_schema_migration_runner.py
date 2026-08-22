@@ -14,10 +14,12 @@ from app.db.schema_migration_runner import (
     MIGRATION_002_SEED_SQL,
     MIGRATION_003_ID,
     MIGRATION_004_ID,
+    MIGRATION_005_ID,
     apply_001_create_schema_migrations,
     apply_002_create_tipos_lavado,
     apply_003_widen_pagos_mensuales_metodo_pago,
     apply_004_add_operaciones_servicio_ingreso_generado_fk,
+    apply_005_add_operaciones_servicio_tipo_vehiculo_lavado_fk,
     collect_dry_run_plan,
     main,
     plan_schema_migrations,
@@ -104,6 +106,7 @@ class SchemaMigrationRunnerTests(unittest.TestCase):
             "002_create_tipos_lavado",
             "003_widen_pagos_mensuales_metodo_pago",
             "004_add_operaciones_servicio_ingreso_generado_fk",
+            "005_add_operaciones_servicio_tipo_vehiculo_lavado_fk",
         ))
         self.assertEqual(
             [migration.migration_id for migration in MIGRATIONS],
@@ -113,6 +116,7 @@ class SchemaMigrationRunnerTests(unittest.TestCase):
         self.assertNotIn("002", MANAGED_MIGRATION_IDS)
         self.assertNotIn("003", MANAGED_MIGRATION_IDS)
         self.assertNotIn("004", MANAGED_MIGRATION_IDS)
+        self.assertNotIn("005", MANAGED_MIGRATION_IDS)
 
     def test_historical_002_sql_is_not_a_managed_migration_statement(self):
         historical_sql = (
@@ -944,6 +948,104 @@ class SchemaMigrationRunnerTests(unittest.TestCase):
                     main(["--apply-004-add-operaciones-servicio-ingreso-generado-fk"])
         self.assertIn("--expected-database is required for apply", error.getvalue())
 
+    def test_005_pending_apply_repair_noop_and_refusal_states(self):
+        prerequisites = ["001_create_schema_migrations", "002_create_tipos_lavado", MIGRATION_003_ID, MIGRATION_004_ID]
+        tables = ["schema_migrations", "tipos_lavado", "pagos_mensuales", "operaciones_servicio", "ingresos", "tipos_vehiculo_lavado"]
+        pending = _inventory(tables, migration_ids=prerequisites, metodo_pago_type="varchar(50)", operaciones_fk_state="valid")
+        plan = plan_schema_migrations(pending)
+        self.assertEqual(plan["migrations"][4]["status"], "pending")
+        self.assertEqual(MIGRATIONS[4].statements[0], (
+            "ALTER TABLE operaciones_servicio\n"
+            "    ADD INDEX idx_operaciones_servicio_tipo_vehiculo_lavado (id_tipo_vehiculo_lavado),\n"
+            "    ADD CONSTRAINT fk_operaciones_servicio_tipo_vehiculo_lavado\n"
+            "        FOREIGN KEY (id_tipo_vehiculo_lavado)\n"
+            "        REFERENCES tipos_vehiculo_lavado (id_tipo_vehiculo_lavado)"
+        ))
+        self.assertEqual(plan["migrations"][4]["sql"], [MIGRATIONS[4].statements[0], MIGRATION_001_RECORD_SQL])
+        connection = ApplyConnection()
+        with patch("app.db.schema_migration_runner.collect_read_only_schema_inventory_from_engine", return_value=pending):
+            result = apply_005_add_operaciones_servicio_tipo_vehiculo_lavado_fk(FakeEngine(connection), backup_confirmed=True, dev_database_confirmed=True, expected_database="parking")
+        self.assertEqual(result["status"], "applied")
+        self.assertEqual(connection.statements, [(MIGRATIONS[4].statements[0], None), (MIGRATION_001_RECORD_SQL, {"migration_id": MIGRATION_005_ID})])
+
+        valid = _inventory(tables, migration_ids=prerequisites, metodo_pago_type="varchar(50)", operaciones_fk_state="valid", tipo_vehiculo_lavado_fk_state="valid")
+        repair = ApplyConnection()
+        with patch("app.db.schema_migration_runner.collect_read_only_schema_inventory_from_engine", return_value=valid):
+            result = apply_005_add_operaciones_servicio_tipo_vehiculo_lavado_fk(FakeEngine(repair), backup_confirmed=True, dev_database_confirmed=True, expected_database="parking")
+        self.assertEqual(result["status"], "repaired")
+        self.assertEqual(repair.statements, [(MIGRATION_001_RECORD_SQL, {"migration_id": MIGRATION_005_ID})])
+
+        recorded = _inventory(tables, migration_ids=[*prerequisites, MIGRATION_005_ID], metodo_pago_type="varchar(50)", operaciones_fk_state="valid", tipo_vehiculo_lavado_fk_state="valid", tipo_vehiculo_lavado_fk_rules=("NO ACTION", "NO ACTION"))
+        noop = ApplyConnection()
+        with patch("app.db.schema_migration_runner.collect_read_only_schema_inventory_from_engine", return_value=recorded):
+            result = apply_005_add_operaciones_servicio_tipo_vehiculo_lavado_fk(FakeEngine(noop), backup_confirmed=True, dev_database_confirmed=True, expected_database="parking")
+        self.assertEqual(result["status"], "noop")
+        self.assertEqual(noop.statements, [])
+
+    def test_005_refuses_missing_or_unsafe_contracts_without_sql(self):
+        prerequisites = ["001_create_schema_migrations", "002_create_tipos_lavado", MIGRATION_003_ID, MIGRATION_004_ID]
+        tables = ["schema_migrations", "tipos_lavado", "pagos_mensuales", "operaciones_servicio", "ingresos", "tipos_vehiculo_lavado"]
+        for migration_ids, overrides in (
+            (prerequisites[:-1], {}),
+            (prerequisites, {"tipo_vehiculo_lavado_orphans": 1}),
+            (prerequisites, {"tipo_vehiculo_lavado_child_engine": None}),
+            (prerequisites, {"tipo_vehiculo_lavado_parent_engine": "MyISAM"}),
+            (prerequisites, {"tipo_vehiculo_lavado_child_type": "int unsigned"}),
+            (prerequisites, {"tipo_vehiculo_lavado_parent_type": "bigint"}),
+            (prerequisites, {"tipo_vehiculo_lavado_parent_index": False}),
+            (prerequisites, {"tipo_vehiculo_lavado_child_index": "exact"}),
+            (prerequisites, {"tipo_vehiculo_lavado_child_index": "wrong"}),
+            (prerequisites, {"tipo_vehiculo_lavado_fk_state": "wrong_target"}),
+            (prerequisites, {"tipo_vehiculo_lavado_fk_state": "wrong_rules"}),
+            ([*prerequisites, MIGRATION_005_ID], {}),
+        ):
+            with self.subTest(migration_ids=migration_ids, overrides=overrides):
+                connection = ApplyConnection()
+                inventory = _inventory(tables, migration_ids=migration_ids, metodo_pago_type="varchar(50)", operaciones_fk_state="valid", **overrides)
+                with patch("app.db.schema_migration_runner.collect_read_only_schema_inventory_from_engine", return_value=inventory):
+                    result = apply_005_add_operaciones_servicio_tipo_vehiculo_lavado_fk(FakeEngine(connection), backup_confirmed=True, dev_database_confirmed=True, expected_database="parking")
+                self.assertIn(result["status"], {"refused", "invalid_contract"})
+                self.assertEqual(connection.statements, [])
+
+        missing_parent = _inventory(tables[:-1], migration_ids=prerequisites, metodo_pago_type="varchar(50)", operaciones_fk_state="valid")
+        connection = ApplyConnection()
+        with patch("app.db.schema_migration_runner.collect_read_only_schema_inventory_from_engine", return_value=missing_parent):
+            result = apply_005_add_operaciones_servicio_tipo_vehiculo_lavado_fk(FakeEngine(connection), backup_confirmed=True, dev_database_confirmed=True, expected_database="parking")
+        self.assertEqual(plan_schema_migrations(missing_parent)["migrations"][4]["status"], "blocked_prerequisite")
+        self.assertEqual(result["status"], "refused")
+        self.assertEqual(connection.statements, [])
+
+        name_collision = _inventory(tables, migration_ids=prerequisites, metodo_pago_type="varchar(50)", operaciones_fk_state="valid")
+        name_collision["foreign_keys"].append({
+            "constraint_name": "fk_operaciones_servicio_tipo_vehiculo_lavado", "table_name": "other",
+            "column_name": "other_id", "referenced_table_name": "other_parent", "referenced_column_name": "id",
+            "update_rule": "RESTRICT", "delete_rule": "RESTRICT",
+        })
+        connection = ApplyConnection()
+        with patch("app.db.schema_migration_runner.collect_read_only_schema_inventory_from_engine", return_value=name_collision):
+            result = apply_005_add_operaciones_servicio_tipo_vehiculo_lavado_fk(FakeEngine(connection), backup_confirmed=True, dev_database_confirmed=True, expected_database="parking")
+        self.assertEqual(result["status"], "invalid_contract")
+        self.assertEqual(connection.statements, [])
+
+    def test_005_record_failure_and_bare_historical_id_retry_record_only(self):
+        prerequisites = ["001_create_schema_migrations", "002_create_tipos_lavado", MIGRATION_003_ID, MIGRATION_004_ID]
+        tables = ["schema_migrations", "tipos_lavado", "pagos_mensuales", "operaciones_servicio", "ingresos", "tipos_vehiculo_lavado"]
+        pending = _inventory(tables, migration_ids=prerequisites, metodo_pago_type="varchar(50)", operaciones_fk_state="valid")
+        failed = ApplyConnection(fail_insert=True)
+        with patch("app.db.schema_migration_runner.collect_read_only_schema_inventory_from_engine", return_value=pending):
+            result = apply_005_add_operaciones_servicio_tipo_vehiculo_lavado_fk(FakeEngine(failed), backup_confirmed=True, dev_database_confirmed=True, expected_database="parking")
+        self.assertEqual(result["status"], "failed_after_alter")
+        self.assertEqual(result["executed_statement_types"], ["ALTER TABLE"])
+        self.assertIn("may already be committed", result["warnings"][0])
+
+        valid = _inventory(tables, migration_ids=[*prerequisites, "005"], metodo_pago_type="varchar(50)", operaciones_fk_state="valid", tipo_vehiculo_lavado_fk_state="valid")
+        self.assertEqual(plan_schema_migrations(valid)["migrations"][4]["status"], "repair_required")
+        retry = ApplyConnection()
+        with patch("app.db.schema_migration_runner.collect_read_only_schema_inventory_from_engine", return_value=valid):
+            result = apply_005_add_operaciones_servicio_tipo_vehiculo_lavado_fk(FakeEngine(retry), backup_confirmed=True, dev_database_confirmed=True, expected_database="parking")
+        self.assertEqual(result["status"], "repaired")
+        self.assertEqual(retry.statements, [(MIGRATION_001_RECORD_SQL, {"migration_id": MIGRATION_005_ID})])
+
     def test_cli_apply_requires_dev_database_confirmation_before_importing_database(self):
         error = io.StringIO()
 
@@ -1016,6 +1118,9 @@ def _inventory(
     operaciones_orphans=0, operaciones_child_index=True, operaciones_fk_state="absent",
     operaciones_fk_update_rule="RESTRICT", operaciones_fk_delete_rule="RESTRICT",
     operaciones_child_type="int", operaciones_parent_type="int", operaciones_child_engine="InnoDB", operaciones_parent_engine="InnoDB",
+    tipo_vehiculo_lavado_orphans=0, tipo_vehiculo_lavado_child_index="absent", tipo_vehiculo_lavado_parent_index=True,
+    tipo_vehiculo_lavado_fk_state="absent", tipo_vehiculo_lavado_fk_rules=("RESTRICT", "RESTRICT"),
+    tipo_vehiculo_lavado_child_type="int", tipo_vehiculo_lavado_parent_type="int", tipo_vehiculo_lavado_child_engine="InnoDB", tipo_vehiculo_lavado_parent_engine="InnoDB",
 ):
     inventory = {
         "inventory_version": 1,
@@ -1101,6 +1206,27 @@ def _inventory(
         if operaciones_fk_state != "absent":
             inventory["foreign_keys"] = [{"table_name": "operaciones_servicio", "column_name": "id_ingreso_generado", "constraint_name": "fk_operaciones_servicio_ingreso_generado", "referenced_table_name": "ingresos" if operaciones_fk_state != "wrong_target" else "other", "referenced_column_name": "id_ingreso", "update_rule": "CASCADE" if operaciones_fk_state == "wrong_rules" else operaciones_fk_update_rule, "delete_rule": operaciones_fk_delete_rule}]
         inventory["operaciones_servicio_ingreso_generado_orphans"] = {"available": True, "count": operaciones_orphans}
+    if any(table.casefold() == "tipos_vehiculo_lavado" for table in tables):
+        next(row for row in inventory["tables"] if row["table_name"].casefold() == "operaciones_servicio")["engine"] = tipo_vehiculo_lavado_child_engine
+        next(row for row in inventory["tables"] if row["table_name"].casefold() == "tipos_vehiculo_lavado")["engine"] = tipo_vehiculo_lavado_parent_engine
+        inventory.setdefault("columns", []).extend([
+            {"table_name": "operaciones_servicio", "column_name": "id_tipo_vehiculo_lavado", "data_type": tipo_vehiculo_lavado_child_type.split("(", 1)[0].split(" ", 1)[0], "column_type": tipo_vehiculo_lavado_child_type, "is_nullable": "YES"},
+            {"table_name": "tipos_vehiculo_lavado", "column_name": "id_tipo_vehiculo_lavado", "data_type": tipo_vehiculo_lavado_parent_type.split("(", 1)[0].split(" ", 1)[0], "column_type": tipo_vehiculo_lavado_parent_type, "is_nullable": "NO", "column_key": "PRI"},
+        ])
+        if tipo_vehiculo_lavado_parent_index:
+            inventory.setdefault("indexes", []).append({"table_name": "tipos_vehiculo_lavado", "index_name": "PRIMARY", "column_name": "id_tipo_vehiculo_lavado", "seq_in_index": 1, "non_unique": 0})
+        if tipo_vehiculo_lavado_child_index == "exact" or tipo_vehiculo_lavado_fk_state != "absent":
+            inventory.setdefault("indexes", []).append({"table_name": "operaciones_servicio", "index_name": "idx_operaciones_servicio_tipo_vehiculo_lavado", "column_name": "id_tipo_vehiculo_lavado", "seq_in_index": 1, "non_unique": 1})
+        elif tipo_vehiculo_lavado_child_index == "wrong":
+            inventory.setdefault("indexes", []).append({"table_name": "operaciones_servicio", "index_name": "idx_operaciones_servicio_tipo_vehiculo_lavado", "column_name": "other_id", "seq_in_index": 1, "non_unique": 1})
+        if tipo_vehiculo_lavado_fk_state != "absent":
+            update_rule, delete_rule = tipo_vehiculo_lavado_fk_rules
+            inventory.setdefault("foreign_keys", []).append({
+                "table_name": "operaciones_servicio", "column_name": "id_tipo_vehiculo_lavado", "constraint_name": "fk_operaciones_servicio_tipo_vehiculo_lavado",
+                "referenced_table_name": "other" if tipo_vehiculo_lavado_fk_state == "wrong_target" else "tipos_vehiculo_lavado",
+                "referenced_column_name": "id_tipo_vehiculo_lavado", "update_rule": "CASCADE" if tipo_vehiculo_lavado_fk_state == "wrong_rules" else update_rule, "delete_rule": delete_rule,
+            })
+        inventory["operaciones_servicio_tipo_vehiculo_lavado_orphans"] = {"available": True, "count": tipo_vehiculo_lavado_orphans}
     return inventory
 
 

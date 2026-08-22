@@ -83,6 +83,14 @@ _OPERACIONES_SERVICIO_INGRESO_ORPHANS_SQL = """
     WHERE child.id_ingreso_generado IS NOT NULL
       AND parent.id_ingreso IS NULL
 """
+_OPERACIONES_SERVICIO_TIPO_VEHICULO_LAVADO_ORPHANS_SQL = """
+    SELECT COUNT(*) AS orphan_count
+    FROM operaciones_servicio AS child
+    LEFT JOIN tipos_vehiculo_lavado AS parent
+      ON parent.id_tipo_vehiculo_lavado = child.id_tipo_vehiculo_lavado
+    WHERE child.id_tipo_vehiculo_lavado IS NOT NULL
+      AND parent.id_tipo_vehiculo_lavado IS NULL
+"""
 
 
 def collect_read_only_schema_inventory(conn: Connection) -> dict[str, Any]:
@@ -139,6 +147,18 @@ def collect_read_only_schema_inventory(conn: Connection) -> dict[str, Any]:
             "available": True,
             "count": conn.execute(text(_OPERACIONES_SERVICIO_INGRESO_ORPHANS_SQL)).scalar(),
         }
+    tipo_vehiculo_lavado_fk_contract = operaciones_servicio_tipo_vehiculo_lavado_fk_contract({
+        "tables": tables,
+        "columns": columns,
+        "indexes": indexes,
+        "foreign_keys": foreign_keys,
+    })
+    tipo_vehiculo_lavado_orphan_snapshot = {"available": False, "count": None}
+    if tipo_vehiculo_lavado_fk_contract["orphan_check_safe"]:
+        tipo_vehiculo_lavado_orphan_snapshot = {
+            "available": True,
+            "count": conn.execute(text(_OPERACIONES_SERVICIO_TIPO_VEHICULO_LAVADO_ORPHANS_SQL)).scalar(),
+        }
 
     return {
         "inventory_version": SCHEMA_INVENTORY_VERSION,
@@ -165,6 +185,7 @@ def collect_read_only_schema_inventory(conn: Connection) -> dict[str, Any]:
             "records": tipos_lavado_seed,
         },
         "operaciones_servicio_ingreso_generado_orphans": orphan_snapshot,
+        "operaciones_servicio_tipo_vehiculo_lavado_orphans": tipo_vehiculo_lavado_orphan_snapshot,
     }
 
 
@@ -376,6 +397,89 @@ def operaciones_servicio_ingreso_generado_fk_contract(inventory: dict[str, Any])
     return _fk_contract(False, True, "safe_to_add", [], True)
 
 
+def operaciones_servicio_tipo_vehiculo_lavado_fk_contract(inventory: dict[str, Any]) -> dict[str, Any]:
+    """Validate the wash vehicle type FK and prerequisites for its combined ALTER."""
+    child_table = "operaciones_servicio"
+    child_column = "id_tipo_vehiculo_lavado"
+    parent_table = "tipos_vehiculo_lavado"
+    parent_column = "id_tipo_vehiculo_lavado"
+    index_name = "idx_operaciones_servicio_tipo_vehiculo_lavado"
+    constraint_name = "fk_operaciones_servicio_tipo_vehiculo_lavado"
+    tables = _table_names(inventory)
+    columns = inventory.get("columns", [])
+    indexes = inventory.get("indexes", [])
+    foreign_keys = inventory.get("foreign_keys", [])
+    issues = []
+    child = _find_column(columns, child_table, child_column)
+    parent = _find_column(columns, parent_table, parent_column)
+    if child_table not in tables:
+        issues.append(f"{child_table} table is missing")
+    if parent_table not in tables:
+        issues.append(f"{parent_table} table is missing")
+    if child is None:
+        issues.append(f"{child_column} column is missing")
+    elif _int_signedness(child) is not False or str(child.get("is_nullable", "")).casefold() != "yes":
+        issues.append(f"{child_table}.{child_column} must be signed INT NULL")
+    if parent is None:
+        issues.append(f"{parent_column} column is missing")
+    elif _int_signedness(parent) is not False:
+        issues.append(f"{parent_table}.{parent_column} must be signed INT")
+    orphan_check_safe = child is not None and parent is not None and child_table in tables and parent_table in tables
+    child_engine = _table_engine(inventory, child_table)
+    parent_engine = _table_engine(inventory, parent_table)
+    engine_unknown = child_engine is None or parent_engine is None
+    if not engine_unknown:
+        if child_engine != "innodb":
+            issues.append(f"{child_table} engine must be InnoDB")
+        if parent_engine != "innodb":
+            issues.append(f"{parent_table} engine must be InnoDB")
+    if not _has_indexed_column(indexes, parent_table, parent_column):
+        issues.append(f"{parent_table}.{parent_column} must be indexed")
+
+    named_indexes = [row for row in indexes if isinstance(row, dict) and str(row.get("table_name", "")).casefold() == child_table and str(row.get("index_name", "")).casefold() == index_name]
+    exact_index = _has_single_column_index(indexes, child_table, index_name, child_column)
+    if named_indexes and not exact_index:
+        issues.append(f"{index_name} name is already used by a different index")
+
+    named_constraint_fks = [
+        row for row in foreign_keys
+        if isinstance(row, dict) and str(row.get("constraint_name", "")).casefold() == constraint_name
+    ]
+    matching_column_fks = [
+        row for row in foreign_keys
+        if isinstance(row, dict)
+        and str(row.get("table_name", "")).casefold() == child_table
+        and str(row.get("column_name", "")).casefold() == child_column
+    ]
+    exact_fk = next((row for row in named_constraint_fks if _is_expected_tipo_vehiculo_lavado_fk(row)), None)
+    if named_constraint_fks and (len(named_constraint_fks) != 1 or exact_fk is None):
+        issues.append(f"{constraint_name} name is already used by a different foreign key")
+        return _fk_contract(False, False, "name_collision", issues, orphan_check_safe)
+    if matching_column_fks:
+        if len(matching_column_fks) != 1 or exact_fk is None:
+            issues.append(f"{child_table}.{child_column} has an unexpected foreign key")
+        elif not _is_expected_tipo_vehiculo_lavado_fk(exact_fk):
+            issues.append(f"{constraint_name} has an unexpected target or rule")
+        elif not exact_index:
+            issues.append(f"{index_name} index is missing")
+        elif not issues:
+            return _fk_contract(True, False, "valid", [], orphan_check_safe)
+        return _fk_contract(False, False, "invalid", issues, orphan_check_safe)
+    if exact_index:
+        issues.append(f"{index_name} exists without the expected foreign key")
+        return _fk_contract(False, False, "invalid", issues, orphan_check_safe)
+    if issues:
+        return _fk_contract(False, False, "invalid", issues, orphan_check_safe)
+    if engine_unknown:
+        return _fk_contract(False, False, "unknown", ["table engine is unavailable"], orphan_check_safe)
+    orphan_snapshot = inventory.get("operaciones_servicio_tipo_vehiculo_lavado_orphans")
+    if not isinstance(orphan_snapshot, dict) or orphan_snapshot.get("available") is not True:
+        return _fk_contract(False, False, "unknown", ["orphan count is unavailable"], orphan_check_safe)
+    if orphan_snapshot.get("count") != 0:
+        return _fk_contract(False, False, "blocked_orphans", ["orphan rows exist"], orphan_check_safe)
+    return _fk_contract(False, True, "safe_to_add", [], orphan_check_safe)
+
+
 def _table_names(inventory: dict[str, Any]) -> set[str]:
     return {str(row.get("table_name", "")).casefold() for row in inventory.get("tables", []) if isinstance(row, dict)}
 
@@ -408,6 +512,17 @@ def _is_expected_fk(row: dict[str, Any]) -> bool:
         and str(row.get("column_name", "")).casefold() == "id_ingreso_generado"
         and str(row.get("referenced_table_name", "")).casefold() == "ingresos"
         and str(row.get("referenced_column_name", "")).casefold() == "id_ingreso"
+        and _is_restrictive_fk_rule(row.get("update_rule"))
+        and _is_restrictive_fk_rule(row.get("delete_rule"))
+    )
+
+
+def _is_expected_tipo_vehiculo_lavado_fk(row: dict[str, Any]) -> bool:
+    return (
+        str(row.get("table_name", "")).casefold() == "operaciones_servicio"
+        and str(row.get("column_name", "")).casefold() == "id_tipo_vehiculo_lavado"
+        and str(row.get("referenced_table_name", "")).casefold() == "tipos_vehiculo_lavado"
+        and str(row.get("referenced_column_name", "")).casefold() == "id_tipo_vehiculo_lavado"
         and _is_restrictive_fk_rule(row.get("update_rule"))
         and _is_restrictive_fk_rule(row.get("delete_rule"))
     )

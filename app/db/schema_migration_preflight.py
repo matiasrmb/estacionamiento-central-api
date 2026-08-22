@@ -65,6 +65,11 @@ def evaluate_schema_migration_preflight(
     )
     fk_contract = plan.get("operaciones_servicio_ingreso_generado_fk", {})
     orphan_blocked = isinstance(fk_contract, dict) and fk_contract.get("state") == "blocked_orphans"
+    tipo_vehiculo_lavado_fk_contract = plan.get("operaciones_servicio_tipo_vehiculo_lavado_fk", {})
+    tipo_vehiculo_lavado_orphan_blocked = (
+        isinstance(tipo_vehiculo_lavado_fk_contract, dict)
+        and tipo_vehiculo_lavado_fk_contract.get("state") == "blocked_orphans"
+    )
     statuses = []
     statuses.append(_check("database_name", bool(database), "Database name is present."))
     statuses.append(_check(
@@ -91,6 +96,11 @@ def evaluate_schema_migration_preflight(
         "operaciones_servicio_ingreso_generado_orphans",
         not orphan_blocked,
         "No orphan operaciones_servicio.id_ingreso_generado rows may exist before migration 004.",
+    ))
+    statuses.append(_check(
+        "operaciones_servicio_tipo_vehiculo_lavado_orphans",
+        not tipo_vehiculo_lavado_orphan_blocked,
+        "No orphan operaciones_servicio.id_tipo_vehiculo_lavado rows may exist before migration 005.",
     ))
     statuses.append(_check(
         "backup_confirmed_for_future_apply",
@@ -138,7 +148,10 @@ def evaluate_schema_migration_preflight(
         "invalid_contract_migrations": invalid_contract_migrations,
         "blocked_migrations": blocked_migrations,
         "inconsistent_state_migrations": inconsistent_state_migrations,
-        "orphan_blockers": ["operaciones_servicio.id_ingreso_generado"] if orphan_blocked else [],
+        "orphan_blockers": [
+            *(["operaciones_servicio.id_ingreso_generado"] if orphan_blocked else []),
+            *(["operaciones_servicio.id_tipo_vehiculo_lavado"] if tipo_vehiculo_lavado_orphan_blocked else []),
+        ],
         "apply": {
             "available": apply_requested and not has_failures,
             "will_execute": apply_requested and not has_failures and bool(pending_migrations),

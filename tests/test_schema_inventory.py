@@ -4,6 +4,7 @@ import unittest
 from app.db.schema_inventory import (
     collect_read_only_schema_inventory,
     pagos_mensuales_metodo_pago_contract,
+    operaciones_servicio_ingreso_generado_fk_contract,
     tipos_lavado_contract,
 )
 
@@ -30,7 +31,8 @@ class FakeConnection:
     def __init__(
         self, *, include_config=True, include_schema_migrations=False,
         migration_records=None, include_tipos_lavado=False, tipos_lavado_records=None,
-        schema_name="parking", uppercase_row_keys=False,
+        schema_name="parking", uppercase_row_keys=False, include_operaciones_fk_prerequisites=False,
+        orphan_count=0,
     ):
         self.include_config = include_config
         self.include_schema_migrations = include_schema_migrations
@@ -39,6 +41,8 @@ class FakeConnection:
         self.tipos_lavado_records = tipos_lavado_records or []
         self.schema_name = schema_name
         self.uppercase_row_keys = uppercase_row_keys
+        self.include_operaciones_fk_prerequisites = include_operaciones_fk_prerequisites
+        self.orphan_count = orphan_count
         self.statements = []
 
     def execute(self, statement, params=None):
@@ -56,6 +60,11 @@ class FakeConnection:
                 rows.append({"table_name": "schema_migrations", "table_type": "BASE TABLE", "engine": "InnoDB", "table_collation": "utf8mb4"})
             if self.include_tipos_lavado:
                 rows.append({"table_name": "tipos_lavado", "table_type": "BASE TABLE", "engine": "InnoDB", "table_collation": "utf8mb4"})
+            if self.include_operaciones_fk_prerequisites:
+                rows.extend([
+                    {"table_name": "operaciones_servicio", "table_type": "BASE TABLE", "engine": "InnoDB", "table_collation": "utf8mb4"},
+                    {"table_name": "ingresos", "table_type": "BASE TABLE", "engine": "InnoDB", "table_collation": "utf8mb4"},
+                ])
             return FakeResult(rows, uppercase_row_keys=self.uppercase_row_keys)
         if "information_schema.columns" in sql:
             rows = [
@@ -76,6 +85,11 @@ class FakeConnection:
                     {"table_name": "tipos_lavado", "column_name": "created_at", "ordinal_position": 5, "column_default": "CURRENT_TIMESTAMP", "is_nullable": "NO", "data_type": "datetime", "column_type": "datetime", "column_key": "", "extra": ""},
                     {"table_name": "tipos_lavado", "column_name": "updated_at", "ordinal_position": 6, "column_default": "CURRENT_TIMESTAMP", "is_nullable": "NO", "data_type": "datetime", "column_type": "datetime", "column_key": "", "extra": "on update CURRENT_TIMESTAMP"},
                 ])
+            if self.include_operaciones_fk_prerequisites:
+                rows.extend([
+                    {"table_name": "operaciones_servicio", "column_name": "id_ingreso_generado", "ordinal_position": 1, "column_default": None, "is_nullable": "YES", "data_type": "int", "column_type": "int", "column_key": "", "extra": ""},
+                    {"table_name": "ingresos", "column_name": "id_ingreso", "ordinal_position": 1, "column_default": None, "is_nullable": "NO", "data_type": "int", "column_type": "int", "column_key": "PRI", "extra": ""},
+                ])
             return FakeResult(rows, uppercase_row_keys=self.uppercase_row_keys)
         if "information_schema.statistics" in sql:
             rows = [
@@ -88,6 +102,11 @@ class FakeConnection:
                 rows.extend([
                     {"table_name": "tipos_lavado", "index_name": "PRIMARY", "non_unique": 0, "seq_in_index": 1, "column_name": "id_tipo_lavado", "collation": "A", "index_type": "BTREE"},
                     {"table_name": "tipos_lavado", "index_name": "codigo", "non_unique": 0, "seq_in_index": 1, "column_name": "codigo", "collation": "A", "index_type": "BTREE"},
+                ])
+            if self.include_operaciones_fk_prerequisites:
+                rows.extend([
+                    {"table_name": "operaciones_servicio", "index_name": "idx_operaciones_servicio_ingreso_generado", "non_unique": 1, "seq_in_index": 1, "column_name": "id_ingreso_generado", "collation": "A", "index_type": "BTREE"},
+                    {"table_name": "ingresos", "index_name": "PRIMARY", "non_unique": 0, "seq_in_index": 1, "column_name": "id_ingreso", "collation": "A", "index_type": "BTREE"},
                 ])
             return FakeResult(rows, uppercase_row_keys=self.uppercase_row_keys)
         if "information_schema.referential_constraints" in sql:
@@ -103,6 +122,8 @@ class FakeConnection:
             return FakeResult(self.migration_records, uppercase_row_keys=self.uppercase_row_keys)
         if "FROM tipos_lavado" in sql:
             return FakeResult(self.tipos_lavado_records, uppercase_row_keys=self.uppercase_row_keys)
+        if "FROM operaciones_servicio AS child" in sql:
+            return FakeResult(scalar_value=self.orphan_count)
         raise AssertionError(f"Unexpected query: {sql}")
 
 
@@ -223,6 +244,148 @@ class SchemaInventoryTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "active database name"):
             collect_read_only_schema_inventory(conn)
+
+    def test_fk_contract_requires_safe_prerequisites_and_zero_orphans(self):
+        inventory = {
+            "tables": [{"table_name": "operaciones_servicio", "engine": "InnoDB"}, {"table_name": "ingresos", "engine": "InnoDB"}],
+            "columns": [
+                {"table_name": "operaciones_servicio", "column_name": "id_ingreso_generado", "data_type": "int", "column_type": "int", "is_nullable": "YES"},
+                {"table_name": "ingresos", "column_name": "id_ingreso", "data_type": "int", "column_type": "int", "is_nullable": "NO"},
+            ],
+            "indexes": [
+                {"table_name": "operaciones_servicio", "index_name": "idx_operaciones_servicio_ingreso_generado", "column_name": "id_ingreso_generado", "seq_in_index": 1},
+                {"table_name": "ingresos", "index_name": "PRIMARY", "column_name": "id_ingreso", "seq_in_index": 1},
+            ],
+            "foreign_keys": [],
+            "operaciones_servicio_ingreso_generado_orphans": {"available": True, "count": 0},
+        }
+        self.assertEqual(operaciones_servicio_ingreso_generado_fk_contract(inventory)["state"], "safe_to_add")
+        inventory["operaciones_servicio_ingreso_generado_orphans"]["count"] = 1
+        self.assertEqual(operaciones_servicio_ingreso_generado_fk_contract(inventory)["state"], "blocked_orphans")
+        inventory["indexes"] = inventory["indexes"][1:]
+        contract = operaciones_servicio_ingreso_generado_fk_contract(inventory)
+        self.assertEqual(contract["state"], "invalid")
+        self.assertIn("idx_operaciones_servicio_ingreso_generado index is missing", contract["issues"])
+
+    def test_fk_contract_accepts_restrictive_no_action_or_restrict_rules(self):
+        inventory = {
+            "tables": [{"table_name": "operaciones_servicio", "engine": "InnoDB"}, {"table_name": "ingresos", "engine": "InnoDB"}],
+            "columns": [
+                {"table_name": "operaciones_servicio", "column_name": "id_ingreso_generado", "data_type": "int", "column_type": "int", "is_nullable": "YES"},
+                {"table_name": "ingresos", "column_name": "id_ingreso", "data_type": "int", "column_type": "int", "is_nullable": "NO"},
+            ],
+            "indexes": [
+                {"table_name": "operaciones_servicio", "index_name": "idx_operaciones_servicio_ingreso_generado", "column_name": "id_ingreso_generado", "seq_in_index": 1},
+                {"table_name": "ingresos", "index_name": "PRIMARY", "column_name": "id_ingreso", "seq_in_index": 1},
+            ],
+            "operaciones_servicio_ingreso_generado_orphans": {"available": True, "count": 0},
+        }
+        for update_rule, delete_rule in (("NO ACTION", "NO ACTION"), ("RESTRICT", "RESTRICT")):
+            with self.subTest(update_rule=update_rule, delete_rule=delete_rule):
+                contract = operaciones_servicio_ingreso_generado_fk_contract({
+                    **inventory,
+                    "foreign_keys": [{
+                        "constraint_name": "fk_operaciones_servicio_ingreso_generado",
+                        "table_name": "operaciones_servicio",
+                        "column_name": "id_ingreso_generado",
+                        "referenced_table_name": "ingresos",
+                        "referenced_column_name": "id_ingreso",
+                        "update_rule": update_rule,
+                        "delete_rule": delete_rule,
+                    }],
+                })
+                self.assertEqual((contract["valid"], contract["state"]), (True, "valid"))
+
+    def test_fk_contract_rejects_non_restrictive_rules(self):
+        inventory = {
+            "tables": [{"table_name": "operaciones_servicio", "engine": "InnoDB"}, {"table_name": "ingresos", "engine": "InnoDB"}],
+            "columns": [
+                {"table_name": "operaciones_servicio", "column_name": "id_ingreso_generado", "data_type": "int", "column_type": "int", "is_nullable": "YES"},
+                {"table_name": "ingresos", "column_name": "id_ingreso", "data_type": "int", "column_type": "int", "is_nullable": "NO"},
+            ],
+            "indexes": [
+                {"table_name": "operaciones_servicio", "index_name": "idx_operaciones_servicio_ingreso_generado", "column_name": "id_ingreso_generado", "seq_in_index": 1},
+                {"table_name": "ingresos", "index_name": "PRIMARY", "column_name": "id_ingreso", "seq_in_index": 1},
+            ],
+            "operaciones_servicio_ingreso_generado_orphans": {"available": True, "count": 0},
+        }
+        for rule in ("CASCADE", "SET NULL", "SET DEFAULT"):
+            with self.subTest(rule=rule):
+                contract = operaciones_servicio_ingreso_generado_fk_contract({
+                    **inventory,
+                    "foreign_keys": [{
+                        "constraint_name": "fk_operaciones_servicio_ingreso_generado",
+                        "table_name": "operaciones_servicio",
+                        "column_name": "id_ingreso_generado",
+                        "referenced_table_name": "ingresos",
+                        "referenced_column_name": "id_ingreso",
+                        "update_rule": rule,
+                        "delete_rule": "RESTRICT",
+                    }],
+                })
+                self.assertFalse(contract["valid"])
+                self.assertEqual(contract["state"], "name_collision")
+
+    def test_fk_contract_requires_compatible_ints_innodb_and_unique_constraint_name(self):
+        base = {
+            "tables": [{"table_name": "operaciones_servicio", "engine": "InnoDB"}, {"table_name": "ingresos", "engine": "InnoDB"}],
+            "columns": [
+                {"table_name": "operaciones_servicio", "column_name": "id_ingreso_generado", "data_type": "int", "column_type": "int(11)", "is_nullable": "YES"},
+                {"table_name": "ingresos", "column_name": "id_ingreso", "data_type": "int", "column_type": "int", "is_nullable": "NO"},
+            ],
+            "indexes": [
+                {"table_name": "operaciones_servicio", "index_name": "idx_operaciones_servicio_ingreso_generado", "column_name": "id_ingreso_generado", "seq_in_index": 1},
+                {"table_name": "ingresos", "index_name": "PRIMARY", "column_name": "id_ingreso", "seq_in_index": 1},
+            ],
+            "foreign_keys": [],
+            "operaciones_servicio_ingreso_generado_orphans": {"available": True, "count": 0},
+        }
+        for mutation, state in (
+            (lambda value: value["columns"][1].update(column_type="int unsigned"), "invalid"),
+            (lambda value: value["columns"][0].update(data_type="bigint", column_type="bigint"), "invalid"),
+            (lambda value: value["tables"][0].update(engine="MyISAM"), "invalid"),
+            (lambda value: value["tables"][1].pop("engine"), "unknown"),
+            (lambda value: value.update(foreign_keys=[{"constraint_name": "fk_operaciones_servicio_ingreso_generado", "table_name": "other", "column_name": "other_id", "referenced_table_name": "ingresos", "referenced_column_name": "id_ingreso", "update_rule": "RESTRICT", "delete_rule": "RESTRICT"}]), "name_collision"),
+        ):
+            with self.subTest(mutation=mutation):
+                inventory = {**base, "tables": [dict(row) for row in base["tables"]], "columns": [dict(row) for row in base["columns"]]}
+                mutation(inventory)
+                contract = operaciones_servicio_ingreso_generado_fk_contract(inventory)
+                self.assertEqual(contract["state"], state)
+                self.assertFalse(contract["add_safe"])
+                self.assertFalse(contract["orphan_check_safe"])
+
+    def test_fk_contract_rejects_unsigned_child_and_parent(self):
+        inventory = {
+            "tables": [{"table_name": "operaciones_servicio", "engine": "InnoDB"}, {"table_name": "ingresos", "engine": "InnoDB"}],
+            "columns": [
+                {"table_name": "operaciones_servicio", "column_name": "id_ingreso_generado", "data_type": "int", "column_type": "int unsigned", "is_nullable": "YES"},
+                {"table_name": "ingresos", "column_name": "id_ingreso", "data_type": "int", "column_type": "int unsigned", "is_nullable": "NO"},
+            ],
+            "indexes": [
+                {"table_name": "operaciones_servicio", "index_name": "idx_operaciones_servicio_ingreso_generado", "column_name": "id_ingreso_generado", "seq_in_index": 1},
+                {"table_name": "ingresos", "index_name": "PRIMARY", "column_name": "id_ingreso", "seq_in_index": 1},
+            ],
+            "foreign_keys": [],
+            "operaciones_servicio_ingreso_generado_orphans": {"available": True, "count": 0},
+        }
+
+        contract = operaciones_servicio_ingreso_generado_fk_contract(inventory)
+
+        self.assertFalse(contract["valid"])
+        self.assertFalse(contract["add_safe"])
+        self.assertEqual(contract["state"], "invalid")
+        self.assertIn("id_ingreso_generado must be signed INT NULL", contract["issues"])
+        self.assertIn("ingresos.id_ingreso must be signed INT", contract["issues"])
+
+    def test_collects_orphans_only_after_fk_query_prerequisites_exist(self):
+        unavailable = FakeConnection()
+        collect_read_only_schema_inventory(unavailable)
+        self.assertFalse(any("FROM operaciones_servicio AS child" in statement for statement, _ in unavailable.statements))
+        available = FakeConnection(include_operaciones_fk_prerequisites=True, orphan_count=2)
+        inventory = collect_read_only_schema_inventory(available)
+        self.assertEqual(inventory["operaciones_servicio_ingreso_generado_orphans"], {"available": True, "count": 2})
+        self.assertTrue(any("FROM operaciones_servicio AS child" in statement for statement, _ in available.statements))
 
     def test_classifies_monthly_payment_method_widen_contract(self):
         base = {"tables": [{"table_name": "pagos_mensuales"}]}

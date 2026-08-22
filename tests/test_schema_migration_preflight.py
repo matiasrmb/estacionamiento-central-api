@@ -11,7 +11,7 @@ from app.db.schema_migration_preflight import (
     evaluate_schema_migration_preflight,
     main,
 )
-from app.db.schema_migration_runner import plan_schema_migrations
+from app.db.schema_migration_runner import MIGRATION_003_ID, MIGRATION_004_ID, plan_schema_migrations
 
 
 class FakeEngine:
@@ -86,6 +86,35 @@ class SchemaMigrationPreflightTests(unittest.TestCase):
         self.assertEqual(result["invalid_contract_migrations"], ["another"])
         self.assertEqual(_check_status(result, "migration_state_consistency"), "BLOCKED")
 
+    def test_surfaces_004_orphan_blocker(self):
+        plan = {
+            "database": "parking",
+            "schema_migrations": {"present": True},
+            "operaciones_servicio_ingreso_generado_fk": {"state": "blocked_orphans"},
+            "migrations": [{"id": "004_add_operaciones_servicio_ingreso_generado_fk", "status": "blocked_prerequisite"}],
+        }
+        result = evaluate_schema_migration_preflight(_inventory(["schema_migrations"]), plan)
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertEqual(result["orphan_blockers"], ["operaciones_servicio.id_ingreso_generado"])
+        self.assertEqual(_check_status(result, "operaciones_servicio_ingreso_generado_orphans"), "BLOCKED")
+
+    def test_recorded_004_with_no_action_fk_rules_is_preflight_ok(self):
+        inventory = _inventory(
+            ["schema_migrations", "tipos_lavado", "pagos_mensuales", "operaciones_servicio", "ingresos"],
+            migration_ids=[
+                "001_create_schema_migrations",
+                "002_create_tipos_lavado",
+                MIGRATION_003_ID,
+                MIGRATION_004_ID,
+            ],
+            operaciones_fk_rules=("NO ACTION", "NO ACTION"),
+        )
+        result = evaluate_schema_migration_preflight(inventory, plan_schema_migrations(inventory))
+
+        self.assertEqual(result["status"], "PREFLIGHT_OK")
+        self.assertEqual(result["invalid_contract_migrations"], [])
+        self.assertEqual(result["inconsistent_state_migrations"], [])
+
     def test_cli_refuses_without_dry_run(self):
         error = io.StringIO()
 
@@ -125,7 +154,7 @@ class SchemaMigrationPreflightTests(unittest.TestCase):
         collect_inventory.assert_called_once()
 
 
-def _inventory(tables, database="parking", migration_ids=None, migration_id_column=True):
+def _inventory(tables, database="parking", migration_ids=None, migration_id_column=True, operaciones_fk_rules=None):
     inventory = {
         "inventory_version": 1,
         "database": database,
@@ -144,6 +173,40 @@ def _inventory(tables, database="parking", migration_ids=None, migration_id_colu
             "available": True,
             "records": [{"migration_id": migration_id} for migration_id in migration_ids or []],
         }
+    if operaciones_fk_rules is not None:
+        update_rule, delete_rule = operaciones_fk_rules
+        inventory["tables"] = [
+            {**row, "engine": "InnoDB", "table_collation": "utf8mb4"}
+            if row["table_name"] in {"tipos_lavado", "pagos_mensuales", "operaciones_servicio", "ingresos"} else row
+            for row in inventory["tables"]
+        ]
+        inventory.setdefault("columns", []).extend([
+            {"table_name": "tipos_lavado", "column_name": "id_tipo_lavado", "column_type": "int", "column_key": "PRI", "is_nullable": "NO", "extra": "auto_increment"},
+            {"table_name": "tipos_lavado", "column_name": "codigo", "column_type": "varchar(50)", "column_key": "UNI", "is_nullable": "NO", "extra": ""},
+            {"table_name": "tipos_lavado", "column_name": "nombre", "column_type": "varchar(80)", "column_key": "", "is_nullable": "NO", "extra": ""},
+            {"table_name": "tipos_lavado", "column_name": "activo", "column_type": "tinyint(1)", "column_key": "", "is_nullable": "NO", "column_default": "1", "extra": ""},
+            {"table_name": "tipos_lavado", "column_name": "created_at", "column_type": "datetime", "column_key": "", "is_nullable": "NO", "column_default": "CURRENT_TIMESTAMP", "extra": ""},
+            {"table_name": "tipos_lavado", "column_name": "updated_at", "column_type": "datetime", "column_key": "", "is_nullable": "NO", "column_default": "CURRENT_TIMESTAMP", "extra": "on update CURRENT_TIMESTAMP"},
+            {"table_name": "operaciones_servicio", "column_name": "id_ingreso_generado", "data_type": "int", "column_type": "int", "is_nullable": "YES"},
+            {"table_name": "ingresos", "column_name": "id_ingreso", "data_type": "int", "column_type": "int", "is_nullable": "NO"},
+            {"table_name": "pagos_mensuales", "column_name": "metodo_pago", "data_type": "varchar", "column_type": "varchar(50)", "is_nullable": "YES", "column_default": None, "extra": "", "character_set_name": "utf8mb4", "collation_name": "utf8mb4"},
+        ])
+        inventory.setdefault("indexes", []).extend([
+            {"table_name": "tipos_lavado", "index_name": "PRIMARY", "column_name": "id_tipo_lavado", "seq_in_index": 1, "non_unique": 0},
+            {"table_name": "tipos_lavado", "index_name": "codigo", "column_name": "codigo", "seq_in_index": 1, "non_unique": 0},
+            {"table_name": "operaciones_servicio", "index_name": "idx_operaciones_servicio_ingreso_generado", "column_name": "id_ingreso_generado", "seq_in_index": 1},
+            {"table_name": "ingresos", "index_name": "PRIMARY", "column_name": "id_ingreso", "seq_in_index": 1},
+        ])
+        inventory["foreign_keys"] = [{
+            "constraint_name": "fk_operaciones_servicio_ingreso_generado",
+            "table_name": "operaciones_servicio",
+            "column_name": "id_ingreso_generado",
+            "referenced_table_name": "ingresos",
+            "referenced_column_name": "id_ingreso",
+            "update_rule": update_rule,
+            "delete_rule": delete_rule,
+        }]
+        inventory["operaciones_servicio_ingreso_generado_orphans"] = {"available": True, "count": 0}
     return inventory
 
 

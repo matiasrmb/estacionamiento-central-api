@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any, TYPE_CHECKING
@@ -75,6 +76,13 @@ _TIPOS_LAVADO_SEED_SQL = """
     WHERE codigo = :codigo
 """
 TIPOS_LAVADO_SEED_CODE = "lavado_general"
+_OPERACIONES_SERVICIO_INGRESO_ORPHANS_SQL = """
+    SELECT COUNT(*) AS orphan_count
+    FROM operaciones_servicio AS child
+    LEFT JOIN ingresos AS parent ON parent.id_ingreso = child.id_ingreso_generado
+    WHERE child.id_ingreso_generado IS NOT NULL
+      AND parent.id_ingreso IS NULL
+"""
 
 
 def collect_read_only_schema_inventory(conn: Connection) -> dict[str, Any]:
@@ -119,6 +127,18 @@ def collect_read_only_schema_inventory(conn: Connection) -> dict[str, Any]:
         tipos_lavado_seed = _read_rows(
             conn, _TIPOS_LAVADO_SEED_SQL, {"codigo": TIPOS_LAVADO_SEED_CODE}, ("codigo",)
         )
+    fk_contract = operaciones_servicio_ingreso_generado_fk_contract({
+        "tables": tables,
+        "columns": columns,
+        "indexes": indexes,
+        "foreign_keys": foreign_keys,
+    })
+    orphan_snapshot = {"available": False, "count": None}
+    if fk_contract["orphan_check_safe"]:
+        orphan_snapshot = {
+            "available": True,
+            "count": conn.execute(text(_OPERACIONES_SERVICIO_INGRESO_ORPHANS_SQL)).scalar(),
+        }
 
     return {
         "inventory_version": SCHEMA_INVENTORY_VERSION,
@@ -144,6 +164,7 @@ def collect_read_only_schema_inventory(conn: Connection) -> dict[str, Any]:
             "contract": tipos_contract,
             "records": tipos_lavado_seed,
         },
+        "operaciones_servicio_ingreso_generado_orphans": orphan_snapshot,
     }
 
 
@@ -282,6 +303,131 @@ def pagos_mensuales_metodo_pago_contract(inventory: dict[str, Any]) -> dict[str,
     if not issues:
         issues.append("metodo_pago column_type must be varchar(40) or varchar(50)")
     return {"valid": False, "widen_safe": False, "state": "invalid", "issues": issues}
+
+
+def operaciones_servicio_ingreso_generado_fk_contract(inventory: dict[str, Any]) -> dict[str, Any]:
+    """Validate the controlled FK or the prerequisites to add it safely."""
+    tables = _table_names(inventory)
+    columns = inventory.get("columns", [])
+    indexes = inventory.get("indexes", [])
+    foreign_keys = inventory.get("foreign_keys", [])
+    issues = []
+    child = _find_column(columns, "operaciones_servicio", "id_ingreso_generado")
+    parent = _find_column(columns, "ingresos", "id_ingreso")
+    child_engine = _table_engine(inventory, "operaciones_servicio")
+    parent_engine = _table_engine(inventory, "ingresos")
+    if "operaciones_servicio" not in tables:
+        issues.append("operaciones_servicio table is missing")
+    if "ingresos" not in tables:
+        issues.append("ingresos table is missing")
+    if child is None:
+        issues.append("id_ingreso_generado column is missing")
+    elif _int_signedness(child) is not False or str(child.get("is_nullable", "")).casefold() != "yes":
+        issues.append("id_ingreso_generado must be signed INT NULL")
+    child_signedness = _int_signedness(child) if child is not None else None
+    parent_signedness = _int_signedness(parent) if parent is not None else None
+    if parent is None:
+        issues.append("id_ingreso column is missing")
+    elif parent_signedness is not False:
+        issues.append("ingresos.id_ingreso must be signed INT")
+    engine_unknown = child_engine is None or parent_engine is None
+    if not engine_unknown:
+        if child_engine != "innodb":
+            issues.append("operaciones_servicio engine must be InnoDB")
+        if parent_engine != "innodb":
+            issues.append("ingresos engine must be InnoDB")
+    if not _has_single_column_index(indexes, "operaciones_servicio", "idx_operaciones_servicio_ingreso_generado", "id_ingreso_generado"):
+        issues.append("idx_operaciones_servicio_ingreso_generado index is missing")
+    if not _has_indexed_column(indexes, "ingresos", "id_ingreso"):
+        issues.append("ingresos.id_ingreso must be indexed")
+
+    named_constraint_fks = [
+        row for row in foreign_keys
+        if isinstance(row, dict)
+        and str(row.get("constraint_name", "")).casefold() == "fk_operaciones_servicio_ingreso_generado"
+    ]
+    matching_column_fks = [
+        row for row in foreign_keys
+        if isinstance(row, dict)
+        and str(row.get("table_name", "")).casefold() == "operaciones_servicio"
+        and str(row.get("column_name", "")).casefold() == "id_ingreso_generado"
+    ]
+    exact_fk = next((row for row in named_constraint_fks if _is_expected_fk(row)), None)
+    if named_constraint_fks and (len(named_constraint_fks) != 1 or exact_fk is None):
+        issues.append("fk_operaciones_servicio_ingreso_generado name is already used by a different foreign key")
+        return _fk_contract(False, False, "name_collision", issues, False)
+    if matching_column_fks:
+        if len(matching_column_fks) != 1 or exact_fk is None:
+            issues.append("id_ingreso_generado has an unexpected foreign key")
+        elif not _is_expected_fk(exact_fk):
+            issues.append("fk_operaciones_servicio_ingreso_generado has an unexpected target or rule")
+        elif not issues:
+            return _fk_contract(True, False, "valid", [], True)
+        return _fk_contract(False, False, "invalid", issues, False)
+    if issues:
+        return _fk_contract(False, False, "invalid", issues, False)
+    if engine_unknown:
+        return _fk_contract(False, False, "unknown", ["table engine is unavailable"], False)
+    orphan_snapshot = inventory.get("operaciones_servicio_ingreso_generado_orphans")
+    if not isinstance(orphan_snapshot, dict) or orphan_snapshot.get("available") is not True:
+        return _fk_contract(False, False, "unknown", ["orphan count is unavailable"], True)
+    if orphan_snapshot.get("count") != 0:
+        return _fk_contract(False, False, "blocked_orphans", ["orphan rows exist"], True)
+    return _fk_contract(False, True, "safe_to_add", [], True)
+
+
+def _table_names(inventory: dict[str, Any]) -> set[str]:
+    return {str(row.get("table_name", "")).casefold() for row in inventory.get("tables", []) if isinstance(row, dict)}
+
+
+def _find_column(columns: list[dict[str, Any]], table_name: str, column_name: str) -> dict[str, Any] | None:
+    return next((row for row in columns if isinstance(row, dict) and str(row.get("table_name", "")).casefold() == table_name and str(row.get("column_name", "")).casefold() == column_name), None)
+
+
+def _table_engine(inventory: dict[str, Any], table_name: str) -> str | None:
+    table = next((
+        row for row in inventory.get("tables", [])
+        if isinstance(row, dict) and str(row.get("table_name", "")).casefold() == table_name
+    ), None)
+    engine = str(table.get("engine") or "").casefold() if table else ""
+    return engine or None
+
+
+def _int_signedness(column: dict[str, Any]) -> bool | None:
+    if str(column.get("data_type", "")).casefold() != "int":
+        return None
+    column_type = " ".join(str(column.get("column_type", "")).casefold().split())
+    if not re.fullmatch(r"int(?:\(\d+\))?(?: unsigned)?", column_type):
+        return None
+    return column_type.endswith(" unsigned")
+
+
+def _is_expected_fk(row: dict[str, Any]) -> bool:
+    return (
+        str(row.get("table_name", "")).casefold() == "operaciones_servicio"
+        and str(row.get("column_name", "")).casefold() == "id_ingreso_generado"
+        and str(row.get("referenced_table_name", "")).casefold() == "ingresos"
+        and str(row.get("referenced_column_name", "")).casefold() == "id_ingreso"
+        and _is_restrictive_fk_rule(row.get("update_rule"))
+        and _is_restrictive_fk_rule(row.get("delete_rule"))
+    )
+
+
+def _is_restrictive_fk_rule(rule: Any) -> bool:
+    return str(rule or "").casefold() in {"restrict", "no action"}
+
+
+def _fk_contract(valid: bool, add_safe: bool, state: str, issues: list[str], orphan_check_safe: bool) -> dict[str, Any]:
+    return {"valid": valid, "add_safe": add_safe, "state": state, "issues": issues, "orphan_check_safe": orphan_check_safe}
+
+
+def _has_single_column_index(indexes: list[dict[str, Any]], table_name: str, index_name: str, column_name: str) -> bool:
+    matches = [row for row in indexes if isinstance(row, dict) and str(row.get("table_name", "")).casefold() == table_name and str(row.get("index_name", "")).casefold() == index_name]
+    return len(matches) == 1 and str(matches[0].get("column_name", "")).casefold() == column_name and str(matches[0].get("seq_in_index", "")) == "1"
+
+
+def _has_indexed_column(indexes: list[dict[str, Any]], table_name: str, column_name: str) -> bool:
+    return any(isinstance(row, dict) and str(row.get("table_name", "")).casefold() == table_name and str(row.get("column_name", "")).casefold() == column_name and str(row.get("seq_in_index", "")) == "1" for row in indexes)
 
 
 def _require_column(

@@ -67,7 +67,6 @@ Get-Content $envPath | ForEach-Object {
 }
 
 Log "ENV PRINTER_NAME=$env:PRINTER_NAME"
-Log "ENV ACROBAT_PATH=$env:ACROBAT_PATH"
 
 function Wait-SpoolerAndPrinter([string]$printerName, [int]$timeoutSeconds = 90) {
     Log "Preflight: esperando Spooler + impresora '$printerName' (timeout ${timeoutSeconds}s)..."

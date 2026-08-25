@@ -30,7 +30,7 @@ def create_print_job_pc_pdf_with_connection(
 
 def create_print_job_pc_pdf(tipo: str, id_ingreso: int, patente: str, payload: dict, idempotency_key: str) -> int:
     """
-    Crea job para impresión PC (PDF+Acrobat) en una transacción propia.
+    Crea un job de impresión PC para el Print Agent en una transacción propia.
 
     Los flujos que necesitan atomicidad con otra escritura deben usar
     create_print_job_pc_pdf_with_connection.

@@ -36,7 +36,6 @@ Get-Content $envPath | ForEach-Object {
 }
 
 Write-Host "ENV PRINTER_NAME =" $env:PRINTER_NAME
-Write-Host "ENV ACROBAT_PATH =" $env:ACROBAT_PATH
 
 if ([string]::IsNullOrWhiteSpace($env:PRINTER_NAME)) {
   throw "PRINTER_NAME está vacío. Edita .env y pon el nombre EXACTO de la impresora."

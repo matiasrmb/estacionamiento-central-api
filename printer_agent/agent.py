@@ -41,7 +41,6 @@ WORKDIR = _env_str("PRINT_WORKDIR", "print_out")
 AGENT_ID = _env_str("AGENT_ID", "PC-PRINT-AGENT-01")
 
 POLL_INTERVAL = _env_int("POLL_INTERVAL_SECONDS", 1)
-PRINT_SLEEP = _env_int("PRINT_SLEEP_SECONDS", 2)
 PRINT_TIMEOUT = _env_int("PRINT_TIMEOUT_SECONDS", 20)
 
 # Si un job queda IMPRIMIENDO por caída del agente, lo liberamos tras X segundos

@@ -40,6 +40,28 @@ function Get-LanIPv4Address {
   return $preferred.IPAddress
 }
 
+function Get-PublicApiBaseUrl {
+  param([AllowEmptyString()][string]$Value)
+
+  $candidate = $Value.Trim()
+  if ([string]::IsNullOrWhiteSpace($candidate)) {
+    return $null
+  }
+
+  $uri = $null
+  if (-not [System.Uri]::TryCreate($candidate, [System.UriKind]::Absolute, [ref]$uri) -or
+      $uri.Scheme -notin @("http", "https") -or
+      [string]::IsNullOrWhiteSpace($uri.Host) -or
+      $uri.UserInfo -or
+      $uri.Query -or
+      $uri.Fragment -or
+      $uri.AbsolutePath -ne "/api/v1") {
+    throw "PUBLIC_BASE_URL debe ser una URL absoluta http(s) con ruta exacta /api/v1, sin query, fragmento ni slash final. Ejemplo: https://api.estacionamiento.lan/api/v1"
+  }
+
+  return $uri.GetComponents([System.UriComponents]::SchemeAndServer, [System.UriFormat]::UriEscaped) + "/api/v1"
+}
+
 # 1) Activar entorno virtual
 $activate = Join-Path $PSScriptRoot ".venv\Scripts\Activate.ps1"
 if (-not (Test-Path $activate)) {
@@ -66,10 +88,14 @@ if (Test-Path $envFile) {
   Write-Host "No existe .env (ok)."
 }
 
-# 3) Detectar URL LAN y generar QR de conexión para la app mobile
+# 3) Resolver URL pública opcional o fallback LAN y generar QR para la app mobile
 $port = if ($env:API_PORT) { [int]$env:API_PORT } else { 8000 }
-$lanIp = Get-LanIPv4Address
-$apiBaseUrl = "http://$($lanIp):$($port)/api/v1"
+$apiBaseUrl = Get-PublicApiBaseUrl -Value $env:PUBLIC_BASE_URL
+$usingPublicBaseUrl = $null -ne $apiBaseUrl
+if (-not $usingPublicBaseUrl) {
+  $lanIp = Get-LanIPv4Address
+  $apiBaseUrl = "http://$($lanIp):$($port)/api/v1"
+}
 $qrPath = Join-Path $PSScriptRoot "connect_api_qr.png"
 
 Write-Host ""
@@ -77,9 +103,14 @@ Write-Host "==============================================="
 Write-Host " URL para conectar la app mobile:"
 Write-Host " $apiBaseUrl"
 Write-Host ""
-Write-Host " Si la Sunmi no puede escanear QR, ingresa manualmente:"
-Write-Host " IP:     $lanIp"
-Write-Host " Puerto: $port"
+if ($usingPublicBaseUrl) {
+  Write-Host " Si la Sunmi no puede escanear QR, ingresa esta URL completa manualmente:"
+  Write-Host " $apiBaseUrl"
+} else {
+  Write-Host " Si la Sunmi no puede escanear QR, ingresa manualmente:"
+  Write-Host " IP:     $lanIp"
+  Write-Host " Puerto: $port"
+}
 Write-Host "==============================================="
 Write-Host ""
 

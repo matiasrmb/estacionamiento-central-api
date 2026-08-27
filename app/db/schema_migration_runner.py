@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Sequence
 
 from sqlalchemy import text
@@ -187,8 +189,14 @@ def plan_schema_migrations(inventory: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def collect_dry_run_plan(engine: Any) -> dict[str, Any]:
-    return plan_schema_migrations(collect_read_only_schema_inventory_from_engine(engine))
+def collect_dry_run_plan(engine: Any, runtime_context: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Collect one read-only inventory and attach its canonical apply preflight."""
+    from app.db.schema_migration_preflight import evaluate_schema_migration_preflight
+
+    inventory = collect_read_only_schema_inventory_from_engine(engine)
+    plan = plan_schema_migrations(inventory)
+    plan["preflight"] = evaluate_schema_migration_preflight(inventory, plan, runtime_context)
+    return plan
 
 
 def apply_001_create_schema_migrations(engine: Any, **kwargs: Any) -> dict[str, Any]:
@@ -224,18 +232,33 @@ def apply_006_create_lavados_and_ingresos_en_lavado(engine: Any, **kwargs: Any) 
 def _apply(
     engine: Any, migration_id: str, *, backup_confirmed: bool, dev_database_confirmed: bool,
     expected_database: str | None = None,
+    profile: str | None = None,
+    environment: str | None = None,
+    backup_path: str | None = None,
+    preflight_sha256: str | None = None,
 ) -> dict[str, Any]:
     from app.db.schema_migration_preflight import evaluate_schema_migration_preflight
 
     inventory = collect_read_only_schema_inventory_from_engine(engine)
     plan = plan_schema_migrations(inventory)
     preflight = evaluate_schema_migration_preflight(inventory, plan, {
-        "apply_requested": True,
+        # Production applies compare this new read-only snapshot to the
+        # installer preflight before any write is permitted.
+        "apply_requested": False,
         "backup_confirmed": backup_confirmed,
         "dev_database_confirmed": dev_database_confirmed,
         "expected_database": expected_database,
+        "profile": profile,
+        "environment": environment,
     })
     migration = next(item for item in plan["migrations"] if item["id"] == migration_id)
+    if profile == "installer-production":
+        if not _production_apply_confirmed(
+            environment, backup_confirmed, backup_path, preflight_sha256, preflight,
+        ):
+            return _result(migration_id, "refused", [], ["Production confirmation requirements are not satisfied; no SQL was executed."], preflight)
+    elif not dev_database_confirmed:
+        return _result(migration_id, "refused", [], ["Development database confirmation is required; no SQL was executed."], preflight)
     if not expected_database or inventory.get("database") != expected_database:
         return _result(migration_id, "refused", [], ["Expected database does not match the active database; no SQL was executed."], preflight)
     if migration["status"] == "applied":
@@ -269,13 +292,13 @@ def _apply_001(engine: Any, status: str, preflight: dict[str, Any]) -> dict[str,
             conn.execute(text(MIGRATIONS[0].statements[0]))
             try:
                 conn.execute(text(MIGRATION_RECORD_SQL), {"migration_id": MIGRATION_001_ID})
-            except Exception as error:
+            except Exception:
                 return _result(
                     MIGRATION_001_ID, "failed_after_create", ["CREATE TABLE"],
-                    ["CREATE TABLE succeeded, but the migration record INSERT failed.", f"Retry will record migration 001: {error}"], preflight,
+                    ["CREATE TABLE succeeded, but the migration record INSERT failed.", "Retry will record migration 001 after a fresh inventory."], preflight,
                 )
-    except Exception as error:
-        return _result(MIGRATION_001_ID, "failed", [], [f"Migration 001 failed: {error}"], preflight)
+    except Exception:
+        return _result(MIGRATION_001_ID, "failed", [], ["Migration 001 failed; no connection details are reported."], preflight)
     return _result(MIGRATION_001_ID, "applied", ["CREATE TABLE", "INSERT"], [], preflight)
 
 
@@ -294,9 +317,9 @@ def _apply_002(engine: Any, status: str, table_names: set[str], preflight: dict[
             executed.append("INSERT seed")
             conn.execute(text(MIGRATION_RECORD_SQL), {"migration_id": MIGRATION_002_ID})
             executed.append("INSERT migration record")
-    except Exception as error:
+    except Exception:
         status = "failed_after_create" if executed == ["CREATE TABLE"] else "failed_after_seed" if "INSERT seed" in executed else "failed"
-        return _result(MIGRATION_002_ID, status, executed, [f"Migration 002 failed after {', '.join(executed) or 'no SQL'}: {error}"], preflight)
+        return _result(MIGRATION_002_ID, status, executed, ["Migration 002 failed; no connection details are reported."], preflight)
     return _result(MIGRATION_002_ID, "applied", executed, [], preflight)
 
 
@@ -312,9 +335,9 @@ def _apply_003(engine: Any, status: str, preflight: dict[str, Any]) -> dict[str,
             executed.append("ALTER TABLE")
             conn.execute(text(MIGRATION_RECORD_SQL), {"migration_id": MIGRATION_003_ID})
             executed.append("INSERT migration record")
-    except Exception as error:
+    except Exception:
         status = "failed_after_alter" if executed == ["ALTER TABLE"] else "failed"
-        return _result(MIGRATION_003_ID, status, executed, [f"Migration 003 failed: {error}"], preflight)
+        return _result(MIGRATION_003_ID, status, executed, ["Migration 003 failed; no connection details are reported."], preflight)
     return _result(MIGRATION_003_ID, "applied", executed, [], preflight)
 
 
@@ -329,16 +352,16 @@ def _apply_004(engine: Any, status: str, preflight: dict[str, Any]) -> dict[str,
             conn.execute(text(MIGRATIONS[3].statements[0]))
             executed.append("ALTER TABLE")
             conn.execute(text(MIGRATION_RECORD_SQL), {"migration_id": MIGRATION_004_ID})
-    except Exception as error:
+    except Exception:
         if executed:
             return _result(
                 MIGRATION_004_ID, "failed_after_alter", executed,
                 [
                     "ALTER TABLE succeeded, but the migration record INSERT failed; MySQL DDL may already be committed.",
-                    f"Retry may record migration 004 only if a fresh inventory sees the valid FK: {error}",
+                    "Retry may record migration 004 only if a fresh inventory sees the valid FK.",
                 ], preflight,
             )
-        return _result(MIGRATION_004_ID, "failed", [], [f"Migration 004 failed: {error}"], preflight)
+        return _result(MIGRATION_004_ID, "failed", [], ["Migration 004 failed; no connection details are reported."], preflight)
     return _result(MIGRATION_004_ID, "applied", ["ALTER TABLE", "INSERT migration record"], [], preflight)
 
 
@@ -353,16 +376,16 @@ def _apply_005(engine: Any, status: str, preflight: dict[str, Any]) -> dict[str,
             conn.execute(text(MIGRATIONS[4].statements[0]))
             executed.append("ALTER TABLE")
             conn.execute(text(MIGRATION_RECORD_SQL), {"migration_id": MIGRATION_005_ID})
-    except Exception as error:
+    except Exception:
         if executed:
             return _result(
                 MIGRATION_005_ID, "failed_after_alter", executed,
                 [
                     "ALTER TABLE succeeded, but the migration record INSERT failed; MySQL DDL may already be committed.",
-                    f"Retry may record migration 005 only if a fresh inventory sees the valid index and FK: {error}",
+                    "Retry may record migration 005 only if a fresh inventory sees the valid index and FK.",
                 ], preflight,
             )
-        return _result(MIGRATION_005_ID, "failed", [], [f"Migration 005 failed: {error}"], preflight)
+        return _result(MIGRATION_005_ID, "failed", [], ["Migration 005 failed; no connection details are reported."], preflight)
     return _result(MIGRATION_005_ID, "applied", ["ALTER TABLE", "INSERT migration record"], [], preflight)
 
 
@@ -379,10 +402,10 @@ def _apply_006(engine: Any, status: str, statements: list[str], preflight: dict[
                 executed.append("CREATE TABLE" if statement.startswith("CREATE TABLE") else "ALTER TABLE")
             conn.execute(text(MIGRATION_RECORD_SQL), {"migration_id": MIGRATION_006_ID})
             executed.append("INSERT migration record")
-    except Exception as error:
+    except Exception:
         if executed:
-            return _result(MIGRATION_006_ID, "failed_after_ddl", executed, ["DDL may already be committed; retry only after a fresh inventory validates the target contract.", f"Migration 006 failed: {error}"], preflight)
-        return _result(MIGRATION_006_ID, "failed", [], [f"Migration 006 failed: {error}"], preflight)
+            return _result(MIGRATION_006_ID, "failed_after_ddl", executed, ["DDL may already be committed; retry only after a fresh inventory validates the target contract.", "Migration 006 failed; no connection details are reported."], preflight)
+        return _result(MIGRATION_006_ID, "failed", [], ["Migration 006 failed; no connection details are reported."], preflight)
     return _result(MIGRATION_006_ID, "applied", executed, [], preflight)
 
 
@@ -390,14 +413,37 @@ def _record(engine: Any, migration_id: str, status: str, executed: list[str], pr
     try:
         with engine.begin() as conn:
             conn.execute(text(MIGRATION_RECORD_SQL), {"migration_id": migration_id})
-    except Exception as error:
-        return _result(migration_id, "failed", executed, [f"Migration record INSERT failed: {error}"], preflight)
+    except Exception:
+        return _result(migration_id, "failed", executed, ["Migration record INSERT failed; no connection details are reported."], preflight)
     statement_type = "INSERT" if migration_id == MIGRATION_001_ID else "INSERT migration record"
     return _result(migration_id, status, [*executed, statement_type], [], preflight)
 
 
 def _result(migration_id: str, status: str, executed: list[str], warnings: list[str], preflight: dict[str, Any]) -> dict[str, Any]:
     return {"migration_id": migration_id, "status": status, "executed_statements_count": len(executed), "executed_statement_types": executed, "warnings": warnings, "preflight": preflight}
+
+
+def _production_apply_confirmed(
+    environment: str | None,
+    backup_confirmed: bool,
+    backup_path: str | None,
+    preflight_sha256: str | None,
+    preflight: dict[str, Any],
+) -> bool:
+    return (
+        environment == "production"
+        and backup_confirmed
+        and _is_nonempty_backup(backup_path)
+        and bool(preflight_sha256)
+        and preflight_sha256 == preflight.get("canonical_sha256")
+    )
+
+
+def _is_nonempty_backup(backup_path: str | None) -> bool:
+    if not backup_path:
+        return False
+    path = Path(backup_path)
+    return path.is_file() and path.stat().st_size > 0
 
 
 def _migration_001_status(inventory: dict[str, Any], tables: set[str] | None, complete: bool) -> str:
@@ -587,7 +633,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--apply-005-add-operaciones-servicio-tipo-vehiculo-lavado-fk", action="store_true")
     parser.add_argument("--apply-006-create-lavados-and-ingresos-en-lavado", action="store_true")
     parser.add_argument("--confirm-dev-db", action="store_true")
+    parser.add_argument("--profile", choices=("installer-production",))
+    parser.add_argument("--environment")
     parser.add_argument("--backup-confirmed", action="store_true")
+    parser.add_argument("--backup-path")
+    parser.add_argument("--preflight-sha256")
     parser.add_argument("--expected-database")
     args = parser.parse_args(argv)
     apply_flags = [args.apply_001_create_schema_migrations, args.apply_002_create_tipos_lavado, args.apply_003_widen_pagos_mensuales_metodo_pago, args.apply_004_add_operaciones_servicio_ingreso_generado_fk, args.apply_005_add_operaciones_servicio_tipo_vehiculo_lavado_fk, args.apply_006_create_lavados_and_ingresos_en_lavado]
@@ -597,25 +647,85 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("refusing to run without --dry-run or --apply explicit migration flag")
     if any(apply_flags) and not args.expected_database:
         parser.error("--expected-database is required for apply")
-    if any(apply_flags) and not args.confirm_dev_db:
-        parser.error("--confirm-dev-db is required for apply")
+    installer_production = args.profile == "installer-production"
+    if any(apply_flags) and installer_production and args.confirm_dev_db:
+        parser.error("--confirm-dev-db cannot be used with --profile installer-production")
+    if any(apply_flags) and installer_production:
+        if args.environment != "production":
+            parser.error("--environment production is required with --profile installer-production")
+        if not args.backup_confirmed:
+            parser.error("--backup-confirmed is required for installer-production apply")
+        if not _is_nonempty_backup(args.backup_path):
+            parser.error("--backup-path must identify an existing non-empty backup file for installer-production apply")
+        if not args.preflight_sha256:
+            parser.error("--preflight-sha256 is required for installer-production apply")
+    elif any(apply_flags) and not args.confirm_dev_db:
+        parser.error("--confirm-dev-db is required for apply outside installer-production")
     if any(apply_flags) and not args.backup_confirmed:
         parser.error("--backup-confirmed is required for apply")
-    from app.db.database import engine
-    if args.dry_run:
-        result = collect_dry_run_plan(engine)
-    else:
-        apply = (
-            apply_001_create_schema_migrations if args.apply_001_create_schema_migrations
-            else apply_002_create_tipos_lavado if args.apply_002_create_tipos_lavado
-            else apply_003_widen_pagos_mensuales_metodo_pago if args.apply_003_widen_pagos_mensuales_metodo_pago
-            else apply_004_add_operaciones_servicio_ingreso_generado_fk if args.apply_004_add_operaciones_servicio_ingreso_generado_fk
-            else apply_005_add_operaciones_servicio_tipo_vehiculo_lavado_fk if args.apply_005_add_operaciones_servicio_tipo_vehiculo_lavado_fk
-            else apply_006_create_lavados_and_ingresos_en_lavado
-        )
-        result = apply(engine, backup_confirmed=args.backup_confirmed, dev_database_confirmed=args.confirm_dev_db, expected_database=args.expected_database)
-    print(json.dumps(result, indent=2, sort_keys=True))
+    try:
+        from app.db.database import engine
+        if args.dry_run:
+            result = collect_dry_run_plan(engine, {
+                "backup_confirmed": args.backup_confirmed,
+                "expected_database": args.expected_database,
+                "profile": args.profile,
+                "environment": args.environment,
+            })
+        else:
+            apply = (
+                apply_001_create_schema_migrations if args.apply_001_create_schema_migrations
+                else apply_002_create_tipos_lavado if args.apply_002_create_tipos_lavado
+                else apply_003_widen_pagos_mensuales_metodo_pago if args.apply_003_widen_pagos_mensuales_metodo_pago
+                else apply_004_add_operaciones_servicio_ingreso_generado_fk if args.apply_004_add_operaciones_servicio_ingreso_generado_fk
+                else apply_005_add_operaciones_servicio_tipo_vehiculo_lavado_fk if args.apply_005_add_operaciones_servicio_tipo_vehiculo_lavado_fk
+                else apply_006_create_lavados_and_ingresos_en_lavado
+            )
+            apply_kwargs = {
+                "backup_confirmed": args.backup_confirmed,
+                "dev_database_confirmed": args.confirm_dev_db,
+                "expected_database": args.expected_database,
+            }
+            if installer_production:
+                apply_kwargs.update({
+                    "profile": args.profile,
+                    "environment": args.environment,
+                    "backup_path": args.backup_path,
+                    "preflight_sha256": args.preflight_sha256,
+                })
+            result = apply(engine, **apply_kwargs)
+    except Exception:
+        print("Schema migration inventory could not be collected; no SQL was executed.", file=sys.stderr)
+        return 1
+    print(json.dumps(_safe_cli_output(result), indent=2, sort_keys=True))
     return 0 if args.dry_run or result.get("status") in SUCCESSFUL_APPLY_STATUSES else 1
+
+
+def _safe_cli_output(result: dict[str, Any]) -> dict[str, Any]:
+    """Avoid emitting planned SQL or driver exception details in executable output."""
+    if result.get("mode") != "dry_run":
+        return result
+    safe = {**result}
+    preflight = result.get("preflight")
+    if isinstance(preflight, dict):
+        safe["preflight"] = {
+            key: value for key, value in preflight.items() if key != "migration_plan"
+        }
+    safe["migrations"] = [
+        {
+            "id": migration["id"],
+            "description": migration["description"],
+            "status": migration["status"],
+            "planned_statement_types": [_statement_type(sql) for sql in migration["sql"]],
+            "will_execute": migration["will_execute"],
+        }
+        for migration in result.get("migrations", [])
+    ]
+    return safe
+
+
+def _statement_type(sql: str) -> str:
+    return sql.strip().split(maxsplit=2)[0].upper() if sql.strip() else "SQL"
 
 
 if __name__ == "__main__":

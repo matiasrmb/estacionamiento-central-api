@@ -1,6 +1,7 @@
 import io
 import json
 import sys
+import tempfile
 import types
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -226,7 +227,15 @@ class SchemaMigrationRunnerTests(unittest.TestCase):
         self.assertNotIn(MIGRATIONS[0].statements[0], connection.statements)
 
     def test_cli_prints_deterministic_json_for_dry_run(self):
+        from app.db.schema_migration_preflight import evaluate_schema_migration_preflight
+
         expected_plan = plan_schema_migrations(_inventory([]))
+        expected_plan["preflight"] = evaluate_schema_migration_preflight(_inventory([]), expected_plan, {
+            "backup_confirmed": False,
+            "expected_database": None,
+            "profile": None,
+            "environment": None,
+        })
         output = io.StringIO()
         fake_database = types.SimpleNamespace(engine=FakeEngine())
 
@@ -238,8 +247,163 @@ class SchemaMigrationRunnerTests(unittest.TestCase):
                 with redirect_stdout(output):
                     self.assertEqual(main(["--dry-run"]), 0)
 
-        self.assertEqual(output.getvalue(), json.dumps(expected_plan, indent=2, sort_keys=True) + "\n")
-        collect_plan.assert_called_once_with(fake_database.engine)
+        expected_output = {
+            **expected_plan,
+            "preflight": {
+                key: value
+                for key, value in expected_plan["preflight"].items()
+                if key != "migration_plan"
+            },
+            "migrations": [
+                {
+                    "id": migration["id"],
+                    "description": migration["description"],
+                    "status": migration["status"],
+                    "planned_statement_types": [sql.split(maxsplit=1)[0] for sql in migration["sql"]],
+                    "will_execute": migration["will_execute"],
+                }
+                for migration in expected_plan["migrations"]
+            ],
+        }
+        self.assertEqual(output.getvalue(), json.dumps(expected_output, indent=2, sort_keys=True) + "\n")
+        collect_plan.assert_called_once_with(fake_database.engine, {
+            "backup_confirmed": False,
+            "expected_database": None,
+            "profile": None,
+            "environment": None,
+        })
+
+    def test_cli_dry_run_emits_installer_preflight_hash_without_sql(self):
+        inventory = _inventory([])
+        output = io.StringIO()
+        fake_database = types.SimpleNamespace(engine=FakeEngine())
+        with patch.dict(sys.modules, {"app.db.database": fake_database}):
+            with patch("app.db.schema_migration_runner.collect_read_only_schema_inventory_from_engine", return_value=inventory):
+                with redirect_stdout(output):
+                    self.assertEqual(main([
+                        "--dry-run", "--profile", "installer-production", "--environment", "production",
+                        "--expected-database", "parking", "--backup-confirmed",
+                    ]), 0)
+
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["preflight"]["runtime_context"]["profile"], "installer-production")
+        self.assertEqual(result["preflight"]["runtime_context"]["environment"], "production")
+        self.assertRegex(result["preflight"]["canonical_sha256"], r"^[0-9a-f]{64}$")
+        self.assertNotIn("CREATE TABLE schema_migrations", output.getvalue())
+
+    def test_installer_production_rejects_dev_confirmation_before_database_import(self):
+        error = io.StringIO()
+
+        with patch.dict(sys.modules, {"app.db.database": None}):
+            with redirect_stderr(error):
+                with self.assertRaisesRegex(SystemExit, "2"):
+                    main([
+                        "--apply-001-create-schema-migrations", "--profile", "installer-production",
+                        "--environment", "production", "--expected-database", "parking",
+                        "--confirm-dev-db",
+                    ])
+
+        self.assertIn("cannot be used", error.getvalue())
+
+    def test_installer_production_requires_backup_and_preflight_before_database_import(self):
+        base = [
+            "--apply-001-create-schema-migrations", "--profile", "installer-production",
+            "--environment", "production", "--expected-database", "parking", "--backup-confirmed",
+        ]
+        error = io.StringIO()
+        with patch.dict(sys.modules, {"app.db.database": None}):
+            with redirect_stderr(error):
+                with self.assertRaisesRegex(SystemExit, "2"):
+                    main(base)
+        self.assertIn("--backup-path", error.getvalue())
+
+        with tempfile.TemporaryDirectory() as directory:
+            backup = Path(directory) / "backup.sql"
+            backup.write_text("backup", encoding="utf-8")
+            error = io.StringIO()
+            with patch.dict(sys.modules, {"app.db.database": None}):
+                with redirect_stderr(error):
+                    with self.assertRaisesRegex(SystemExit, "2"):
+                        main([*base, "--backup-path", str(backup)])
+        self.assertIn("--preflight-sha256", error.getvalue())
+
+    def test_installer_production_preflight_hash_mismatch_blocks_writes(self):
+        connection = ApplyConnection()
+        inventory = _inventory([])
+        with tempfile.TemporaryDirectory() as directory:
+            backup = Path(directory) / "backup.sql"
+            backup.write_text("backup", encoding="utf-8")
+            with patch("app.db.schema_migration_runner.collect_read_only_schema_inventory_from_engine", return_value=inventory):
+                result = apply_001_create_schema_migrations(
+                    FakeEngine(connection), backup_confirmed=True, dev_database_confirmed=False,
+                    expected_database="parking", profile="installer-production", environment="production",
+                    backup_path=str(backup), preflight_sha256="not-the-current-preflight",
+                )
+
+        self.assertEqual(result["status"], "refused")
+        self.assertEqual(connection.statements, [])
+
+    def test_installer_production_accepts_current_preflight_and_one_explicit_migration(self):
+        from app.db.schema_migration_preflight import evaluate_schema_migration_preflight
+
+        connection = ApplyConnection()
+        inventory = _inventory([])
+        preflight = evaluate_schema_migration_preflight(inventory, plan_schema_migrations(inventory), {
+            "backup_confirmed": True, "expected_database": "parking",
+            "profile": "installer-production", "environment": "production",
+        })
+        with tempfile.TemporaryDirectory() as directory:
+            backup = Path(directory) / "backup.sql"
+            backup.write_text("backup", encoding="utf-8")
+            with patch("app.db.schema_migration_runner.collect_read_only_schema_inventory_from_engine", return_value=inventory):
+                result = apply_001_create_schema_migrations(
+                    FakeEngine(connection), backup_confirmed=True, dev_database_confirmed=False,
+                    expected_database="parking", profile="installer-production", environment="production",
+                    backup_path=str(backup), preflight_sha256=preflight["canonical_sha256"],
+                )
+
+        self.assertEqual(result["status"], "applied")
+        self.assertEqual(result["executed_statement_types"], ["CREATE TABLE", "INSERT"])
+
+    def test_installer_production_rejects_changed_006_plan_before_writes(self):
+        from app.db.schema_migration_preflight import evaluate_schema_migration_preflight
+
+        connection = ApplyConnection()
+        approved_inventory = _inventory_006(lavados=None, en_lavado=False)
+        current_inventory = _inventory_006(lavados="partial", en_lavado=False)
+        preflight = evaluate_schema_migration_preflight(
+            approved_inventory, plan_schema_migrations(approved_inventory), {
+                "backup_confirmed": True, "expected_database": "parking",
+                "profile": "installer-production", "environment": "production",
+            },
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            backup = Path(directory) / "backup.sql"
+            backup.write_text("backup", encoding="utf-8")
+            with patch("app.db.schema_migration_runner.collect_read_only_schema_inventory_from_engine", return_value=current_inventory):
+                result = apply_006_create_lavados_and_ingresos_en_lavado(
+                    FakeEngine(connection), backup_confirmed=True, dev_database_confirmed=False,
+                    expected_database="parking", profile="installer-production", environment="production",
+                    backup_path=str(backup), preflight_sha256=preflight["canonical_sha256"],
+                )
+
+        self.assertEqual(result["status"], "refused")
+        self.assertEqual(connection.statements, [])
+
+    def test_cli_sanitizes_inventory_collection_failure(self):
+        error = io.StringIO()
+        fake_database = types.SimpleNamespace(engine=FakeEngine())
+        failure = RuntimeError("mysql+pymysql://user:password@db-host:3306/parking")
+
+        with patch.dict(sys.modules, {"app.db.database": fake_database}):
+            with patch("app.db.schema_migration_runner.collect_dry_run_plan", side_effect=failure):
+                with redirect_stderr(error):
+                    self.assertEqual(main(["--dry-run"]), 1)
+
+        self.assertIn("inventory could not be collected", error.getvalue())
+        self.assertNotIn("mysql+pymysql", error.getvalue())
+        self.assertNotIn("db-host", error.getvalue())
+        self.assertNotIn("password", error.getvalue())
 
     def test_apply_refuses_without_required_confirmations(self):
         connection = ApplyConnection()

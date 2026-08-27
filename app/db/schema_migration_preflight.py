@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import sys
 from typing import Any, Sequence
 
 from app.db.schema_inventory import collect_read_only_schema_inventory_from_engine
@@ -36,6 +38,8 @@ def evaluate_schema_migration_preflight(
     expected_database = str(expected_database_value) if expected_database_value else None
     environment_value = context.get("environment")
     environment = str(environment_value) if environment_value is not None else None
+    profile_value = context.get("profile")
+    profile = str(profile_value) if profile_value is not None else None
     inventory_present = _schema_migrations_present(inventory)
     plan_present = _schema_migrations_present(plan)
     pending_migrations = sorted(
@@ -136,7 +140,7 @@ def evaluate_schema_migration_preflight(
 
     has_failures = any(check["status"] == "BLOCKED" for check in statuses)
     status = "BLOCKED" if has_failures else "READY_FOR_MANUAL_REVIEW" if pending_migrations else "PREFLIGHT_OK"
-    return {
+    result = {
         "preflight_version": SCHEMA_MIGRATION_PREFLIGHT_VERSION,
         "mode": "apply" if apply_requested else "dry_run",
         "status": status,
@@ -146,6 +150,7 @@ def evaluate_schema_migration_preflight(
             "dev_database_confirmed": dev_database_confirmed,
             "expected_database": expected_database,
             "environment": environment,
+            "profile": profile,
         },
         "schema_migrations": {
             "inventory_present": inventory_present,
@@ -159,6 +164,7 @@ def evaluate_schema_migration_preflight(
         "invalid_contract_migrations": invalid_contract_migrations,
         "blocked_migrations": blocked_migrations,
         "inconsistent_state_migrations": inconsistent_state_migrations,
+        "migration_plan": _canonical_migration_plan(plan),
         "orphan_blockers": [
             *(["operaciones_servicio.id_ingreso_generado"] if orphan_blocked else []),
             *(["operaciones_servicio.id_tipo_vehiculo_lavado"] if tipo_vehiculo_lavado_orphan_blocked else []),
@@ -172,6 +178,44 @@ def evaluate_schema_migration_preflight(
         "checks": statuses,
         "future_apply_checklist": list(FUTURE_APPLY_CHECKLIST),
     }
+    result["canonical_sha256"] = canonical_preflight_sha256(result)
+    return result
+
+
+def canonical_preflight_sha256(preflight: dict[str, Any]) -> str:
+    """Hash the read-only schema state, planned SQL, and target identity for apply."""
+    runtime_context = preflight.get("runtime_context", {})
+    payload = {
+        "preflight_version": preflight.get("preflight_version"),
+        "database": preflight.get("database"),
+        "profile": runtime_context.get("profile") if isinstance(runtime_context, dict) else None,
+        "environment": runtime_context.get("environment") if isinstance(runtime_context, dict) else None,
+        "expected_database": runtime_context.get("expected_database") if isinstance(runtime_context, dict) else None,
+        "schema_migrations": preflight.get("schema_migrations"),
+        "pending_migrations": preflight.get("pending_migrations"),
+        "unknown_migrations": preflight.get("unknown_migrations"),
+        "invalid_contract_migrations": preflight.get("invalid_contract_migrations"),
+        "blocked_migrations": preflight.get("blocked_migrations"),
+        "inconsistent_state_migrations": preflight.get("inconsistent_state_migrations"),
+        "migration_plan": preflight.get("migration_plan"),
+        "orphan_blockers": preflight.get("orphan_blockers"),
+    }
+    canonical_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+
+
+def _canonical_migration_plan(plan: dict[str, Any]) -> list[dict[str, Any]]:
+    """Keep the exact generated statements that determine a later apply."""
+    migrations = [
+        {
+            "id": str(migration.get("id")),
+            "status": migration.get("status"),
+            "planned_sql": list(migration.get("sql", [])),
+        }
+        for migration in plan.get("migrations", [])
+        if isinstance(migration, dict)
+    ]
+    return sorted(migrations, key=lambda migration: migration["id"])
 
 
 def collect_dry_run_preflight(engine: Any, runtime_context: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -220,20 +264,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true", help="collect inventory and print read-only preflight findings")
     parser.add_argument("--backup-confirmed", action="store_true", help="record backup confirmation for future apply review")
     parser.add_argument("--environment", help="record the target environment for future apply review")
+    parser.add_argument("--profile", help="record the execution profile for future apply review")
+    parser.add_argument("--expected-database", help="record the target database for future apply review")
     args = parser.parse_args(argv)
     if not args.dry_run:
         parser.error("refusing to run without --dry-run; apply mode is not implemented")
 
-    from app.db.database import engine
+    try:
+        from app.db.database import engine
 
-    print(json.dumps(
-        collect_dry_run_preflight(engine, {
+        result = collect_dry_run_preflight(engine, {
             "backup_confirmed": args.backup_confirmed,
             "environment": args.environment,
-        }),
-        indent=2,
-        sort_keys=True,
-    ))
+            "profile": args.profile,
+            "expected_database": args.expected_database,
+        })
+    except Exception:
+        print("Schema migration inventory could not be collected; no SQL was executed.", file=sys.stderr)
+        return 1
+    print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 
 

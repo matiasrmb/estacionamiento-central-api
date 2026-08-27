@@ -1,5 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from PyInstaller.building.api import MERGE
 from PyInstaller.utils.hooks import collect_submodules
 
 
@@ -43,7 +44,23 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
+schema_migrations = Analysis(
+    ["schema_migrations_main.py"],
+    pathex=[],
+    binaries=[],
+    datas=[],
+    hiddenimports=hiddenimports,
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=["tests", "printer_agent", "passlib.tests"],
+    noarchive=False,
+    optimize=0,
+)
+MERGE((a, "EstacionamientoCentralAPI", "."), (schema_migrations, "EstacionamientoCentralSchemaMigrations", "."))
+
 pyz = PYZ(a.pure)
+schema_migrations_pyz = PYZ(schema_migrations.pure)
 
 exe = EXE(
     pyz,
@@ -62,8 +79,27 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
 )
+schema_migrations_exe = EXE(
+    schema_migrations_pyz,
+    schema_migrations.dependencies,
+    schema_migrations.scripts,
+    [],
+    exclude_binaries=True,
+    name="EstacionamientoCentralSchemaMigrations",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    console=True,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+)
 coll = COLLECT(
     exe,
+    schema_migrations_exe,
     a.binaries,
     a.datas,
     strip=False,

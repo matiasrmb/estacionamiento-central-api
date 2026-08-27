@@ -3,15 +3,17 @@ import json
 import sys
 import types
 import unittest
+from copy import deepcopy
 from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import patch
 
 from app.db.schema_migration_preflight import (
+    canonical_preflight_sha256,
     collect_dry_run_preflight,
     evaluate_schema_migration_preflight,
     main,
 )
-from app.db.schema_migration_runner import MIGRATION_003_ID, MIGRATION_004_ID, plan_schema_migrations
+from app.db.schema_migration_runner import MIGRATION_003_ID, MIGRATION_004_ID, MIGRATION_006_ID, plan_schema_migrations
 
 
 class FakeEngine:
@@ -176,6 +178,67 @@ class SchemaMigrationPreflightTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "BLOCKED")
         collect_inventory.assert_called_once()
+
+    def test_canonical_hash_is_deterministic_and_binds_installer_target(self):
+        inventory = _inventory([])
+        plan = _plan([])
+        production = evaluate_schema_migration_preflight(inventory, plan, {
+            "profile": "installer-production", "environment": "production",
+            "expected_database": "parking", "backup_confirmed": True,
+        })
+        repeated = evaluate_schema_migration_preflight(inventory, plan, {
+            "profile": "installer-production", "environment": "production",
+            "expected_database": "parking", "backup_confirmed": False,
+        })
+        different_environment = evaluate_schema_migration_preflight(inventory, plan, {
+            "profile": "installer-production", "environment": "staging",
+            "expected_database": "parking", "backup_confirmed": True,
+        })
+
+        self.assertEqual(production["canonical_sha256"], repeated["canonical_sha256"])
+        self.assertNotEqual(production["canonical_sha256"], different_environment["canonical_sha256"])
+        self.assertEqual(production["canonical_sha256"], canonical_preflight_sha256(production))
+        self.assertEqual(production["runtime_context"]["profile"], "installer-production")
+
+    def test_canonical_hash_changes_when_006_planned_sql_changes(self):
+        inventory = _inventory([])
+        plan = _plan([])
+        changed_plan = deepcopy(plan)
+        migration = next(item for item in changed_plan["migrations"] if item["id"] == MIGRATION_006_ID)
+        migration["sql"] = ["ALTER TABLE lavados ADD COLUMN review_marker INT NULL"]
+
+        original = evaluate_schema_migration_preflight(inventory, plan)
+        changed = evaluate_schema_migration_preflight(inventory, changed_plan)
+
+        self.assertNotEqual(original["canonical_sha256"], changed["canonical_sha256"])
+        self.assertEqual(
+            changed["migration_plan"][-1],
+            {"id": MIGRATION_006_ID, "status": "blocked_prerequisite", "planned_sql": migration["sql"]},
+        )
+
+    def test_canonical_hash_changes_when_expected_database_changes(self):
+        inventory = _inventory([])
+        plan = _plan([])
+
+        parking = evaluate_schema_migration_preflight(inventory, plan, {"expected_database": "parking"})
+        other = evaluate_schema_migration_preflight(inventory, plan, {"expected_database": "other"})
+
+        self.assertNotEqual(parking["canonical_sha256"], other["canonical_sha256"])
+
+    def test_cli_sanitizes_inventory_collection_failure(self):
+        error = io.StringIO()
+        fake_database = types.SimpleNamespace(engine=FakeEngine())
+        failure = RuntimeError("mysql+pymysql://user:password@db-host:3306/parking")
+
+        with patch.dict(sys.modules, {"app.db.database": fake_database}):
+            with patch("app.db.schema_migration_preflight.collect_read_only_schema_inventory_from_engine", side_effect=failure):
+                with redirect_stderr(error):
+                    self.assertEqual(main(["--dry-run"]), 1)
+
+        self.assertIn("inventory could not be collected", error.getvalue())
+        self.assertNotIn("mysql+pymysql", error.getvalue())
+        self.assertNotIn("db-host", error.getvalue())
+        self.assertNotIn("password", error.getvalue())
 
 
 def _inventory(tables, database="parking", migration_ids=None, migration_id_column=True, operaciones_fk_rules=None):

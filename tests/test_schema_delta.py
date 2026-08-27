@@ -60,7 +60,23 @@ class SchemaDeltaTests(unittest.TestCase):
         self.assertEqual(findings["tables"]["extra"], ["schema_migrations"])
         self.assertEqual(findings["foreign_keys"]["operaciones_servicio"]["missing"], [])
         self.assertTrue(findings["columns"]["pagos_mensuales.metodo_pago"]["matches_expected"])
+        self.assertTrue(findings["columns"]["ingresos.en_lavado"]["matches_expected"])
         self.assertEqual(findings["config"]["noches"]["recommendation"], "preserve_existing_values")
+
+    def test_rejects_en_lavado_with_correct_type_but_wrong_nullability_or_default(self):
+        for overrides in ({"is_nullable": "NO"}, {"column_default": None}):
+            with self.subTest(overrides=overrides):
+                inventory = _inventory(
+                    tables=DESKTOP_BASELINE_TABLES,
+                    metodo_pago_type="varchar(50)",
+                    foreign_keys=[],
+                    noches_values=[],
+                )
+                next(column for column in inventory["columns"] if column["column_name"] == "en_lavado").update(overrides)
+
+                findings = find_schema_deltas(inventory)
+
+                self.assertFalse(findings["columns"]["ingresos.en_lavado"]["matches_expected"])
 
     def test_output_is_deterministic_for_equivalent_unordered_inventory(self):
         ordered = _inventory(
@@ -121,6 +137,13 @@ def _inventory(*, tables, metodo_pago_type, foreign_keys, noches_values, config_
             "column_name": "metodo_pago",
             "column_type": metodo_pago_type,
         })
+    columns.append({
+        "table_name": "ingresos",
+        "column_name": "en_lavado",
+        "column_type": "tinyint(1)",
+        "is_nullable": "YES",
+        "column_default": "0",
+    })
     return {
         "inventory_version": 1,
         "database": "parking",

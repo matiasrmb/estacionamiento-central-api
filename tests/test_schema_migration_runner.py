@@ -15,11 +15,13 @@ from app.db.schema_migration_runner import (
     MIGRATION_003_ID,
     MIGRATION_004_ID,
     MIGRATION_005_ID,
+    MIGRATION_006_ID,
     apply_001_create_schema_migrations,
     apply_002_create_tipos_lavado,
     apply_003_widen_pagos_mensuales_metodo_pago,
     apply_004_add_operaciones_servicio_ingreso_generado_fk,
     apply_005_add_operaciones_servicio_tipo_vehiculo_lavado_fk,
+    apply_006_create_lavados_and_ingresos_en_lavado,
     collect_dry_run_plan,
     main,
     plan_schema_migrations,
@@ -107,6 +109,7 @@ class SchemaMigrationRunnerTests(unittest.TestCase):
             "003_widen_pagos_mensuales_metodo_pago",
             "004_add_operaciones_servicio_ingreso_generado_fk",
             "005_add_operaciones_servicio_tipo_vehiculo_lavado_fk",
+            "006_create_lavados_and_ingresos_en_lavado",
         ))
         self.assertEqual(
             [migration.migration_id for migration in MIGRATIONS],
@@ -1087,6 +1090,82 @@ class SchemaMigrationRunnerTests(unittest.TestCase):
             with self.subTest(status=status):
                 self._assert_cli_apply_exit_code({"status": status}, 0)
 
+    def test_006_create_repair_noop_legacy_and_historical_prefix(self):
+        fresh = _inventory_006()
+        plan = plan_schema_migrations(fresh)
+        self.assertEqual(plan["migrations"][5]["status"], "pending")
+        self.assertIn("CREATE TABLE lavados", plan["migrations"][5]["sql"][0])
+        self.assertIn("ALTER TABLE ingresos ADD COLUMN en_lavado TINYINT(1) DEFAULT 0", plan["migrations"][5]["sql"])
+        connection = ApplyConnection()
+        with patch("app.db.schema_migration_runner.collect_read_only_schema_inventory_from_engine", return_value=fresh):
+            result = apply_006_create_lavados_and_ingresos_en_lavado(FakeEngine(connection), backup_confirmed=True, dev_database_confirmed=True, expected_database="parking")
+        self.assertEqual(result["status"], "applied")
+        self.assertEqual(result["executed_statement_types"], ["CREATE TABLE", "ALTER TABLE", "INSERT migration record"])
+
+        complete = _inventory_006(lavados="complete", en_lavado=True, migration_ids=[*_migration_006_prerequisites(), "006_cobros_noches"])
+        self.assertEqual(plan_schema_migrations(complete)["migrations"][5]["status"], "repair_required")
+        repair = ApplyConnection()
+        with patch("app.db.schema_migration_runner.collect_read_only_schema_inventory_from_engine", return_value=complete):
+            result = apply_006_create_lavados_and_ingresos_en_lavado(FakeEngine(repair), backup_confirmed=True, dev_database_confirmed=True, expected_database="parking")
+        self.assertEqual(result["status"], "repaired")
+        self.assertEqual(repair.statements, [(MIGRATION_001_RECORD_SQL, {"migration_id": MIGRATION_006_ID})])
+
+        registered = _inventory_006(lavados="complete", en_lavado=True, migration_ids=[*_migration_006_prerequisites(), MIGRATION_006_ID])
+        self.assertEqual(plan_schema_migrations(registered)["migrations"][5]["status"], "applied")
+
+        legacy = _inventory_006(lavados="legacy", en_lavado=True)
+        self.assertEqual(plan_schema_migrations(legacy)["migrations"][5]["status"], "pending")
+        self.assertIn("ADD COLUMN id_tipo_vehiculo_lavado INT NULL", plan_schema_migrations(legacy)["migrations"][5]["sql"][0])
+
+    def test_006_refuses_orphans_divergent_foreign_keys_and_engine_without_sql(self):
+        for override in ("orphans", "wrong_fk", "additional_wrong_fk", "engine", "name_collision"):
+            with self.subTest(override=override):
+                inventory = _inventory_006(lavados="complete", en_lavado=True)
+                if override == "orphans":
+                    inventory["foreign_keys"] = [row for row in inventory["foreign_keys"] if row["table_name"] != "lavados" or row["column_name"] != "id_ingreso"]
+                    inventory["lavados_orphans"]["ingreso"]["count"] = 1
+                elif override == "wrong_fk":
+                    next(row for row in inventory["foreign_keys"] if row["table_name"] == "lavados" and row["column_name"] == "id_ingreso")["referenced_table_name"] = "other"
+                elif override == "additional_wrong_fk":
+                    inventory["foreign_keys"].append({"constraint_name": "generated_wrong_ingreso", "table_name": "lavados", "column_name": "id_ingreso", "referenced_table_name": "other", "referenced_column_name": "id", "update_rule": "RESTRICT", "delete_rule": "RESTRICT"})
+                elif override == "name_collision":
+                    inventory["foreign_keys"].append({"constraint_name": "fk_lavados_ingreso", "table_name": "other", "column_name": "other_id", "referenced_table_name": "other_parent", "referenced_column_name": "id", "update_rule": "RESTRICT", "delete_rule": "RESTRICT"})
+                else:
+                    next(row for row in inventory["tables"] if row["table_name"] == "lavados")["engine"] = "MyISAM"
+                plan = plan_schema_migrations(inventory)
+                self.assertEqual(plan["migrations"][5]["status"], "invalid_contract")
+                self.assertEqual(plan["migrations"][5]["sql"], [])
+                connection = ApplyConnection()
+                with patch("app.db.schema_migration_runner.collect_read_only_schema_inventory_from_engine", return_value=inventory):
+                    result = apply_006_create_lavados_and_ingresos_en_lavado(FakeEngine(connection), backup_confirmed=True, dev_database_confirmed=True, expected_database="parking")
+                self.assertIn(result["status"], {"refused", "invalid_contract"})
+                self.assertEqual(connection.statements, [])
+
+    def test_006_legacy_refuses_external_vehicle_type_fk_name_collision_without_sql(self):
+        inventory = _inventory_006(lavados="legacy", en_lavado=True)
+        inventory["foreign_keys"].append({
+            "constraint_name": "fk_lavados_tipo_vehiculo_lavado",
+            "table_name": "external_child",
+            "column_name": "external_parent_id",
+            "referenced_table_name": "external_parent",
+            "referenced_column_name": "id",
+            "update_rule": "RESTRICT",
+            "delete_rule": "RESTRICT",
+        })
+
+        plan = plan_schema_migrations(inventory)
+
+        self.assertEqual(plan["migrations"][5]["status"], "invalid_contract")
+        self.assertEqual(plan["migrations"][5]["sql"], [])
+        connection = ApplyConnection()
+        with patch("app.db.schema_migration_runner.collect_read_only_schema_inventory_from_engine", return_value=inventory):
+            result = apply_006_create_lavados_and_ingresos_en_lavado(
+                FakeEngine(connection), backup_confirmed=True, dev_database_confirmed=True, expected_database="parking"
+            )
+        self.assertEqual(result["status"], "invalid_contract")
+        self.assertEqual(result["executed_statement_types"], [])
+        self.assertEqual(connection.statements, [])
+
     def _assert_cli_apply_exit_code(self, result, expected_exit_code):
         output = io.StringIO()
         fake_database = types.SimpleNamespace(engine=FakeEngine())
@@ -1227,6 +1306,47 @@ def _inventory(
                 "referenced_column_name": "id_tipo_vehiculo_lavado", "update_rule": "CASCADE" if tipo_vehiculo_lavado_fk_state == "wrong_rules" else update_rule, "delete_rule": delete_rule,
             })
         inventory["operaciones_servicio_tipo_vehiculo_lavado_orphans"] = {"available": True, "count": tipo_vehiculo_lavado_orphans}
+    return inventory
+
+
+def _migration_006_prerequisites():
+    return ["001_create_schema_migrations", "002_create_tipos_lavado", MIGRATION_003_ID, MIGRATION_004_ID, MIGRATION_005_ID]
+
+
+def _inventory_006(*, lavados=None, en_lavado=False, migration_ids=None):
+    inventory = _inventory(
+        ["schema_migrations", "tipos_lavado", "pagos_mensuales", "operaciones_servicio", "ingresos", "tipos_vehiculo_lavado", "vehiculos", *( ["lavados"] if lavados else [])],
+        migration_ids=_migration_006_prerequisites() if migration_ids is None else migration_ids,
+        metodo_pago_type="varchar(50)", operaciones_fk_state="valid", tipo_vehiculo_lavado_fk_state="valid",
+    )
+    vehiculos = next(row for row in inventory["tables"] if row["table_name"] == "vehiculos")
+    vehiculos["engine"] = "InnoDB"
+    inventory["columns"].append({"table_name": "vehiculos", "column_name": "id_vehiculo", "data_type": "int", "column_type": "int", "is_nullable": "NO", "column_key": "PRI", "extra": "auto_increment", "column_default": None})
+    inventory["indexes"].append({"table_name": "vehiculos", "index_name": "PRIMARY", "column_name": "id_vehiculo", "seq_in_index": 1, "non_unique": 0})
+    if en_lavado:
+        inventory["columns"].append({"table_name": "ingresos", "column_name": "en_lavado", "data_type": "tinyint", "column_type": "tinyint(1)", "is_nullable": "YES", "column_default": "0", "extra": ""})
+    inventory["lavados_orphans"] = {key: {"available": True, "count": 0} for key in ("ingreso", "vehiculo", "tipo_vehiculo_lavado")}
+    if lavados:
+        next(row for row in inventory["tables"] if row["table_name"] == "lavados")["engine"] = "InnoDB"
+        columns = [
+            ("id_lavado", "int", "NO", None, "PRI", "auto_increment"), ("id_ingreso", "int", "NO", None, "", ""),
+            ("id_vehiculo", "int", "NO", None, "", ""), ("patente", "varchar(10)", "NO", None, "", ""),
+            ("categoria_lavado", "varchar(50)", "NO", None, "", ""), ("valor_lavado", "int", "NO", None, "", ""),
+            ("fecha_hora_inicio", "datetime", "NO", None, "", ""), ("fecha_hora_fin", "datetime", "YES", None, "", ""),
+            ("usuario_inicio", "varchar(50)", "NO", None, "", ""), ("usuario_fin", "varchar(50)", "YES", None, "", ""), ("estado", "enum('activo','finalizado')", "NO", "activo", "", ""),
+        ]
+        if lavados == "complete":
+            columns[6:6] = [("id_tipo_vehiculo_lavado", "int", "YES", None, "", ""), ("tipo_vehiculo_lavado_snapshot", "varchar(80)", "YES", None, "", "")]
+        inventory["columns"].extend({"table_name": "lavados", "column_name": name, "data_type": column_type.split("(", 1)[0], "column_type": column_type, "is_nullable": nullable, "column_default": default, "column_key": key, "extra": extra} for name, column_type, nullable, default, key, extra in columns)
+        inventory["indexes"].append({"table_name": "lavados", "index_name": "PRIMARY", "column_name": "id_lavado", "seq_in_index": 1, "non_unique": 0})
+        foreign_keys = [
+            ("ingreso", "id_ingreso", "ingresos", "id_ingreso"),
+            ("vehiculo", "id_vehiculo", "vehiculos", "id_vehiculo"),
+        ]
+        if lavados == "complete":
+            foreign_keys.append(("tipo_vehiculo_lavado", "id_tipo_vehiculo_lavado", "tipos_vehiculo_lavado", "id_tipo_vehiculo_lavado"))
+        for suffix, child, parent_table, parent in foreign_keys:
+            inventory.setdefault("foreign_keys", []).append({"table_name": "lavados", "column_name": child, "constraint_name": f"generated_{suffix}", "referenced_table_name": parent_table, "referenced_column_name": parent, "update_rule": "RESTRICT", "delete_rule": "RESTRICT"})
     return inventory
 
 

@@ -70,6 +70,12 @@ def evaluate_schema_migration_preflight(
         isinstance(tipo_vehiculo_lavado_fk_contract, dict)
         and tipo_vehiculo_lavado_fk_contract.get("state") == "blocked_orphans"
     )
+    lavados_contract = plan.get("lavados", {})
+    lavados_orphan_blockers = [
+        issue.removesuffix(" has orphan rows")
+        for issue in lavados_contract.get("issues", [])
+        if isinstance(issue, str) and issue.endswith(" has orphan rows")
+    ] if isinstance(lavados_contract, dict) else []
     statuses = []
     statuses.append(_check("database_name", bool(database), "Database name is present."))
     statuses.append(_check(
@@ -101,6 +107,11 @@ def evaluate_schema_migration_preflight(
         "operaciones_servicio_tipo_vehiculo_lavado_orphans",
         not tipo_vehiculo_lavado_orphan_blocked,
         "No orphan operaciones_servicio.id_tipo_vehiculo_lavado rows may exist before migration 005.",
+    ))
+    statuses.append(_check(
+        "lavados_foreign_key_orphans",
+        not lavados_orphan_blockers,
+        "No orphan lavados rows may exist before adding a missing foreign key.",
     ))
     statuses.append(_check(
         "backup_confirmed_for_future_apply",
@@ -151,6 +162,7 @@ def evaluate_schema_migration_preflight(
         "orphan_blockers": [
             *(["operaciones_servicio.id_ingreso_generado"] if orphan_blocked else []),
             *(["operaciones_servicio.id_tipo_vehiculo_lavado"] if tipo_vehiculo_lavado_orphan_blocked else []),
+            *lavados_orphan_blockers,
         ],
         "apply": {
             "available": apply_requested and not has_failures,

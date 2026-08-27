@@ -91,6 +91,26 @@ _OPERACIONES_SERVICIO_TIPO_VEHICULO_LAVADO_ORPHANS_SQL = """
     WHERE child.id_tipo_vehiculo_lavado IS NOT NULL
       AND parent.id_tipo_vehiculo_lavado IS NULL
 """
+_LAVADOS_INGRESO_ORPHANS_SQL = """
+    SELECT COUNT(*) AS orphan_count
+    FROM lavados AS child
+    LEFT JOIN ingresos AS parent ON parent.id_ingreso = child.id_ingreso
+    WHERE parent.id_ingreso IS NULL
+"""
+_LAVADOS_VEHICULO_ORPHANS_SQL = """
+    SELECT COUNT(*) AS orphan_count
+    FROM lavados AS child
+    LEFT JOIN vehiculos AS parent ON parent.id_vehiculo = child.id_vehiculo
+    WHERE parent.id_vehiculo IS NULL
+"""
+_LAVADOS_TIPO_VEHICULO_ORPHANS_SQL = """
+    SELECT COUNT(*) AS orphan_count
+    FROM lavados AS child
+    LEFT JOIN tipos_vehiculo_lavado AS parent
+      ON parent.id_tipo_vehiculo_lavado = child.id_tipo_vehiculo_lavado
+    WHERE child.id_tipo_vehiculo_lavado IS NOT NULL
+      AND parent.id_tipo_vehiculo_lavado IS NULL
+"""
 
 
 def collect_read_only_schema_inventory(conn: Connection) -> dict[str, Any]:
@@ -159,6 +179,11 @@ def collect_read_only_schema_inventory(conn: Connection) -> dict[str, Any]:
             "available": True,
             "count": conn.execute(text(_OPERACIONES_SERVICIO_TIPO_VEHICULO_LAVADO_ORPHANS_SQL)).scalar(),
         }
+    lavados_orphans = {
+        "ingreso": _lavados_orphan_snapshot(conn, tables, columns, "id_ingreso", "ingresos", "id_ingreso", _LAVADOS_INGRESO_ORPHANS_SQL),
+        "vehiculo": _lavados_orphan_snapshot(conn, tables, columns, "id_vehiculo", "vehiculos", "id_vehiculo", _LAVADOS_VEHICULO_ORPHANS_SQL),
+        "tipo_vehiculo_lavado": _lavados_orphan_snapshot(conn, tables, columns, "id_tipo_vehiculo_lavado", "tipos_vehiculo_lavado", "id_tipo_vehiculo_lavado", _LAVADOS_TIPO_VEHICULO_ORPHANS_SQL),
+    }
 
     return {
         "inventory_version": SCHEMA_INVENTORY_VERSION,
@@ -186,6 +211,7 @@ def collect_read_only_schema_inventory(conn: Connection) -> dict[str, Any]:
         },
         "operaciones_servicio_ingreso_generado_orphans": orphan_snapshot,
         "operaciones_servicio_tipo_vehiculo_lavado_orphans": tipo_vehiculo_lavado_orphan_snapshot,
+        "lavados_orphans": lavados_orphans,
     }
 
 
@@ -478,6 +504,161 @@ def operaciones_servicio_tipo_vehiculo_lavado_fk_contract(inventory: dict[str, A
     if orphan_snapshot.get("count") != 0:
         return _fk_contract(False, False, "blocked_orphans", ["orphan rows exist"], orphan_check_safe)
     return _fk_contract(False, True, "safe_to_add", [], orphan_check_safe)
+
+
+def lavados_contract(inventory: dict[str, Any]) -> dict[str, Any]:
+    """Validate lavados or classify the narrowly safe managed upgrade."""
+    expected = (
+        ("id_lavado", "int", False, None, True, True),
+        ("id_ingreso", "int", False, None, False, False),
+        ("id_vehiculo", "int", False, None, False, False),
+        ("patente", "varchar(10)", False, None, False, False),
+        ("categoria_lavado", "varchar(50)", False, None, False, False),
+        ("valor_lavado", "int", False, None, False, False),
+        ("id_tipo_vehiculo_lavado", "int", True, None, False, False),
+        ("tipo_vehiculo_lavado_snapshot", "varchar(80)", True, None, False, False),
+        ("fecha_hora_inicio", "datetime", False, None, False, False),
+        ("fecha_hora_fin", "datetime", True, None, False, False),
+        ("usuario_inicio", "varchar(50)", False, None, False, False),
+        ("usuario_fin", "varchar(50)", True, None, False, False),
+        ("estado", "enum('activo','finalizado')", False, "activo", False, False),
+    )
+    tables = _table_names(inventory)
+    if "lavados" not in tables:
+        issues = _lavados_parent_issues(inventory)
+        issues.extend(_lavados_create_name_collisions(inventory))
+        return _lavados_result(not issues, "safe_to_create" if not issues else "invalid", issues, not issues, ())
+
+    columns = {str(row.get("column_name", "")).casefold(): row for row in inventory.get("columns", []) if isinstance(row, dict) and str(row.get("table_name", "")).casefold() == "lavados"}
+    indexes = inventory.get("indexes", [])
+    issues = []
+    missing = []
+    for name, column_type, nullable, default, primary_key, auto_increment in expected:
+        column = columns.get(name)
+        if column is None:
+            missing.append(name)
+            continue
+        if str(column.get("column_type", "")).casefold().replace(" ", "") != column_type:
+            issues.append(f"lavados.{name} column_type must be {column_type}")
+        if str(column.get("is_nullable", "")).casefold() != ("yes" if nullable else "no"):
+            issues.append(f"lavados.{name} must be {'NULL' if nullable else 'NOT NULL'}")
+        if column.get("column_default") != default:
+            issues.append(f"lavados.{name} default must be {default}")
+        if primary_key and not _has_single_column_index(indexes, "lavados", "primary", name):
+            issues.append("lavados.id_lavado must be the sole primary key column")
+        if auto_increment and "auto_increment" not in str(column.get("extra", "")).casefold():
+            issues.append("lavados.id_lavado must be AUTO_INCREMENT")
+    allowed_missing = {"id_tipo_vehiculo_lavado", "tipo_vehiculo_lavado_snapshot"}
+    if set(missing) - allowed_missing:
+        issues.extend(f"lavados.{name} column is missing" for name in missing if name not in allowed_missing)
+    if missing and set(missing) != allowed_missing:
+        issues.append("lavados may only be upgraded when the two wash vehicle-type columns are missing")
+    if _table_engine(inventory, "lavados") != "innodb":
+        issues.append("lavados engine must be InnoDB")
+    issues.extend(_lavados_parent_issues(inventory))
+    missing_fks = _lavados_fk_issues(inventory, columns, issues)
+    if set(missing) == allowed_missing:
+        missing_fks = (*missing_fks, "tipo_vehiculo_lavado")
+    issues.extend(_lavados_missing_fk_name_collisions(inventory, missing_fks))
+    if issues:
+        return _lavados_result(False, "invalid", issues, False, missing_fks)
+    return _lavados_result(not missing_fks, "valid" if not missing_fks else "safe_to_upgrade", [], False, missing_fks)
+
+
+def ingresos_en_lavado_contract(inventory: dict[str, Any]) -> dict[str, Any]:
+    """Validate the intentionally nullable wash-in-progress flag."""
+    if "ingresos" not in _table_names(inventory):
+        return {"valid": False, "add_safe": False, "state": "invalid", "issues": ["ingresos table is missing"]}
+    column = _find_column(inventory.get("columns", []), "ingresos", "en_lavado")
+    if column is None:
+        return {"valid": False, "add_safe": True, "state": "safe_to_add", "issues": []}
+    issues = []
+    if str(column.get("column_type", "")).casefold() != "tinyint(1)":
+        issues.append("ingresos.en_lavado column_type must be tinyint(1)")
+    if str(column.get("is_nullable", "")).casefold() != "yes":
+        issues.append("ingresos.en_lavado must be NULL")
+    if str(column.get("column_default")) != "0":
+        issues.append("ingresos.en_lavado default must be 0")
+    return {"valid": not issues, "add_safe": False, "state": "valid" if not issues else "invalid", "issues": issues}
+
+
+def _lavados_parent_issues(inventory: dict[str, Any]) -> list[str]:
+    issues = []
+    for table_name, column_name in (("ingresos", "id_ingreso"), ("vehiculos", "id_vehiculo"), ("tipos_vehiculo_lavado", "id_tipo_vehiculo_lavado")):
+        column = _find_column(inventory.get("columns", []), table_name, column_name)
+        if table_name not in _table_names(inventory):
+            issues.append(f"{table_name} table is missing")
+        elif _table_engine(inventory, table_name) != "innodb":
+            issues.append(f"{table_name} engine must be InnoDB")
+        if column is None or _int_signedness(column) is not False:
+            issues.append(f"{table_name}.{column_name} must be signed INT")
+        elif not _has_single_column_index(inventory.get("indexes", []), table_name, "primary", column_name):
+            issues.append(f"{table_name}.{column_name} must be the sole primary key column")
+    return issues
+
+
+def _lavados_create_name_collisions(inventory: dict[str, Any]) -> list[str]:
+    names = {"fk_lavados_ingreso", "fk_lavados_vehiculo", "fk_lavados_tipo_vehiculo_lavado"}
+    collisions = {
+        str(row.get("constraint_name", "")).casefold()
+        for row in inventory.get("foreign_keys", [])
+        if isinstance(row, dict) and str(row.get("constraint_name", "")).casefold() in names
+    }
+    return [f"{name} name is already used by a different foreign key" for name in sorted(collisions)]
+
+
+def _lavados_missing_fk_name_collisions(inventory: dict[str, Any], missing_fks: tuple[str, ...]) -> list[str]:
+    names = {f"fk_lavados_{suffix}" for suffix in missing_fks}
+    collisions = {
+        str(row.get("constraint_name", "")).casefold()
+        for row in inventory.get("foreign_keys", [])
+        if isinstance(row, dict) and str(row.get("constraint_name", "")).casefold() in names
+    }
+    return [f"{name} name is already used by a different foreign key" for name in sorted(collisions)]
+
+
+def _lavados_fk_issues(inventory: dict[str, Any], columns: dict[str, dict[str, Any]], issues: list[str]) -> tuple[str, ...]:
+    missing = []
+    foreign_keys = inventory.get("foreign_keys", [])
+    for suffix, child_column, parent_table, parent_column in (
+        ("ingreso", "id_ingreso", "ingresos", "id_ingreso"),
+        ("vehiculo", "id_vehiculo", "vehiculos", "id_vehiculo"),
+        ("tipo_vehiculo_lavado", "id_tipo_vehiculo_lavado", "tipos_vehiculo_lavado", "id_tipo_vehiculo_lavado"),
+    ):
+        if child_column not in columns:
+            continue
+        if _int_signedness(columns[child_column]) is not False:
+            issues.append(f"lavados.{child_column} must be signed INT")
+            continue
+        matching = [row for row in foreign_keys if isinstance(row, dict) and str(row.get("table_name", "")).casefold() == "lavados" and str(row.get("column_name", "")).casefold() == child_column]
+        expected = [row for row in matching if str(row.get("referenced_table_name", "")).casefold() == parent_table and str(row.get("referenced_column_name", "")).casefold() == parent_column and _is_restrictive_fk_rule(row.get("update_rule")) and _is_restrictive_fk_rule(row.get("delete_rule"))]
+        constraint_name = f"fk_lavados_{suffix}"
+        named = [row for row in foreign_keys if isinstance(row, dict) and str(row.get("constraint_name", "")).casefold() == constraint_name]
+        if named and not any(row in expected for row in named):
+            issues.append(f"{constraint_name} name is already used by a different foreign key")
+        elif matching and (len(matching) != 1 or len(expected) != 1):
+            issues.append(f"lavados.{child_column} has an unexpected foreign key")
+        elif not matching:
+            snapshot = inventory.get("lavados_orphans", {}).get(suffix)
+            if not isinstance(snapshot, dict) or snapshot.get("available") is not True:
+                issues.append(f"lavados.{child_column} orphan count is unavailable")
+            elif snapshot.get("count") != 0:
+                issues.append(f"lavados.{child_column} has orphan rows")
+            else:
+                missing.append(suffix)
+    return tuple(missing)
+
+
+def _lavados_result(valid: bool, state: str, issues: list[str], create_safe: bool, missing_fks: tuple[str, ...]) -> dict[str, Any]:
+    return {"valid": valid, "add_safe": state == "safe_to_upgrade", "create_safe": create_safe, "state": state, "issues": issues, "missing_foreign_keys": list(missing_fks)}
+
+
+def _lavados_orphan_snapshot(conn: Connection, tables: list[dict[str, Any]], columns: list[dict[str, Any]], child_column: str, parent_table: str, parent_column: str, query: str) -> dict[str, Any]:
+    table_names = {str(row.get("table_name", "")).casefold() for row in tables}
+    required = (("lavados", child_column), (parent_table, parent_column))
+    if not all(table in table_names and _find_column(columns, table, column) is not None for table, column in required):
+        return {"available": False, "count": None}
+    return {"available": True, "count": conn.execute(text(query)).scalar()}
 
 
 def _table_names(inventory: dict[str, Any]) -> set[str]:

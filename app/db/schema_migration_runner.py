@@ -27,6 +27,8 @@ from app.db.schema_inventory import (
     collect_read_only_schema_inventory_from_engine,
     operaciones_servicio_ingreso_generado_fk_contract,
     operaciones_servicio_tipo_vehiculo_lavado_fk_contract,
+    ingresos_en_lavado_contract,
+    lavados_contract,
     pagos_mensuales_metodo_pago_contract,
     schema_migrations_contract,
     tipos_lavado_contract,
@@ -39,7 +41,8 @@ MIGRATION_002_ID = "002_create_tipos_lavado"
 MIGRATION_003_ID = "003_widen_pagos_mensuales_metodo_pago"
 MIGRATION_004_ID = "004_add_operaciones_servicio_ingreso_generado_fk"
 MIGRATION_005_ID = "005_add_operaciones_servicio_tipo_vehiculo_lavado_fk"
-MANAGED_MIGRATION_IDS = (MIGRATION_001_ID, MIGRATION_002_ID, MIGRATION_003_ID, MIGRATION_004_ID, MIGRATION_005_ID)
+MIGRATION_006_ID = "006_create_lavados_and_ingresos_en_lavado"
+MANAGED_MIGRATION_IDS = (MIGRATION_001_ID, MIGRATION_002_ID, MIGRATION_003_ID, MIGRATION_004_ID, MIGRATION_005_ID, MIGRATION_006_ID)
 MIGRATION_RECORD_SQL = "INSERT INTO schema_migrations (migration_id) VALUES (:migration_id)"
 MIGRATION_001_RECORD_SQL = MIGRATION_RECORD_SQL
 MIGRATION_002_SEED_SQL = (
@@ -98,6 +101,30 @@ MIGRATIONS: tuple[MigrationMetadata, ...] = (
             "        REFERENCES tipos_vehiculo_lavado (id_tipo_vehiculo_lavado)",
         ),
     ),
+    MigrationMetadata(
+        MIGRATION_006_ID,
+        "Create or safely complete lavados and add the nullable ingresos wash flag.",
+        (
+            "CREATE TABLE lavados (\n"
+            "    id_lavado INT AUTO_INCREMENT PRIMARY KEY,\n"
+            "    id_ingreso INT NOT NULL,\n"
+            "    id_vehiculo INT NOT NULL,\n"
+            "    patente VARCHAR(10) NOT NULL,\n"
+            "    categoria_lavado VARCHAR(50) NOT NULL,\n"
+            "    valor_lavado INT NOT NULL,\n"
+            "    id_tipo_vehiculo_lavado INT NULL,\n"
+            "    tipo_vehiculo_lavado_snapshot VARCHAR(80) DEFAULT NULL,\n"
+            "    fecha_hora_inicio DATETIME NOT NULL,\n"
+            "    fecha_hora_fin DATETIME DEFAULT NULL,\n"
+            "    usuario_inicio VARCHAR(50) NOT NULL,\n"
+            "    usuario_fin VARCHAR(50) DEFAULT NULL,\n"
+            "    estado ENUM('activo', 'finalizado') NOT NULL DEFAULT 'activo',\n"
+            "    CONSTRAINT fk_lavados_ingreso FOREIGN KEY (id_ingreso) REFERENCES ingresos (id_ingreso),\n"
+            "    CONSTRAINT fk_lavados_vehiculo FOREIGN KEY (id_vehiculo) REFERENCES vehiculos (id_vehiculo),\n"
+            "    CONSTRAINT fk_lavados_tipo_vehiculo_lavado FOREIGN KEY (id_tipo_vehiculo_lavado) REFERENCES tipos_vehiculo_lavado (id_tipo_vehiculo_lavado)\n"
+            ")",
+        ),
+    ),
 )
 
 
@@ -111,13 +138,14 @@ def plan_schema_migrations(inventory: dict[str, Any]) -> dict[str, Any]:
         MIGRATION_003_ID: _migration_003_status(inventory, table_names, complete),
         MIGRATION_004_ID: _migration_004_status(inventory, table_names, complete),
         MIGRATION_005_ID: _migration_005_status(inventory, table_names, complete),
+        MIGRATION_006_ID: _migration_006_status(inventory, table_names, complete),
     }
     migrations = [
         {
             "id": migration.migration_id,
             "description": migration.description,
             "status": statuses[migration.migration_id],
-            "sql": _planned_sql(migration, statuses[migration.migration_id], table_names),
+            "sql": _planned_006_sql(inventory, statuses[migration.migration_id]) if migration.migration_id == MIGRATION_006_ID else _planned_sql(migration, statuses[migration.migration_id], table_names),
             "will_execute": False,
         }
         for migration in MIGRATIONS
@@ -148,6 +176,8 @@ def plan_schema_migrations(inventory: dict[str, Any]) -> dict[str, Any]:
         "pagos_mensuales_metodo_pago": pagos_mensuales_metodo_pago_contract(inventory),
         "operaciones_servicio_ingreso_generado_fk": operaciones_servicio_ingreso_generado_fk_contract(inventory),
         "operaciones_servicio_tipo_vehiculo_lavado_fk": operaciones_servicio_tipo_vehiculo_lavado_fk_contract(inventory),
+        "lavados": lavados_contract(inventory),
+        "ingresos_en_lavado": ingresos_en_lavado_contract(inventory),
         "migrations": migrations,
         "prerequisites": [
             "Review this plan and take a database backup before any future apply run.",
@@ -186,6 +216,11 @@ def apply_005_add_operaciones_servicio_tipo_vehiculo_lavado_fk(engine: Any, **kw
     return _apply(engine, MIGRATION_005_ID, **kwargs)
 
 
+def apply_006_create_lavados_and_ingresos_en_lavado(engine: Any, **kwargs: Any) -> dict[str, Any]:
+    """Apply only the managed lavados and ingresos.en_lavado migration."""
+    return _apply(engine, MIGRATION_006_ID, **kwargs)
+
+
 def _apply(
     engine: Any, migration_id: str, *, backup_confirmed: bool, dev_database_confirmed: bool,
     expected_database: str | None = None,
@@ -219,7 +254,9 @@ def _apply(
         return _apply_003(engine, migration["status"], preflight)
     if migration_id == MIGRATION_004_ID:
         return _apply_004(engine, migration["status"], preflight)
-    return _apply_005(engine, migration["status"], preflight)
+    if migration_id == MIGRATION_005_ID:
+        return _apply_005(engine, migration["status"], preflight)
+    return _apply_006(engine, migration["status"], migration["sql"], preflight)
 
 
 def _apply_001(engine: Any, status: str, preflight: dict[str, Any]) -> dict[str, Any]:
@@ -329,6 +366,26 @@ def _apply_005(engine: Any, status: str, preflight: dict[str, Any]) -> dict[str,
     return _result(MIGRATION_005_ID, "applied", ["ALTER TABLE", "INSERT migration record"], [], preflight)
 
 
+def _apply_006(engine: Any, status: str, statements: list[str], preflight: dict[str, Any]) -> dict[str, Any]:
+    if status == "repair_required":
+        return _record(engine, MIGRATION_006_ID, "repaired", [], preflight)
+    if status != "pending":
+        return _result(MIGRATION_006_ID, "refused", [], ["Migration is not pending; no SQL was executed."], preflight)
+    executed: list[str] = []
+    try:
+        with engine.begin() as conn:
+            for statement in statements[:-1]:
+                conn.execute(text(statement))
+                executed.append("CREATE TABLE" if statement.startswith("CREATE TABLE") else "ALTER TABLE")
+            conn.execute(text(MIGRATION_RECORD_SQL), {"migration_id": MIGRATION_006_ID})
+            executed.append("INSERT migration record")
+    except Exception as error:
+        if executed:
+            return _result(MIGRATION_006_ID, "failed_after_ddl", executed, ["DDL may already be committed; retry only after a fresh inventory validates the target contract.", f"Migration 006 failed: {error}"], preflight)
+        return _result(MIGRATION_006_ID, "failed", [], [f"Migration 006 failed: {error}"], preflight)
+    return _result(MIGRATION_006_ID, "applied", executed, [], preflight)
+
+
 def _record(engine: Any, migration_id: str, status: str, executed: list[str], preflight: dict[str, Any]) -> dict[str, Any]:
     try:
         with engine.begin() as conn:
@@ -435,6 +492,27 @@ def _migration_005_status(inventory: dict[str, Any], tables: set[str] | None, co
     return "blocked_prerequisite" if contract["state"] == "blocked_orphans" else "invalid_contract" if contract["state"] in {"invalid", "name_collision"} else "unknown"
 
 
+def _migration_006_status(inventory: dict[str, Any], tables: set[str] | None, complete: bool) -> str:
+    if not complete:
+        return "unknown"
+    if any(_migration_recorded(inventory, migration_id) is not True for migration_id in MANAGED_MIGRATION_IDS[:5]):
+        return "blocked_prerequisite"
+    lavados = lavados_contract(inventory)
+    en_lavado = ingresos_en_lavado_contract(inventory)
+    recorded = _migration_recorded(inventory, MIGRATION_006_ID)
+    if lavados["state"] == "invalid" and any(issue.endswith("table is missing") for issue in lavados["issues"]):
+        return "blocked_prerequisite"
+    if lavados["state"] == "invalid" or en_lavado["state"] == "invalid":
+        return "invalid_contract"
+    if recorded is True:
+        return "applied" if lavados["valid"] and en_lavado["valid"] else "inconsistent_state"
+    if lavados["valid"] and en_lavado["valid"]:
+        return "repair_required"
+    if lavados["state"] in {"safe_to_create", "safe_to_upgrade"} and en_lavado["state"] in {"valid", "safe_to_add"}:
+        return "pending"
+    return "unknown"
+
+
 def _migration_recorded(inventory: dict[str, Any], migration_id: str) -> bool | None:
     snapshot = inventory.get("migration_snapshot")
     if not isinstance(snapshot, dict) or snapshot.get("available") is not True or not isinstance(snapshot.get("records"), list):
@@ -470,6 +548,35 @@ def _planned_sql(migration: MigrationMetadata, status: str, tables: set[str] | N
     return list(migration.statements)
 
 
+def _planned_006_sql(inventory: dict[str, Any], status: str) -> list[str]:
+    if status == "repair_required":
+        return [MIGRATION_RECORD_SQL]
+    if status != "pending":
+        return []
+    statements = []
+    lavados = lavados_contract(inventory)
+    if lavados["state"] == "safe_to_create":
+        statements.append(MIGRATIONS[5].statements[0])
+    elif lavados["state"] == "safe_to_upgrade":
+        columns = {str(row.get("column_name", "")).casefold() for row in inventory.get("columns", []) if isinstance(row, dict) and str(row.get("table_name", "")).casefold() == "lavados"}
+        clauses = []
+        if "id_tipo_vehiculo_lavado" not in columns:
+            clauses.append("ADD COLUMN id_tipo_vehiculo_lavado INT NULL")
+        if "tipo_vehiculo_lavado_snapshot" not in columns:
+            clauses.append("ADD COLUMN tipo_vehiculo_lavado_snapshot VARCHAR(80) DEFAULT NULL")
+        for suffix, child, parent_table, parent in (
+            ("ingreso", "id_ingreso", "ingresos", "id_ingreso"),
+            ("vehiculo", "id_vehiculo", "vehiculos", "id_vehiculo"),
+            ("tipo_vehiculo_lavado", "id_tipo_vehiculo_lavado", "tipos_vehiculo_lavado", "id_tipo_vehiculo_lavado"),
+        ):
+            if suffix in lavados["missing_foreign_keys"]:
+                clauses.append(f"ADD CONSTRAINT fk_lavados_{suffix} FOREIGN KEY ({child}) REFERENCES {parent_table} ({parent})")
+        statements.append("ALTER TABLE lavados\n    " + ",\n    ".join(clauses))
+    if ingresos_en_lavado_contract(inventory)["state"] == "safe_to_add":
+        statements.append("ALTER TABLE ingresos ADD COLUMN en_lavado TINYINT(1) DEFAULT 0")
+    return [*statements, MIGRATION_RECORD_SQL]
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Plan migrations or explicitly apply one migration.")
     parser.add_argument("--dry-run", action="store_true")
@@ -478,11 +585,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--apply-003-widen-pagos-mensuales-metodo-pago", action="store_true")
     parser.add_argument("--apply-004-add-operaciones-servicio-ingreso-generado-fk", action="store_true")
     parser.add_argument("--apply-005-add-operaciones-servicio-tipo-vehiculo-lavado-fk", action="store_true")
+    parser.add_argument("--apply-006-create-lavados-and-ingresos-en-lavado", action="store_true")
     parser.add_argument("--confirm-dev-db", action="store_true")
     parser.add_argument("--backup-confirmed", action="store_true")
     parser.add_argument("--expected-database")
     args = parser.parse_args(argv)
-    apply_flags = [args.apply_001_create_schema_migrations, args.apply_002_create_tipos_lavado, args.apply_003_widen_pagos_mensuales_metodo_pago, args.apply_004_add_operaciones_servicio_ingreso_generado_fk, args.apply_005_add_operaciones_servicio_tipo_vehiculo_lavado_fk]
+    apply_flags = [args.apply_001_create_schema_migrations, args.apply_002_create_tipos_lavado, args.apply_003_widen_pagos_mensuales_metodo_pago, args.apply_004_add_operaciones_servicio_ingreso_generado_fk, args.apply_005_add_operaciones_servicio_tipo_vehiculo_lavado_fk, args.apply_006_create_lavados_and_ingresos_en_lavado]
     if args.dry_run and any(apply_flags) or sum(apply_flags) > 1:
         parser.error("choose exactly one of --dry-run or one explicit apply flag")
     if not args.dry_run and not any(apply_flags):
@@ -502,7 +610,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             else apply_002_create_tipos_lavado if args.apply_002_create_tipos_lavado
             else apply_003_widen_pagos_mensuales_metodo_pago if args.apply_003_widen_pagos_mensuales_metodo_pago
             else apply_004_add_operaciones_servicio_ingreso_generado_fk if args.apply_004_add_operaciones_servicio_ingreso_generado_fk
-            else apply_005_add_operaciones_servicio_tipo_vehiculo_lavado_fk
+            else apply_005_add_operaciones_servicio_tipo_vehiculo_lavado_fk if args.apply_005_add_operaciones_servicio_tipo_vehiculo_lavado_fk
+            else apply_006_create_lavados_and_ingresos_en_lavado
         )
         result = apply(engine, backup_confirmed=args.backup_confirmed, dev_database_confirmed=args.confirm_dev_db, expected_database=args.expected_database)
     print(json.dumps(result, indent=2, sort_keys=True))

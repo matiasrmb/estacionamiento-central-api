@@ -68,6 +68,7 @@ def find_schema_deltas(inventory: dict[str, Any]) -> dict[str, Any]:
         _foreign_key_signature(row) for row in EXPECTED_OPERACIONES_SERVICIO_FOREIGN_KEYS
     }
     metodo_pago = _find_column(inventory.get("columns", []), "pagos_mensuales", "metodo_pago")
+    en_lavado = _find_column(inventory.get("columns", []), "ingresos", "en_lavado")
     noches_values = _noches_values(inventory.get("config_seed_snapshot", {}))
 
     return {
@@ -94,6 +95,16 @@ def find_schema_deltas(inventory: dict[str, Any]) -> dict[str, Any]:
                 "expected_column_type": "varchar(50)",
                 "actual_column_type": metodo_pago.get("column_type") if metodo_pago else None,
                 "matches_expected": bool(metodo_pago and str(metodo_pago.get("column_type", "")).casefold() == "varchar(50)"),
+            },
+            "ingresos.en_lavado": {
+                "expected_column_type": "tinyint(1)",
+                "actual_column_type": en_lavado.get("column_type") if en_lavado else None,
+                "matches_expected": bool(
+                    en_lavado
+                    and str(en_lavado.get("column_type", "")).casefold() == "tinyint(1)"
+                    and str(en_lavado.get("is_nullable", "")).casefold() == "yes"
+                    and str(en_lavado.get("column_default")) == "0"
+                ),
             },
         },
         "config": {

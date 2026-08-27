@@ -110,6 +110,18 @@ class SchemaMigrationPreflightTests(unittest.TestCase):
         self.assertEqual(result["orphan_blockers"], ["operaciones_servicio.id_tipo_vehiculo_lavado"])
         self.assertEqual(_check_status(result, "operaciones_servicio_tipo_vehiculo_lavado_orphans"), "BLOCKED")
 
+    def test_surfaces_006_lavados_orphan_blocker(self):
+        plan = {
+            "database": "parking",
+            "schema_migrations": {"present": True},
+            "lavados": {"issues": ["lavados.id_ingreso has orphan rows"]},
+            "migrations": [{"id": "006_create_lavados_and_ingresos_en_lavado", "status": "invalid_contract"}],
+        }
+        result = evaluate_schema_migration_preflight(_inventory(["schema_migrations"]), plan)
+
+        self.assertEqual(result["orphan_blockers"], ["lavados.id_ingreso"])
+        self.assertEqual(_check_status(result, "lavados_foreign_key_orphans"), "BLOCKED")
+
     def test_recorded_004_with_no_action_fk_rules_is_preflight_ok(self):
         inventory = _inventory(
             ["schema_migrations", "tipos_lavado", "pagos_mensuales", "operaciones_servicio", "ingresos"],

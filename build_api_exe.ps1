@@ -30,9 +30,15 @@ if ($LASTEXITCODE -ne 0) {
     throw "PyInstaller build failed."
 }
 
-$exePath = Join-Path $PSScriptRoot "dist\EstacionamientoCentralAPI\EstacionamientoCentralAPI.exe"
-if (-not (Test-Path -LiteralPath $exePath)) {
-    throw "Expected packaged API executable was not produced: $exePath"
+$outputDirectory = Join-Path $PSScriptRoot "dist\EstacionamientoCentralAPI"
+$exePaths = @(
+    (Join-Path $outputDirectory "EstacionamientoCentralAPI.exe"),
+    (Join-Path $outputDirectory "EstacionamientoCentralSchemaMigrations.exe")
+)
+foreach ($exePath in $exePaths) {
+    if (-not (Test-Path -LiteralPath $exePath)) {
+        throw "Expected packaged executable was not produced: $exePath"
+    }
 }
 
-Write-Host "Packaged API executable ready: $exePath"
+Write-Host "Packaged API executables ready: $($exePaths -join ', ')"

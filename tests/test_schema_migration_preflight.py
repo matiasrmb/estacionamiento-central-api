@@ -13,7 +13,7 @@ from app.db.schema_migration_preflight import (
     evaluate_schema_migration_preflight,
     main,
 )
-from app.db.schema_migration_runner import MIGRATION_003_ID, MIGRATION_004_ID, MIGRATION_006_ID, plan_schema_migrations
+from app.db.schema_migration_runner import MIGRATION_003_ID, MIGRATION_004_ID, MIGRATION_006_ID, MIGRATION_007_ID, plan_schema_migrations
 
 
 class FakeEngine:
@@ -124,6 +124,19 @@ class SchemaMigrationPreflightTests(unittest.TestCase):
         self.assertEqual(result["orphan_blockers"], ["lavados.id_ingreso"])
         self.assertEqual(_check_status(result, "lavados_foreign_key_orphans"), "BLOCKED")
 
+    def test_surfaces_007_wash_pricing_preflight_blocker(self):
+        plan = {
+            "database": "parking",
+            "schema_migrations": {"present": True},
+            "wash_vehicle_type_pricing": {"issues": ["configuracion.lavado_suv must be a positive integer"]},
+            "migrations": [{"id": "007_migrate_wash_vehicle_type_pricing", "status": "invalid_contract"}],
+        }
+
+        result = evaluate_schema_migration_preflight(_inventory(["schema_migrations"]), plan)
+
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertEqual(_check_status(result, "wash_vehicle_type_pricing"), "BLOCKED")
+
     def test_recorded_004_with_no_action_fk_rules_is_preflight_ok(self):
         inventory = _inventory(
             ["schema_migrations", "tipos_lavado", "pagos_mensuales", "operaciones_servicio", "ingresos"],
@@ -212,8 +225,41 @@ class SchemaMigrationPreflightTests(unittest.TestCase):
 
         self.assertNotEqual(original["canonical_sha256"], changed["canonical_sha256"])
         self.assertEqual(
-            changed["migration_plan"][-1],
+            next(item for item in changed["migration_plan"] if item["id"] == MIGRATION_006_ID),
             {"id": MIGRATION_006_ID, "status": "blocked_prerequisite", "planned_sql": migration["sql"]},
+        )
+
+    def test_canonical_hash_changes_when_007_planned_sql_changes(self):
+        inventory = _inventory([])
+        plan = _plan([])
+        changed_plan = deepcopy(plan)
+        migration = next(item for item in changed_plan["migrations"] if item["id"] == MIGRATION_007_ID)
+        migration["sql"] = ["INSERT INTO tipos_vehiculo_lavado VALUES ('test')"]
+
+        self.assertNotEqual(
+            evaluate_schema_migration_preflight(inventory, plan)["canonical_sha256"],
+            evaluate_schema_migration_preflight(inventory, changed_plan)["canonical_sha256"],
+        )
+
+    def test_canonical_hash_changes_when_plural_007_source_data_changes(self):
+        plan = _plan([])
+        plan["wash_vehicle_type_pricing"] = {
+            "issues": [],
+            "source_data": {
+                "configuracion": {"available": True, "values": []},
+                "tipos_vehiculo_lavado": {"available": False, "records": []},
+                "tipos_vehiculos_lavado": {
+                    "available": True,
+                    "records": [{"codigo": "legacy", "nombre": "Legacy", "valor_lavado": "7000", "activo": "1"}],
+                },
+            },
+        }
+        changed_plan = deepcopy(plan)
+        changed_plan["wash_vehicle_type_pricing"]["source_data"]["tipos_vehiculos_lavado"]["records"][0]["valor_lavado"] = "7500"
+
+        self.assertNotEqual(
+            evaluate_schema_migration_preflight(_inventory([]), plan)["canonical_sha256"],
+            evaluate_schema_migration_preflight(_inventory([]), changed_plan)["canonical_sha256"],
         )
 
     def test_canonical_hash_changes_when_expected_database_changes(self):

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any, TYPE_CHECKING
@@ -29,6 +30,11 @@ CONFIG_SEED_KEYS = (
     "noches_hora_inicio",
     "noches_hora_fin",
     "noches_valor",
+    "lavado_citycar",
+    "lavado_suv",
+    "lavado_camioneta",
+    "lavado_furgon",
+    "lavado_minibus",
 )
 
 _CURRENT_SCHEMA_SQL = "SELECT DATABASE() AS schema_name"
@@ -65,6 +71,7 @@ _CONFIG_SQL = """
     SELECT clave, valor
     FROM configuracion
     WHERE clave IN :config_keys
+       OR LOWER(TRIM(clave)) LIKE :wash_key_prefix
 """
 _SCHEMA_MIGRATIONS_SQL = """
     SELECT migration_id, applied_at
@@ -74,6 +81,10 @@ _TIPOS_LAVADO_SEED_SQL = """
     SELECT codigo, nombre, activo
     FROM tipos_lavado
     WHERE codigo = :codigo
+"""
+_WASH_VEHICLE_TYPES_SQL = """
+    SELECT codigo, nombre, valor_lavado, activo
+    FROM {table_name}
 """
 TIPOS_LAVADO_SEED_CODE = "lavado_general"
 _OPERACIONES_SERVICIO_INGRESO_ORPHANS_SQL = """
@@ -136,7 +147,13 @@ def collect_read_only_schema_inventory(conn: Connection) -> dict[str, Any]:
     config_values = []
     if config_available:
         config_query = text(_CONFIG_SQL).bindparams(bindparam("config_keys", expanding=True))
-        config_values = _read_rows(conn, config_query, {"config_keys": CONFIG_SEED_KEYS}, ("clave",))
+        config_rows = _read_rows(
+            conn,
+            config_query,
+            {"config_keys": CONFIG_SEED_KEYS, "wash_key_prefix": "lavado%"},
+            ("clave",),
+        )
+        config_values = [row for row in config_rows if _is_inventory_config_key(row.get("clave"))]
     migration_contract = schema_migrations_contract({
         "tables": tables,
         "columns": columns,
@@ -155,6 +172,13 @@ def collect_read_only_schema_inventory(conn: Connection) -> dict[str, Any]:
         tipos_lavado_seed = _read_rows(
             conn, _TIPOS_LAVADO_SEED_SQL, {"codigo": TIPOS_LAVADO_SEED_CODE}, ("codigo",)
         )
+    wash_vehicle_type_snapshots = {}
+    for table_name in ("tipos_vehiculo_lavado", "tipos_vehiculos_lavado"):
+        contract = tipos_vehiculo_lavado_contract({"tables": tables, "columns": columns, "indexes": indexes}, table_name)
+        records = _read_rows(conn, text(_WASH_VEHICLE_TYPES_SQL.format(table_name=table_name)), {}, ("codigo",)) if contract["read_safe"] else []
+        wash_vehicle_type_snapshots[table_name] = {
+            "available": contract["read_safe"], "contract": contract, "records": records,
+        }
     fk_contract = operaciones_servicio_ingreso_generado_fk_contract({
         "tables": tables,
         "columns": columns,
@@ -209,6 +233,7 @@ def collect_read_only_schema_inventory(conn: Connection) -> dict[str, Any]:
             "contract": tipos_contract,
             "records": tipos_lavado_seed,
         },
+        "wash_vehicle_type_snapshots": wash_vehicle_type_snapshots,
         "operaciones_servicio_ingreso_generado_orphans": orphan_snapshot,
         "operaciones_servicio_tipo_vehiculo_lavado_orphans": tipo_vehiculo_lavado_orphan_snapshot,
         "lavados_orphans": lavados_orphans,
@@ -300,6 +325,27 @@ def tipos_lavado_contract(inventory: dict[str, Any]) -> dict[str, Any]:
         issues, columns, "updated_at", "datetime", nullable=False, default="CURRENT_TIMESTAMP", on_update=True
     )
     return {"valid": not issues, "issues": issues}
+
+
+def tipos_vehiculo_lavado_contract(inventory: dict[str, Any], table_name: str = "tipos_vehiculo_lavado") -> dict[str, Any]:
+    """Validate the managed wash vehicle pricing table or a compatible legacy source."""
+    if table_name not in _table_names(inventory):
+        return {"valid": None, "read_safe": False, "issues": []}
+    columns = {
+        str(row.get("column_name", "")).casefold(): row
+        for row in inventory.get("columns", [])
+        if isinstance(row, dict) and str(row.get("table_name", "")).casefold() == table_name
+    }
+    indexes = [row for row in inventory.get("indexes", []) if isinstance(row, dict) and str(row.get("table_name", "")).casefold() == table_name]
+    issues = []
+    _require_column(issues, columns, "id_tipo_vehiculo_lavado", "int", nullable=False, primary_key=True, auto_increment=True, indexes=indexes)
+    _require_column(issues, columns, "codigo", "varchar(50)", nullable=False, unique=True, indexes=indexes)
+    _require_column(issues, columns, "nombre", "varchar(80)", nullable=False)
+    _require_column(issues, columns, "valor_lavado", "int", nullable=False)
+    _require_column(issues, columns, "activo", "tinyint(1)", nullable=False, default="1")
+    _require_column(issues, columns, "created_at", "datetime", nullable=False, default="CURRENT_TIMESTAMP")
+    _require_column(issues, columns, "updated_at", "datetime", nullable=False, default="CURRENT_TIMESTAMP", on_update=True)
+    return {"valid": not issues, "read_safe": not issues, "issues": issues}
 
 
 def pagos_mensuales_metodo_pago_contract(inventory: dict[str, Any]) -> dict[str, Any]:
@@ -822,6 +868,21 @@ def _json_value(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     return str(value)
+
+
+def _is_inventory_config_key(value: Any) -> bool:
+    """Keep exact seed keys plus wash-price variants safe for migration 007."""
+    key = str(value or "")
+    return key in CONFIG_SEED_KEYS or _normalise_config_key(key) in _wash_price_config_keys()
+
+
+def _normalise_config_key(value: Any) -> str:
+    normalized = unicodedata.normalize("NFKD", str(value or "")).casefold().strip()
+    return "".join(character for character in normalized if not unicodedata.combining(character))
+
+
+def _wash_price_config_keys() -> frozenset[str]:
+    return frozenset(key for key in CONFIG_SEED_KEYS if key.startswith("lavado_"))
 
 
 def _sort_value(value: Any) -> tuple[int, Any]:

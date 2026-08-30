@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
@@ -34,6 +36,7 @@ from app.db.schema_inventory import (
     pagos_mensuales_metodo_pago_contract,
     schema_migrations_contract,
     tipos_lavado_contract,
+    tipos_vehiculo_lavado_contract,
 )
 
 
@@ -44,7 +47,8 @@ MIGRATION_003_ID = "003_widen_pagos_mensuales_metodo_pago"
 MIGRATION_004_ID = "004_add_operaciones_servicio_ingreso_generado_fk"
 MIGRATION_005_ID = "005_add_operaciones_servicio_tipo_vehiculo_lavado_fk"
 MIGRATION_006_ID = "006_create_lavados_and_ingresos_en_lavado"
-MANAGED_MIGRATION_IDS = (MIGRATION_001_ID, MIGRATION_002_ID, MIGRATION_003_ID, MIGRATION_004_ID, MIGRATION_005_ID, MIGRATION_006_ID)
+MIGRATION_007_ID = "007_migrate_wash_vehicle_type_pricing"
+MANAGED_MIGRATION_IDS = (MIGRATION_001_ID, MIGRATION_002_ID, MIGRATION_003_ID, MIGRATION_004_ID, MIGRATION_005_ID, MIGRATION_006_ID, MIGRATION_007_ID)
 MIGRATION_RECORD_SQL = "INSERT INTO schema_migrations (migration_id) VALUES (:migration_id)"
 MIGRATION_001_RECORD_SQL = MIGRATION_RECORD_SQL
 MIGRATION_002_SEED_SQL = (
@@ -53,6 +57,11 @@ MIGRATION_002_SEED_SQL = (
     "ON DUPLICATE KEY UPDATE codigo = codigo"
 )
 SUCCESSFUL_APPLY_STATUSES = frozenset({"applied", "noop", "repaired"})
+WASH_VEHICLE_TYPE_DEFAULTS = (
+    ("lavado_citycar", "CityCar", 5000), ("lavado_suv", "SUV", 8000),
+    ("lavado_camioneta", "Camioneta", 10000), ("lavado_furgon", "Furgón", 15000),
+    ("lavado_minibus", "Mini bus o vehículos grandes", 25000),
+)
 
 
 @dataclass(frozen=True)
@@ -127,6 +136,21 @@ MIGRATIONS: tuple[MigrationMetadata, ...] = (
             ")",
         ),
     ),
+    MigrationMetadata(
+        MIGRATION_007_ID,
+        "Migrate managed wash vehicle pricing from the legacy table and configuration.",
+        (
+            "CREATE TABLE tipos_vehiculo_lavado (\n"
+            "    id_tipo_vehiculo_lavado INT AUTO_INCREMENT PRIMARY KEY,\n"
+            "    codigo VARCHAR(50) NOT NULL UNIQUE,\n"
+            "    nombre VARCHAR(80) NOT NULL,\n"
+            "    valor_lavado INT NOT NULL,\n"
+            "    activo TINYINT(1) NOT NULL DEFAULT 1,\n"
+            "    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,\n"
+            "    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP\n"
+            ")",
+        ),
+    ),
 )
 
 
@@ -141,13 +165,14 @@ def plan_schema_migrations(inventory: dict[str, Any]) -> dict[str, Any]:
         MIGRATION_004_ID: _migration_004_status(inventory, table_names, complete),
         MIGRATION_005_ID: _migration_005_status(inventory, table_names, complete),
         MIGRATION_006_ID: _migration_006_status(inventory, table_names, complete),
+        MIGRATION_007_ID: _migration_007_status(inventory, table_names, complete),
     }
     migrations = [
         {
             "id": migration.migration_id,
             "description": migration.description,
             "status": statuses[migration.migration_id],
-            "sql": _planned_006_sql(inventory, statuses[migration.migration_id]) if migration.migration_id == MIGRATION_006_ID else _planned_sql(migration, statuses[migration.migration_id], table_names),
+            "sql": _planned_006_sql(inventory, statuses[migration.migration_id]) if migration.migration_id == MIGRATION_006_ID else _planned_007_sql(inventory, statuses[migration.migration_id]) if migration.migration_id == MIGRATION_007_ID else _planned_sql(migration, statuses[migration.migration_id], table_names),
             "will_execute": False,
         }
         for migration in MIGRATIONS
@@ -180,6 +205,13 @@ def plan_schema_migrations(inventory: dict[str, Any]) -> dict[str, Any]:
         "operaciones_servicio_tipo_vehiculo_lavado_fk": operaciones_servicio_tipo_vehiculo_lavado_fk_contract(inventory),
         "lavados": lavados_contract(inventory),
         "ingresos_en_lavado": ingresos_en_lavado_contract(inventory),
+        "tipos_vehiculo_lavado": tipos_vehiculo_lavado_contract(inventory),
+        "wash_vehicle_type_pricing": {
+            "canonical": tipos_vehiculo_lavado_contract(inventory),
+            "legacy_plural": tipos_vehiculo_lavado_contract(inventory, "tipos_vehiculos_lavado"),
+            "issues": _wash_pricing_issues(inventory),
+            "source_data": _wash_pricing_source_data(inventory),
+        },
         "migrations": migrations,
         "prerequisites": [
             "Review this plan and take a database backup before any future apply run.",
@@ -227,6 +259,11 @@ def apply_005_add_operaciones_servicio_tipo_vehiculo_lavado_fk(engine: Any, **kw
 def apply_006_create_lavados_and_ingresos_en_lavado(engine: Any, **kwargs: Any) -> dict[str, Any]:
     """Apply only the managed lavados and ingresos.en_lavado migration."""
     return _apply(engine, MIGRATION_006_ID, **kwargs)
+
+
+def apply_007_migrate_wash_vehicle_type_pricing(engine: Any, **kwargs: Any) -> dict[str, Any]:
+    """Apply only the managed wash vehicle pricing migration."""
+    return _apply(engine, MIGRATION_007_ID, **kwargs)
 
 
 def _apply(
@@ -279,6 +316,8 @@ def _apply(
         return _apply_004(engine, migration["status"], preflight)
     if migration_id == MIGRATION_005_ID:
         return _apply_005(engine, migration["status"], preflight)
+    if migration_id == MIGRATION_007_ID:
+        return _apply_007(engine, migration["status"], migration["sql"], preflight)
     return _apply_006(engine, migration["status"], migration["sql"], preflight)
 
 
@@ -407,6 +446,24 @@ def _apply_006(engine: Any, status: str, statements: list[str], preflight: dict[
             return _result(MIGRATION_006_ID, "failed_after_ddl", executed, ["DDL may already be committed; retry only after a fresh inventory validates the target contract.", "Migration 006 failed; no connection details are reported."], preflight)
         return _result(MIGRATION_006_ID, "failed", [], ["Migration 006 failed; no connection details are reported."], preflight)
     return _result(MIGRATION_006_ID, "applied", executed, [], preflight)
+
+
+def _apply_007(engine: Any, status: str, statements: list[str], preflight: dict[str, Any]) -> dict[str, Any]:
+    if status == "repair_required":
+        return _record(engine, MIGRATION_007_ID, "repaired", [], preflight)
+    if status != "pending":
+        return _result(MIGRATION_007_ID, "refused", [], ["Migration is not pending; no SQL was executed."], preflight)
+    executed: list[str] = []
+    try:
+        with engine.begin() as conn:
+            for statement in statements[:-1]:
+                conn.execute(text(statement))
+                executed.append(_statement_type(statement))
+            conn.execute(text(MIGRATION_RECORD_SQL), {"migration_id": MIGRATION_007_ID})
+            executed.append("INSERT migration record")
+    except Exception:
+        return _result(MIGRATION_007_ID, "failed_after_migration" if executed else "failed", executed, ["Migration 007 failed; no connection details are reported."], preflight)
+    return _result(MIGRATION_007_ID, "applied", executed, [], preflight)
 
 
 def _record(engine: Any, migration_id: str, status: str, executed: list[str], preflight: dict[str, Any]) -> dict[str, Any]:
@@ -559,6 +616,24 @@ def _migration_006_status(inventory: dict[str, Any], tables: set[str] | None, co
     return "unknown"
 
 
+def _migration_007_status(inventory: dict[str, Any], tables: set[str] | None, complete: bool) -> str:
+    if not complete:
+        return "unknown"
+    if any(_migration_recorded(inventory, migration_id) is not True for migration_id in MANAGED_MIGRATION_IDS[:6]):
+        return "blocked_prerequisite"
+    canonical = tipos_vehiculo_lavado_contract(inventory)
+    plural = tipos_vehiculo_lavado_contract(inventory, "tipos_vehiculos_lavado")
+    if canonical["valid"] is False or plural["valid"] is False or _wash_pricing_issues(inventory):
+        return "invalid_contract"
+    recorded = _migration_recorded(inventory, MIGRATION_007_ID)
+    data_valid = _wash_pricing_known_codes_present(inventory)
+    if recorded is True:
+        return "applied" if canonical["valid"] is True and data_valid else "inconsistent_state"
+    if canonical["valid"] is True and data_valid:
+        return "repair_required"
+    return "pending"
+
+
 def _migration_recorded(inventory: dict[str, Any], migration_id: str) -> bool | None:
     snapshot = inventory.get("migration_snapshot")
     if not isinstance(snapshot, dict) or snapshot.get("available") is not True or not isinstance(snapshot.get("records"), list):
@@ -623,6 +698,129 @@ def _planned_006_sql(inventory: dict[str, Any], status: str) -> list[str]:
     return [*statements, MIGRATION_RECORD_SQL]
 
 
+def _planned_007_sql(inventory: dict[str, Any], status: str) -> list[str]:
+    if status == "repair_required":
+        return [MIGRATION_RECORD_SQL]
+    if status != "pending":
+        return []
+    tables = _table_names(inventory) or set()
+    canonical_exists = "tipos_vehiculo_lavado" in tables
+    statements = [] if canonical_exists else [MIGRATIONS[6].statements[0]]
+    if not canonical_exists and "tipos_vehiculos_lavado" in tables:
+        statements.append("INSERT INTO tipos_vehiculo_lavado (codigo, nombre, valor_lavado, activo) SELECT codigo, nombre, valor_lavado, activo FROM tipos_vehiculos_lavado ON DUPLICATE KEY UPDATE nombre = VALUES(nombre), valor_lavado = VALUES(valor_lavado), activo = VALUES(activo)")
+    present = _wash_pricing_codes(inventory)
+    for codigo, nombre, default in WASH_VEHICLE_TYPE_DEFAULTS:
+        if canonical_exists and codigo in present:
+            continue
+        amount = _wash_pricing_config_values(inventory).get(codigo, default)
+        statement = f"INSERT INTO tipos_vehiculo_lavado (codigo, nombre, valor_lavado, activo) VALUES ('{codigo}', '{nombre}', {amount}, 1)"
+        statements.append(statement + (" ON DUPLICATE KEY UPDATE nombre = VALUES(nombre), valor_lavado = VALUES(valor_lavado), activo = VALUES(activo)" if not canonical_exists else ""))
+    return [*statements, MIGRATION_RECORD_SQL]
+
+
+def _wash_pricing_config_values(inventory: dict[str, Any]) -> dict[str, int]:
+    snapshot = inventory.get("config_seed_snapshot", {})
+    values = snapshot.get("values", []) if isinstance(snapshot, dict) and snapshot.get("available") else []
+    return {
+        code: amount
+        for row in values
+        if isinstance(row, dict)
+        for code in (_normalise_wash_code(row.get("clave")),)
+        if code in _wash_pricing_default_codes()
+        for amount in (_positive_int(row.get("valor")),)
+        if amount is not None
+    }
+
+
+def _positive_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if not isinstance(value, str) or not re.fullmatch(r"[+]?\d+", value.strip()):
+        return None
+    amount = int(value.strip())
+    return amount if amount > 0 else None
+
+
+def _wash_pricing_issues(inventory: dict[str, Any]) -> list[str]:
+    issues = []
+    for table_name, snapshot in inventory.get("wash_vehicle_type_snapshots", {}).items():
+        records = snapshot.get("records", []) if isinstance(snapshot, dict) else []
+        codes = [_normalise_wash_code(row.get("codigo")) for row in records if isinstance(row, dict)]
+        if len(codes) != len(set(codes)):
+            issues.append(f"{table_name} has duplicate or ambiguous codes")
+    snapshot = inventory.get("config_seed_snapshot", {})
+    values = snapshot.get("values", []) if isinstance(snapshot, dict) and snapshot.get("available") else []
+    known_codes = []
+    for row in values:
+        if not isinstance(row, dict):
+            continue
+        code = _normalise_wash_code(row.get("clave"))
+        if code not in _wash_pricing_default_codes():
+            continue
+        known_codes.append(code)
+        if _positive_int(row.get("valor")) is None:
+            issues.append(f"configuracion.{row.get('clave')} must be a positive integer")
+    if len(known_codes) != len(set(known_codes)):
+        issues.append("configuracion has duplicate or ambiguous wash pricing codes")
+    return issues
+
+
+def _wash_pricing_codes(inventory: dict[str, Any]) -> set[str]:
+    snapshot = inventory.get("wash_vehicle_type_snapshots", {}).get("tipos_vehiculo_lavado", {})
+    return {_normalise_wash_code(row.get("codigo")) for row in snapshot.get("records", []) if isinstance(row, dict)} if isinstance(snapshot, dict) else set()
+
+
+def _wash_pricing_known_codes_present(inventory: dict[str, Any]) -> bool:
+    return _wash_pricing_default_codes().issubset(_wash_pricing_codes(inventory))
+
+
+def _wash_pricing_default_codes() -> set[str]:
+    return {item[0] for item in WASH_VEHICLE_TYPE_DEFAULTS}
+
+
+def _normalise_wash_code(value: Any) -> str:
+    """Match the case/accent/space-insensitive behavior expected from MySQL's default collation."""
+    normalized = unicodedata.normalize("NFKD", str(value or "")).casefold().strip()
+    return "".join(character for character in normalized if not unicodedata.combining(character))
+
+
+def _wash_pricing_source_data(inventory: dict[str, Any]) -> dict[str, Any]:
+    """Return stable snapshots for every 007 input that can change a write."""
+    snapshots = inventory.get("wash_vehicle_type_snapshots", {})
+    values = inventory.get("config_seed_snapshot", {})
+    return {
+        "configuracion": {
+            "available": isinstance(values, dict) and values.get("available") is True,
+            "values": _canonical_source_rows(
+                values.get("values", []) if isinstance(values, dict) else [], ("clave", "valor")
+            ),
+        },
+        "tipos_vehiculo_lavado": _wash_pricing_table_source(snapshots, "tipos_vehiculo_lavado"),
+        "tipos_vehiculos_lavado": _wash_pricing_table_source(snapshots, "tipos_vehiculos_lavado"),
+    }
+
+
+def _wash_pricing_table_source(snapshots: Any, table_name: str) -> dict[str, Any]:
+    snapshot = snapshots.get(table_name, {}) if isinstance(snapshots, dict) else {}
+    return {
+        "available": isinstance(snapshot, dict) and snapshot.get("available") is True,
+        "records": _canonical_source_rows(
+            snapshot.get("records", []) if isinstance(snapshot, dict) else [],
+            ("codigo", "nombre", "valor_lavado", "activo"),
+        ),
+    }
+
+
+def _canonical_source_rows(rows: Any, fields: tuple[str, ...]) -> list[dict[str, str | None]]:
+    canonical = [
+        {field: None if row.get(field) is None else str(row.get(field)) for field in fields}
+        for row in rows if isinstance(row, dict)
+    ] if isinstance(rows, list) else []
+    return sorted(canonical, key=lambda row: tuple(row[field] or "" for field in fields))
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Plan migrations or explicitly apply one migration.")
     parser.add_argument("--dry-run", action="store_true")
@@ -632,6 +830,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--apply-004-add-operaciones-servicio-ingreso-generado-fk", action="store_true")
     parser.add_argument("--apply-005-add-operaciones-servicio-tipo-vehiculo-lavado-fk", action="store_true")
     parser.add_argument("--apply-006-create-lavados-and-ingresos-en-lavado", action="store_true")
+    parser.add_argument("--apply-007-migrate-wash-vehicle-type-pricing", action="store_true")
     parser.add_argument("--confirm-dev-db", action="store_true")
     parser.add_argument("--profile", choices=("installer-production",))
     parser.add_argument("--environment")
@@ -640,7 +839,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--preflight-sha256")
     parser.add_argument("--expected-database")
     args = parser.parse_args(argv)
-    apply_flags = [args.apply_001_create_schema_migrations, args.apply_002_create_tipos_lavado, args.apply_003_widen_pagos_mensuales_metodo_pago, args.apply_004_add_operaciones_servicio_ingreso_generado_fk, args.apply_005_add_operaciones_servicio_tipo_vehiculo_lavado_fk, args.apply_006_create_lavados_and_ingresos_en_lavado]
+    apply_flags = [args.apply_001_create_schema_migrations, args.apply_002_create_tipos_lavado, args.apply_003_widen_pagos_mensuales_metodo_pago, args.apply_004_add_operaciones_servicio_ingreso_generado_fk, args.apply_005_add_operaciones_servicio_tipo_vehiculo_lavado_fk, args.apply_006_create_lavados_and_ingresos_en_lavado, args.apply_007_migrate_wash_vehicle_type_pricing]
     if args.dry_run and any(apply_flags) or sum(apply_flags) > 1:
         parser.error("choose exactly one of --dry-run or one explicit apply flag")
     if not args.dry_run and not any(apply_flags):
@@ -679,7 +878,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 else apply_003_widen_pagos_mensuales_metodo_pago if args.apply_003_widen_pagos_mensuales_metodo_pago
                 else apply_004_add_operaciones_servicio_ingreso_generado_fk if args.apply_004_add_operaciones_servicio_ingreso_generado_fk
                 else apply_005_add_operaciones_servicio_tipo_vehiculo_lavado_fk if args.apply_005_add_operaciones_servicio_tipo_vehiculo_lavado_fk
-                else apply_006_create_lavados_and_ingresos_en_lavado
+                else apply_006_create_lavados_and_ingresos_en_lavado if args.apply_006_create_lavados_and_ingresos_en_lavado
+                else apply_007_migrate_wash_vehicle_type_pricing
             )
             apply_kwargs = {
                 "backup_confirmed": args.backup_confirmed,

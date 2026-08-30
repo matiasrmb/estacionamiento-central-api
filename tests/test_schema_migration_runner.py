@@ -17,12 +17,14 @@ from app.db.schema_migration_runner import (
     MIGRATION_004_ID,
     MIGRATION_005_ID,
     MIGRATION_006_ID,
+    MIGRATION_007_ID,
     apply_001_create_schema_migrations,
     apply_002_create_tipos_lavado,
     apply_003_widen_pagos_mensuales_metodo_pago,
     apply_004_add_operaciones_servicio_ingreso_generado_fk,
     apply_005_add_operaciones_servicio_tipo_vehiculo_lavado_fk,
     apply_006_create_lavados_and_ingresos_en_lavado,
+    apply_007_migrate_wash_vehicle_type_pricing,
     collect_dry_run_plan,
     main,
     plan_schema_migrations,
@@ -111,6 +113,7 @@ class SchemaMigrationRunnerTests(unittest.TestCase):
             "004_add_operaciones_servicio_ingreso_generado_fk",
             "005_add_operaciones_servicio_tipo_vehiculo_lavado_fk",
             "006_create_lavados_and_ingresos_en_lavado",
+            "007_migrate_wash_vehicle_type_pricing",
         ))
         self.assertEqual(
             [migration.migration_id for migration in MIGRATIONS],
@@ -1330,6 +1333,124 @@ class SchemaMigrationRunnerTests(unittest.TestCase):
         self.assertEqual(result["executed_statement_types"], [])
         self.assertEqual(connection.statements, [])
 
+    def test_007_copies_plural_then_overrides_known_prices_from_config(self):
+        inventory = _inventory_007(canonical=False, plural=True, config_values={"lavado_suv": "9000"})
+
+        plan = plan_schema_migrations(inventory)
+        migration = plan["migrations"][6]
+
+        self.assertEqual(migration["status"], "pending")
+        self.assertIn("CREATE TABLE tipos_vehiculo_lavado", migration["sql"][0])
+        self.assertIn("FROM tipos_vehiculos_lavado", migration["sql"][1])
+        self.assertIn("'lavado_suv', 'SUV', 9000, 1", migration["sql"][3])
+        self.assertIn("ON DUPLICATE KEY UPDATE", migration["sql"][3])
+
+    def test_007_existing_canonical_only_inserts_missing_known_codes_and_then_noops(self):
+        inventory = _inventory_007(canonical=True, canonical_records=[{"codigo": "lavado_citycar", "nombre": "Administrado", "valor_lavado": 7777, "activo": 0}], config_values={"lavado_citycar": "9000", "lavado_suv": "8500"})
+        plan = plan_schema_migrations(inventory)
+        migration = plan["migrations"][6]
+
+        self.assertEqual(migration["status"], "pending")
+        self.assertFalse(any("lavado_citycar" in statement for statement in migration["sql"]))
+        self.assertIn("'lavado_suv', 'SUV', 8500, 1", migration["sql"][0])
+        connection = ApplyConnection()
+        with patch("app.db.schema_migration_runner.collect_read_only_schema_inventory_from_engine", return_value=inventory):
+            result = apply_007_migrate_wash_vehicle_type_pricing(FakeEngine(connection), backup_confirmed=True, dev_database_confirmed=True, expected_database="parking")
+        self.assertEqual(result["status"], "applied")
+        self.assertEqual(connection.statements[-1], (MIGRATION_001_RECORD_SQL, {"migration_id": MIGRATION_007_ID}))
+
+        inventory["wash_vehicle_type_snapshots"]["tipos_vehiculo_lavado"]["records"] = [
+            {"codigo": code, "nombre": name, "valor_lavado": value, "activo": 1}
+            for code, name, value in (("lavado_citycar", "Administrado", 7777), ("lavado_suv", "SUV", 8500), ("lavado_camioneta", "Camioneta", 10000), ("lavado_furgon", "Furgón", 15000), ("lavado_minibus", "Mini bus o vehículos grandes", 25000))
+        ]
+        inventory["migration_snapshot"]["records"].append({"migration_id": MIGRATION_007_ID})
+        self.assertEqual(plan_schema_migrations(inventory)["migrations"][6]["status"], "applied")
+        noop = ApplyConnection()
+        with patch("app.db.schema_migration_runner.collect_read_only_schema_inventory_from_engine", return_value=inventory):
+            result = apply_007_migrate_wash_vehicle_type_pricing(FakeEngine(noop), backup_confirmed=True, dev_database_confirmed=True, expected_database="parking")
+        self.assertEqual(result["status"], "noop")
+        self.assertEqual(noop.statements, [])
+
+    def test_007_blocks_invalid_config_and_ambiguous_codes_before_sql(self):
+        for records, config_values in (([{"codigo": "lavado_suv"}, {"codigo": "lavado_suv"}], {}), ([], {"lavado_suv": "0"})):
+            with self.subTest(records=records, config_values=config_values):
+                inventory = _inventory_007(canonical=True, canonical_records=records, config_values=config_values)
+                connection = ApplyConnection()
+                self.assertEqual(plan_schema_migrations(inventory)["migrations"][6]["status"], "invalid_contract")
+                with patch("app.db.schema_migration_runner.collect_read_only_schema_inventory_from_engine", return_value=inventory):
+                    result = apply_007_migrate_wash_vehicle_type_pricing(FakeEngine(connection), backup_confirmed=True, dev_database_confirmed=True, expected_database="parking")
+                self.assertIn(result["status"], {"invalid_contract", "refused"})
+                self.assertEqual(connection.statements, [])
+
+    def test_007_rejects_non_integer_config_values_before_sql(self):
+        for value in (
+            "9000.5", "NaN", "Infinity", "-Infinity", "not-a-number", "0", "-1",
+            float("nan"), float("inf"), float("-inf"), 0, -1, True,
+        ):
+            with self.subTest(value=value):
+                inventory = _inventory_007(canonical=True, config_values={"lavado_suv": value})
+                connection = ApplyConnection()
+
+                self.assertEqual(plan_schema_migrations(inventory)["migrations"][6]["status"], "invalid_contract")
+                with patch("app.db.schema_migration_runner.collect_read_only_schema_inventory_from_engine", return_value=inventory):
+                    result = apply_007_migrate_wash_vehicle_type_pricing(FakeEngine(connection), backup_confirmed=True, dev_database_confirmed=True, expected_database="parking")
+
+                self.assertIn(result["status"], {"invalid_contract", "refused"})
+                self.assertEqual(connection.statements, [])
+
+    def test_007_preserves_positive_integer_config_strings_and_ints(self):
+        for value in ("9000", 9000):
+            with self.subTest(value=value):
+                inventory = _inventory_007(canonical=True, config_values={"lavado_suv": value})
+
+                migration = plan_schema_migrations(inventory)["migrations"][6]
+
+                self.assertEqual(migration["status"], "pending")
+                self.assertIn("'lavado_suv', 'SUV', 9000, 1", migration["sql"][1])
+
+    def test_007_normalises_case_and_surrounding_space_for_known_codes(self):
+        inventory = _inventory_007(
+            canonical=True,
+            canonical_records=[{"codigo": " LAVADO_SUV ", "nombre": "SUV", "valor_lavado": 8000, "activo": 1}],
+            config_values=[(" LAVADO_CITYCAR ", "9000")],
+        )
+
+        migration = plan_schema_migrations(inventory)["migrations"][6]
+
+        self.assertEqual(migration["status"], "pending")
+        self.assertFalse(any("'lavado_suv'" in statement for statement in migration["sql"]))
+        self.assertIn("'lavado_citycar', 'CityCar', 9000, 1", migration["sql"][0])
+
+    def test_007_rejects_case_and_space_equivalent_duplicate_codes_before_sql(self):
+        inventory = _inventory_007(
+            canonical=True,
+            canonical_records=[{"codigo": "lavado_suv"}, {"codigo": " LAVADO_SUV "}],
+            config_values=[("lavado_citycar", "5000"), (" LAVADO_CITYCAR ", "6000")],
+        )
+        connection = ApplyConnection()
+
+        self.assertEqual(plan_schema_migrations(inventory)["migrations"][6]["status"], "invalid_contract")
+        with patch("app.db.schema_migration_runner.collect_read_only_schema_inventory_from_engine", return_value=inventory):
+            result = apply_007_migrate_wash_vehicle_type_pricing(FakeEngine(connection), backup_confirmed=True, dev_database_confirmed=True, expected_database="parking")
+
+        self.assertIn(result["status"], {"invalid_contract", "refused"})
+        self.assertEqual(connection.statements, [])
+
+    def test_007_rejects_incompatible_plural_source_before_sql(self):
+        inventory = _inventory_007(canonical=False, plural=True)
+        inventory["columns"] = [
+            row for row in inventory["columns"]
+            if not (row["table_name"] == "tipos_vehiculos_lavado" and row["column_name"] == "valor_lavado")
+        ]
+        connection = ApplyConnection()
+
+        self.assertEqual(plan_schema_migrations(inventory)["migrations"][6]["status"], "invalid_contract")
+        with patch("app.db.schema_migration_runner.collect_read_only_schema_inventory_from_engine", return_value=inventory):
+            result = apply_007_migrate_wash_vehicle_type_pricing(FakeEngine(connection), backup_confirmed=True, dev_database_confirmed=True, expected_database="parking")
+
+        self.assertEqual(result["status"], "invalid_contract")
+        self.assertEqual(connection.statements, [])
+
     def _assert_cli_apply_exit_code(self, result, expected_exit_code):
         output = io.StringIO()
         fake_database = types.SimpleNamespace(engine=FakeEngine())
@@ -1511,6 +1632,42 @@ def _inventory_006(*, lavados=None, en_lavado=False, migration_ids=None):
             foreign_keys.append(("tipo_vehiculo_lavado", "id_tipo_vehiculo_lavado", "tipos_vehiculo_lavado", "id_tipo_vehiculo_lavado"))
         for suffix, child, parent_table, parent in foreign_keys:
             inventory.setdefault("foreign_keys", []).append({"table_name": "lavados", "column_name": child, "constraint_name": f"generated_{suffix}", "referenced_table_name": parent_table, "referenced_column_name": parent, "update_rule": "RESTRICT", "delete_rule": "RESTRICT"})
+    return inventory
+
+
+def _inventory_007(*, canonical, plural=False, canonical_records=None, config_values=None):
+    inventory = _inventory_006(lavados="complete", en_lavado=True, migration_ids=[*_migration_006_prerequisites(), MIGRATION_006_ID])
+    if not canonical:
+        inventory["tables"] = [row for row in inventory["tables"] if row["table_name"] != "tipos_vehiculo_lavado"]
+        inventory["columns"] = [row for row in inventory["columns"] if row["table_name"] != "tipos_vehiculo_lavado"]
+        inventory["indexes"] = [row for row in inventory["indexes"] if row["table_name"] != "tipos_vehiculo_lavado"]
+    if plural:
+        inventory["tables"].append({"table_name": "tipos_vehiculos_lavado", "table_collation": "utf8mb4_0900_ai_ci"})
+    tables = {row["table_name"] for row in inventory["tables"]}
+    config_items = (config_values or {}).items() if isinstance(config_values, dict) else config_values or []
+    inventory["config_seed_snapshot"] = {"available": True, "values": [{"clave": key, "valor": value} for key, value in config_items]}
+    inventory["wash_vehicle_type_snapshots"] = {}
+    for table_name, records in (("tipos_vehiculo_lavado", canonical_records or []), ("tipos_vehiculos_lavado", [{"codigo": "lavado_suv", "nombre": "Plural", "valor_lavado": 7000, "activo": 1}])):
+        if table_name not in tables:
+            continue
+        table = next(row for row in inventory["tables"] if row["table_name"] == table_name)
+        table["engine"] = "InnoDB"
+        inventory["columns"] = [row for row in inventory.get("columns", []) if row.get("table_name") != table_name]
+        inventory["indexes"] = [row for row in inventory.get("indexes", []) if row.get("table_name") != table_name]
+        inventory["columns"].extend([
+            {"table_name": table_name, "column_name": "id_tipo_vehiculo_lavado", "data_type": "int", "column_type": "int", "is_nullable": "NO", "extra": "auto_increment"},
+            {"table_name": table_name, "column_name": "codigo", "column_type": "varchar(50)", "is_nullable": "NO"},
+            {"table_name": table_name, "column_name": "nombre", "column_type": "varchar(80)", "is_nullable": "NO"},
+            {"table_name": table_name, "column_name": "valor_lavado", "column_type": "int", "is_nullable": "NO"},
+            {"table_name": table_name, "column_name": "activo", "column_type": "tinyint(1)", "is_nullable": "NO", "column_default": "1"},
+            {"table_name": table_name, "column_name": "created_at", "column_type": "datetime", "is_nullable": "NO", "column_default": "CURRENT_TIMESTAMP"},
+            {"table_name": table_name, "column_name": "updated_at", "column_type": "datetime", "is_nullable": "NO", "column_default": "CURRENT_TIMESTAMP", "extra": "on update CURRENT_TIMESTAMP"},
+        ])
+        inventory["indexes"].extend([
+            {"table_name": table_name, "index_name": "PRIMARY", "column_name": "id_tipo_vehiculo_lavado", "seq_in_index": 1, "non_unique": 0},
+            {"table_name": table_name, "index_name": "codigo", "column_name": "codigo", "seq_in_index": 1, "non_unique": 0},
+        ])
+        inventory["wash_vehicle_type_snapshots"][table_name] = {"available": True, "records": records}
     return inventory
 
 

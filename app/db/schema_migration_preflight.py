@@ -80,6 +80,8 @@ def evaluate_schema_migration_preflight(
         for issue in lavados_contract.get("issues", [])
         if isinstance(issue, str) and issue.endswith(" has orphan rows")
     ] if isinstance(lavados_contract, dict) else []
+    wash_pricing = plan.get("wash_vehicle_type_pricing", {})
+    wash_pricing_issues = wash_pricing.get("issues", []) if isinstance(wash_pricing, dict) else []
     statuses = []
     statuses.append(_check("database_name", bool(database), "Database name is present."))
     statuses.append(_check(
@@ -116,6 +118,11 @@ def evaluate_schema_migration_preflight(
         "lavados_foreign_key_orphans",
         not lavados_orphan_blockers,
         "No orphan lavados rows may exist before adding a missing foreign key.",
+    ))
+    statuses.append(_check(
+        "wash_vehicle_type_pricing",
+        not wash_pricing_issues,
+        "Wash vehicle pricing contracts, codes, and legacy configuration values are safe to migrate.",
     ))
     statuses.append(_check(
         "backup_confirmed_for_future_apply",
@@ -170,6 +177,7 @@ def evaluate_schema_migration_preflight(
             *(["operaciones_servicio.id_tipo_vehiculo_lavado"] if tipo_vehiculo_lavado_orphan_blocked else []),
             *lavados_orphan_blockers,
         ],
+        "wash_vehicle_type_pricing": wash_pricing,
         "apply": {
             "available": apply_requested and not has_failures,
             "will_execute": apply_requested and not has_failures and bool(pending_migrations),
@@ -199,6 +207,7 @@ def canonical_preflight_sha256(preflight: dict[str, Any]) -> str:
         "inconsistent_state_migrations": preflight.get("inconsistent_state_migrations"),
         "migration_plan": preflight.get("migration_plan"),
         "orphan_blockers": preflight.get("orphan_blockers"),
+        "wash_vehicle_type_pricing": preflight.get("wash_vehicle_type_pricing"),
     }
     canonical_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()

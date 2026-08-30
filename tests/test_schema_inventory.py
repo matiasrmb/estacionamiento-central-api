@@ -1,5 +1,6 @@
 import re
 import unittest
+from copy import deepcopy
 
 from app.db.schema_inventory import (
     collect_read_only_schema_inventory,
@@ -8,6 +9,8 @@ from app.db.schema_inventory import (
     operaciones_servicio_tipo_vehiculo_lavado_fk_contract,
     tipos_lavado_contract,
 )
+from app.db.schema_migration_runner import _wash_pricing_issues, plan_schema_migrations
+from app.db.schema_migration_preflight import evaluate_schema_migration_preflight
 
 
 class FakeResult:
@@ -34,6 +37,7 @@ class FakeConnection:
         migration_records=None, include_tipos_lavado=False, tipos_lavado_records=None,
         schema_name="parking", uppercase_row_keys=False, include_operaciones_fk_prerequisites=False,
         include_tipo_vehiculo_lavado_fk_prerequisites=False, orphan_count=0,
+        config_records=None,
     ):
         self.include_config = include_config
         self.include_schema_migrations = include_schema_migrations
@@ -45,6 +49,10 @@ class FakeConnection:
         self.include_operaciones_fk_prerequisites = include_operaciones_fk_prerequisites
         self.include_tipo_vehiculo_lavado_fk_prerequisites = include_tipo_vehiculo_lavado_fk_prerequisites
         self.orphan_count = orphan_count
+        self.config_records = config_records or [
+            {"clave": "tarifa_minima", "valor": "300"},
+            {"clave": "modo_cobro", "valor": "hora"},
+        ]
         self.statements = []
 
     def execute(self, statement, params=None):
@@ -128,7 +136,7 @@ class FakeConnection:
             ], uppercase_row_keys=self.uppercase_row_keys)
         if "FROM configuracion" in sql:
             return FakeResult(
-                [{"clave": "tarifa_minima", "valor": "300"}, {"clave": "modo_cobro", "valor": "hora"}],
+                self.config_records,
                 uppercase_row_keys=self.uppercase_row_keys,
             )
         if "FROM schema_migrations" in sql:
@@ -189,6 +197,41 @@ class SchemaInventoryTests(unittest.TestCase):
             "values": [],
         })
         self.assertFalse(any("FROM configuracion" in statement for statement, _ in conn.statements))
+
+    def test_collects_wash_price_variants_for_007_without_capturing_unrelated_config(self):
+        conn = FakeConnection(config_records=[
+            {"clave": "lavado_citycar", "valor": "5000"},
+            {"clave": " LAVADO_CITYCAR ", "valor": "6000"},
+            {"clave": "lavado_api_token", "valor": "sensitive"},
+            {"clave": "api_token", "valor": "sensitive"},
+        ])
+
+        inventory = collect_read_only_schema_inventory(conn)
+        values = inventory["config_seed_snapshot"]["values"]
+        plan = plan_schema_migrations(inventory)
+
+        self.assertEqual(values, [
+            {"clave": " LAVADO_CITYCAR ", "valor": "6000"},
+            {"clave": "lavado_citycar", "valor": "5000"},
+        ])
+        self.assertIn("configuracion has duplicate or ambiguous wash pricing codes", _wash_pricing_issues(inventory))
+        self.assertEqual(
+            plan["wash_vehicle_type_pricing"]["source_data"]["configuracion"]["values"],
+            values,
+        )
+        without_variant = deepcopy(inventory)
+        without_variant["config_seed_snapshot"]["values"] = values[1:]
+        self.assertNotEqual(
+            evaluate_schema_migration_preflight(inventory, plan)["canonical_sha256"],
+            evaluate_schema_migration_preflight(
+                without_variant, plan_schema_migrations(without_variant)
+            )["canonical_sha256"],
+        )
+        config_query, params = next(
+            (statement, params) for statement, params in conn.statements if "FROM configuracion" in statement
+        )
+        self.assertIn("LOWER(TRIM(clave)) LIKE", config_query)
+        self.assertEqual(params["wash_key_prefix"], "lavado%")
 
     def test_collects_migration_snapshot_only_when_tracking_table_exists(self):
         conn = FakeConnection(

@@ -529,7 +529,7 @@ class SchemaInventoryTests(unittest.TestCase):
 
         for mutation, issue in (
             (lambda value: next(row for row in value["columns"] if row["column_name"] == "duracion_minutos").update(column_type="bigint"), "duracion_minutos column_type must be int"),
-            (lambda value: next(row for row in value["columns"] if row["column_name"] == "tipo_vehiculo_lavado_snapshot").update(is_nullable="NO"), "tipo_vehiculo_lavado_snapshot must be NULL"),
+            (lambda value: next(row for row in value["columns"] if row["column_name"] == "tipo_vehiculo_lavado_snapshot").update(column_type="varchar(79)"), "tipo_vehiculo_lavado_snapshot column_type must be varchar(80)"),
             (lambda value: next(row for row in value["columns"] if row["column_name"] == "estado").update(column_default="cerrado"), "estado default must be ACTIVO"),
             (lambda value: next(row for row in value["indexes"] if row["index_name"] == "idx_operaciones_servicio_patente").update(column_name="estado"), "idx_operaciones_servicio_patente name is already used by a different index"),
             (lambda value: next(row for row in value["indexes"] if row["index_name"] == "idx_operaciones_servicio_patente").update(non_unique=0), "idx_operaciones_servicio_patente name is already used by a different index"),
@@ -603,6 +603,16 @@ class SchemaInventoryTests(unittest.TestCase):
         inventory = _operaciones_servicio_inventory()
         duration = next(row for row in inventory["columns"] if row["column_name"] == "duracion_minutos")
         duration.update(is_nullable="YES", column_default=None)
+
+        self.assertEqual(
+            (operaciones_servicio_contract(inventory)["valid"], operaciones_servicio_contract(inventory)["state"]),
+            (True, "valid"),
+        )
+
+    def test_operaciones_servicio_contract_accepts_historical_wash_snapshot_shape(self):
+        inventory = _operaciones_servicio_inventory()
+        next(row for row in inventory["columns"] if row["column_name"] == "tipo_vehiculo_lavado_snapshot").update(is_nullable="NO")
+        next(row for row in inventory["columns"] if row["column_name"] == "valor_lavado_snapshot").update(column_default=None)
 
         self.assertEqual(
             (operaciones_servicio_contract(inventory)["valid"], operaciones_servicio_contract(inventory)["state"]),

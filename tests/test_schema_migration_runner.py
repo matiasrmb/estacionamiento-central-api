@@ -1482,6 +1482,20 @@ class SchemaMigrationRunnerTests(unittest.TestCase):
             self.assertEqual(apply_008_complete_operaciones_servicio_contract(FakeEngine(refused), backup_confirmed=True, dev_database_confirmed=True, expected_database="parking")["status"], "refused")
         self.assertEqual(refused.statements, [])
 
+    def test_008_repairs_historical_wash_snapshot_shape_without_normalizing_columns(self):
+        historical = _inventory_008(complete=True, historical_wash_snapshot=True)
+        migration = plan_schema_migrations(historical)["migrations"][7]
+
+        self.assertEqual(migration["status"], "repair_required")
+        self.assertEqual(migration["sql"], [MIGRATION_001_RECORD_SQL])
+        repair = ApplyConnection()
+        with patch("app.db.schema_migration_runner.collect_read_only_schema_inventory_from_engine", return_value=historical):
+            self.assertEqual(apply_008_complete_operaciones_servicio_contract(FakeEngine(repair), backup_confirmed=True, dev_database_confirmed=True, expected_database="parking")["status"], "repaired")
+        self.assertEqual(repair.statements, [(MIGRATION_001_RECORD_SQL, {"migration_id": MIGRATION_008_ID})])
+
+        historical["migration_snapshot"]["records"].append({"migration_id": MIGRATION_008_ID})
+        self.assertEqual(plan_schema_migrations(historical)["migrations"][7]["status"], "applied")
+
     def _assert_cli_apply_exit_code(self, result, expected_exit_code):
         output = io.StringIO()
         fake_database = types.SimpleNamespace(engine=FakeEngine())
@@ -1702,7 +1716,7 @@ def _inventory_007(*, canonical, plural=False, canonical_records=None, config_va
     return inventory
 
 
-def _inventory_008(*, complete=False):
+def _inventory_008(*, complete=False, historical_wash_snapshot=False):
     inventory = _inventory_007(
         canonical=True,
         canonical_records=[
@@ -1722,8 +1736,8 @@ def _inventory_008(*, complete=False):
     ]
     if complete:
         columns.extend([
-            ("tipo_vehiculo_lavado_snapshot", "varchar(80)", "YES", None, "", ""),
-            ("valor_lavado_snapshot", "int", "NO", "0", "", ""),
+            ("tipo_vehiculo_lavado_snapshot", "varchar(80)", "NO" if historical_wash_snapshot else "YES", None, "", ""),
+            ("valor_lavado_snapshot", "int", "NO", None if historical_wash_snapshot else "0", "", ""),
             ("fecha_hora_fin", "datetime", "YES", None, "", ""),
             ("duracion_minutos", "int", "YES", None, "", ""),
             ("usuario_fin", "varchar(50)", "YES", None, "", ""),

@@ -585,13 +585,12 @@ def operaciones_servicio_contract(inventory: dict[str, Any]) -> dict[str, Any]:
         _operaciones_servicio_column(issues, missing, columns, name, column_type, nullable, default, primary_key, auto_increment, indexes)
     base_missing = tuple(missing)
     for name, column_type, nullable, default in (
-        ("tipo_vehiculo_lavado_snapshot", "varchar(80)", True, None),
-        ("valor_lavado_snapshot", "int", False, "0"),
         ("fecha_hora_fin", "datetime", True, None),
         ("usuario_fin", "varchar(50)", True, None),
         ("cerrado", "tinyint(1)", False, "0"),
     ):
         _operaciones_servicio_column(issues, missing, columns, name, column_type, nullable, default, False, False, indexes)
+    _operaciones_servicio_wash_snapshot(issues, missing, columns)
     _operaciones_servicio_duracion(issues, missing, columns)
     _operaciones_servicio_estado(issues, missing, columns)
     _operaciones_servicio_timestamp(issues, missing, columns, "created_at", False)
@@ -637,6 +636,31 @@ def _operaciones_servicio_column(issues, missing, columns, name, column_type, nu
     _require_column(issues, columns, name, column_type, nullable=nullable, auto_increment=auto_increment, indexes=indexes, default=default)
     if primary_key and not _has_single_column_index(indexes, "operaciones_servicio", "primary", name):
         issues.append(f"{name} must be the sole primary key column")
+
+
+def _operaciones_servicio_wash_snapshot(issues, missing, columns) -> None:
+    """Accept compatible historical CREATE and managed ALTER column forms."""
+    snapshot = columns.get("tipo_vehiculo_lavado_snapshot")
+    if snapshot is None:
+        missing.append("tipo_vehiculo_lavado_snapshot")
+    else:
+        if str(snapshot.get("column_type", "")).casefold() != "varchar(80)":
+            issues.append("tipo_vehiculo_lavado_snapshot column_type must be varchar(80)")
+        if str(snapshot.get("is_nullable", "")).casefold() not in {"yes", "no"}:
+            issues.append("tipo_vehiculo_lavado_snapshot must be NULL or NOT NULL")
+        if snapshot.get("column_default") is not None:
+            issues.append("tipo_vehiculo_lavado_snapshot default must be NULL")
+
+    value = columns.get("valor_lavado_snapshot")
+    if value is None:
+        missing.append("valor_lavado_snapshot")
+    else:
+        if str(value.get("column_type", "")).casefold() != "int":
+            issues.append("valor_lavado_snapshot column_type must be int")
+        if str(value.get("is_nullable", "")).casefold() != "no":
+            issues.append("valor_lavado_snapshot must be NOT NULL")
+        if value.get("column_default") not in {None, "0"}:
+            issues.append("valor_lavado_snapshot default must be NULL or 0")
 
 
 def _operaciones_servicio_estado(issues, missing, columns) -> None:

@@ -18,6 +18,8 @@ from app.db.schema_migration_runner import (
     MIGRATION_005_ID,
     MIGRATION_006_ID,
     MIGRATION_007_ID,
+    MIGRATION_008_ID,
+    WASH_VEHICLE_TYPE_DEFAULTS,
     apply_001_create_schema_migrations,
     apply_002_create_tipos_lavado,
     apply_003_widen_pagos_mensuales_metodo_pago,
@@ -25,6 +27,7 @@ from app.db.schema_migration_runner import (
     apply_005_add_operaciones_servicio_tipo_vehiculo_lavado_fk,
     apply_006_create_lavados_and_ingresos_en_lavado,
     apply_007_migrate_wash_vehicle_type_pricing,
+    apply_008_complete_operaciones_servicio_contract,
     collect_dry_run_plan,
     main,
     plan_schema_migrations,
@@ -114,6 +117,7 @@ class SchemaMigrationRunnerTests(unittest.TestCase):
             "005_add_operaciones_servicio_tipo_vehiculo_lavado_fk",
             "006_create_lavados_and_ingresos_en_lavado",
             "007_migrate_wash_vehicle_type_pricing",
+            "008_complete_operaciones_servicio_contract",
         ))
         self.assertEqual(
             [migration.migration_id for migration in MIGRATIONS],
@@ -1451,6 +1455,33 @@ class SchemaMigrationRunnerTests(unittest.TestCase):
         self.assertEqual(result["status"], "invalid_contract")
         self.assertEqual(connection.statements, [])
 
+    def test_008_plans_applies_repairs_noops_and_refuses_without_creating_table(self):
+        pending = _inventory_008()
+        migration = plan_schema_migrations(pending)["migrations"][7]
+        self.assertEqual(migration["status"], "pending")
+        self.assertIn("ALTER TABLE operaciones_servicio", migration["sql"][0])
+        self.assertNotIn("CREATE TABLE", migration["sql"][0])
+        connection = ApplyConnection()
+        with patch("app.db.schema_migration_runner.collect_read_only_schema_inventory_from_engine", return_value=pending):
+            result = apply_008_complete_operaciones_servicio_contract(FakeEngine(connection), backup_confirmed=True, dev_database_confirmed=True, expected_database="parking")
+        self.assertEqual(result["status"], "applied")
+        self.assertEqual(connection.statements[-1], (MIGRATION_001_RECORD_SQL, {"migration_id": MIGRATION_008_ID}))
+
+        complete = _inventory_008(complete=True)
+        repair = ApplyConnection()
+        with patch("app.db.schema_migration_runner.collect_read_only_schema_inventory_from_engine", return_value=complete):
+            self.assertEqual(apply_008_complete_operaciones_servicio_contract(FakeEngine(repair), backup_confirmed=True, dev_database_confirmed=True, expected_database="parking")["status"], "repaired")
+        complete["migration_snapshot"]["records"].append({"migration_id": MIGRATION_008_ID})
+        noop = ApplyConnection()
+        with patch("app.db.schema_migration_runner.collect_read_only_schema_inventory_from_engine", return_value=complete):
+            self.assertEqual(apply_008_complete_operaciones_servicio_contract(FakeEngine(noop), backup_confirmed=True, dev_database_confirmed=True, expected_database="parking")["status"], "noop")
+        missing = _inventory_008(complete=True)
+        missing["tables"] = [row for row in missing["tables"] if row["table_name"] != "operaciones_servicio"]
+        refused = ApplyConnection()
+        with patch("app.db.schema_migration_runner.collect_read_only_schema_inventory_from_engine", return_value=missing):
+            self.assertEqual(apply_008_complete_operaciones_servicio_contract(FakeEngine(refused), backup_confirmed=True, dev_database_confirmed=True, expected_database="parking")["status"], "refused")
+        self.assertEqual(refused.statements, [])
+
     def _assert_cli_apply_exit_code(self, result, expected_exit_code):
         output = io.StringIO()
         fake_database = types.SimpleNamespace(engine=FakeEngine())
@@ -1668,6 +1699,53 @@ def _inventory_007(*, canonical, plural=False, canonical_records=None, config_va
             {"table_name": table_name, "index_name": "codigo", "column_name": "codigo", "seq_in_index": 1, "non_unique": 0},
         ])
         inventory["wash_vehicle_type_snapshots"][table_name] = {"available": True, "records": records}
+    return inventory
+
+
+def _inventory_008(*, complete=False):
+    inventory = _inventory_007(
+        canonical=True,
+        canonical_records=[
+            {"codigo": code, "nombre": name, "valor_lavado": value, "activo": 1}
+            for code, name, value in WASH_VEHICLE_TYPE_DEFAULTS
+        ],
+    )
+    inventory["migration_snapshot"]["records"].append({"migration_id": MIGRATION_007_ID})
+    inventory["columns"] = [row for row in inventory["columns"] if row["table_name"] != "operaciones_servicio"]
+    columns = [
+        ("id_operacion_servicio", "int", "NO", None, "PRI", "auto_increment"),
+        ("patente", "varchar(10)", "NO", None, "", ""),
+        ("id_tipo_vehiculo_lavado", "int", "YES", None, "", ""),
+        ("fecha_hora_inicio", "datetime", "NO", None, "", ""),
+        ("usuario_inicio", "varchar(50)", "NO", None, "", ""),
+        ("id_ingreso_generado", "int", "YES", None, "", ""),
+    ]
+    if complete:
+        columns.extend([
+            ("tipo_vehiculo_lavado_snapshot", "varchar(80)", "YES", None, "", ""),
+            ("valor_lavado_snapshot", "int", "NO", "0", "", ""),
+            ("fecha_hora_fin", "datetime", "YES", None, "", ""),
+            ("duracion_minutos", "int", "YES", None, "", ""),
+            ("usuario_fin", "varchar(50)", "YES", None, "", ""),
+            ("estado", "enum('ACTIVO','FINALIZADO_COBRADO','CONVERTIDO_ESTADIA')", "NO", "ACTIVO", "", ""),
+            ("cerrado", "tinyint(1)", "NO", "0", "", ""),
+            ("created_at", "datetime", "NO", "CURRENT_TIMESTAMP", "", ""),
+            ("updated_at", "datetime", "NO", "CURRENT_TIMESTAMP", "", "on update CURRENT_TIMESTAMP"),
+        ])
+    inventory["columns"].extend({"table_name": "operaciones_servicio", "column_name": name, "data_type": column_type.split("(", 1)[0], "column_type": column_type, "is_nullable": nullable, "column_default": default, "column_key": key, "extra": extra} for name, column_type, nullable, default, key, extra in columns)
+    inventory["indexes"] = [row for row in inventory["indexes"] if row["table_name"] != "operaciones_servicio"]
+    index_definitions = [
+        ("PRIMARY", ("id_operacion_servicio",)),
+        ("idx_operaciones_servicio_ingreso_generado", ("id_ingreso_generado",)),
+        ("idx_operaciones_servicio_tipo_vehiculo_lavado", ("id_tipo_vehiculo_lavado",)),
+    ]
+    if complete:
+        index_definitions.extend([
+            ("idx_operaciones_servicio_estado_fecha", ("estado", "fecha_hora_inicio")),
+            ("idx_operaciones_servicio_patente", ("patente",)),
+            ("idx_operaciones_servicio_cierre", ("cerrado", "estado", "fecha_hora_fin")),
+        ])
+    inventory["indexes"].extend({"table_name": "operaciones_servicio", "index_name": index_name, "column_name": column, "seq_in_index": position, "non_unique": 0 if index_name == "PRIMARY" else 1} for index_name, names in index_definitions for position, column in enumerate(names, 1))
     return inventory
 
 

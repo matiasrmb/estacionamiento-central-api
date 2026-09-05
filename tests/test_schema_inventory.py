@@ -7,6 +7,7 @@ from app.db.schema_inventory import (
     pagos_mensuales_metodo_pago_contract,
     operaciones_servicio_ingreso_generado_fk_contract,
     operaciones_servicio_tipo_vehiculo_lavado_fk_contract,
+    operaciones_servicio_contract,
     tipos_lavado_contract,
 )
 from app.db.schema_migration_runner import _wash_pricing_issues, plan_schema_migrations
@@ -515,6 +516,164 @@ class SchemaInventoryTests(unittest.TestCase):
 
                 self.assertEqual((contract["valid"], contract["widen_safe"], contract["state"]), (False, False, "invalid"))
                 self.assertIn(issue, contract["issues"])
+
+    def test_operaciones_servicio_contract_classifies_valid_safe_and_invalid_states(self):
+        inventory = _operaciones_servicio_inventory()
+        self.assertEqual((operaciones_servicio_contract(inventory)["valid"], operaciones_servicio_contract(inventory)["state"]), (True, "valid"))
+
+        missing = deepcopy(inventory)
+        missing["columns"] = [row for row in missing["columns"] if row["column_name"] != "usuario_fin"]
+        contract = operaciones_servicio_contract(missing)
+        self.assertEqual((contract["valid"], contract["add_safe"], contract["state"]), (False, True, "safe_to_upgrade"))
+        self.assertEqual(contract["missing_columns"], ["usuario_fin"])
+
+        for mutation, issue in (
+            (lambda value: next(row for row in value["columns"] if row["column_name"] == "duracion_minutos").update(column_type="bigint"), "duracion_minutos column_type must be int"),
+            (lambda value: next(row for row in value["columns"] if row["column_name"] == "tipo_vehiculo_lavado_snapshot").update(column_type="varchar(79)"), "tipo_vehiculo_lavado_snapshot column_type must be varchar(80)"),
+            (lambda value: next(row for row in value["columns"] if row["column_name"] == "estado").update(column_default="cerrado"), "estado default must be ACTIVO"),
+            (lambda value: next(row for row in value["indexes"] if row["index_name"] == "idx_operaciones_servicio_patente").update(column_name="estado"), "idx_operaciones_servicio_patente name is already used by a different index"),
+            (lambda value: next(row for row in value["indexes"] if row["index_name"] == "idx_operaciones_servicio_patente").update(non_unique=0), "idx_operaciones_servicio_patente name is already used by a different index"),
+        ):
+            with self.subTest(issue=issue):
+                invalid = deepcopy(inventory)
+                mutation(invalid)
+                contract = operaciones_servicio_contract(invalid)
+                self.assertEqual(contract["state"], "invalid")
+                self.assertIn(issue, contract["issues"])
+
+        for mutation in (
+            lambda value: value["foreign_keys"].pop(),
+            lambda value: value["foreign_keys"][0].update(referenced_table_name="other"),
+        ):
+            with self.subTest(mutation=mutation):
+                invalid = deepcopy(inventory)
+                mutation(invalid)
+                self.assertEqual(operaciones_servicio_contract(invalid)["state"], "invalid")
+
+    def test_operaciones_servicio_estado_requires_all_written_enum_values(self):
+        for missing_state in ("FINALIZADO_COBRADO", "CONVERTIDO_ESTADIA"):
+            with self.subTest(missing_state=missing_state):
+                inventory = _operaciones_servicio_inventory()
+                estado = next(row for row in inventory["columns"] if row["column_name"] == "estado")
+                estado["column_type"] = "enum(" + ",".join(
+                    f"'{value}'"
+                    for value in ("ACTIVO", "FINALIZADO_COBRADO", "CONVERTIDO_ESTADIA")
+                    if value != missing_state
+                ) + ")"
+
+                contract = operaciones_servicio_contract(inventory)
+
+                self.assertFalse(contract["valid"])
+                self.assertEqual(contract["state"], "invalid")
+                self.assertIn("estado ENUM must exactly match application-written states", contract["issues"])
+
+    def test_operaciones_servicio_estado_rejects_lowercase_and_mixed_case_enum_values(self):
+        for states in (
+            ("activo", "finalizado_cobrado", "convertido_estadia"),
+            ("ACTIVO", "Finalizado_Cobrado", "CONVERTIDO_ESTADIA"),
+        ):
+            with self.subTest(states=states):
+                inventory = _operaciones_servicio_inventory()
+                estado = next(row for row in inventory["columns"] if row["column_name"] == "estado")
+                estado["column_type"] = "enum(" + ",".join(f"'{value}'" for value in states) + ")"
+
+                contract = operaciones_servicio_contract(inventory)
+
+                self.assertFalse(contract["valid"])
+                self.assertEqual(contract["state"], "invalid")
+                self.assertIn("estado ENUM must exactly match application-written states", contract["issues"])
+
+    def test_operaciones_servicio_estado_rejects_extra_case_variant_enum_values(self):
+        for extra_state in ("activo", "Finalizado_Cobrado"):
+            with self.subTest(extra_state=extra_state):
+                inventory = _operaciones_servicio_inventory()
+                estado = next(row for row in inventory["columns"] if row["column_name"] == "estado")
+                estado["column_type"] = (
+                    "enum('ACTIVO','FINALIZADO_COBRADO','CONVERTIDO_ESTADIA',"
+                    f"'{extra_state}')"
+                )
+
+                contract = operaciones_servicio_contract(inventory)
+
+                self.assertFalse(contract["valid"])
+                self.assertEqual(contract["state"], "invalid")
+                self.assertIn("estado ENUM must exactly match application-written states", contract["issues"])
+
+    def test_operaciones_servicio_contract_accepts_nullable_historical_duration(self):
+        inventory = _operaciones_servicio_inventory()
+        duration = next(row for row in inventory["columns"] if row["column_name"] == "duracion_minutos")
+        duration.update(is_nullable="YES", column_default=None)
+
+        self.assertEqual(
+            (operaciones_servicio_contract(inventory)["valid"], operaciones_servicio_contract(inventory)["state"]),
+            (True, "valid"),
+        )
+
+    def test_operaciones_servicio_contract_accepts_historical_wash_snapshot_shape(self):
+        inventory = _operaciones_servicio_inventory()
+        next(row for row in inventory["columns"] if row["column_name"] == "tipo_vehiculo_lavado_snapshot").update(is_nullable="NO")
+        next(row for row in inventory["columns"] if row["column_name"] == "valor_lavado_snapshot").update(column_default=None)
+
+        self.assertEqual(
+            (operaciones_servicio_contract(inventory)["valid"], operaciones_servicio_contract(inventory)["state"]),
+            (True, "valid"),
+        )
+
+    def test_operaciones_servicio_estado_accepts_safe_varchar_compatibility(self):
+        inventory = _operaciones_servicio_inventory()
+        estado = next(row for row in inventory["columns"] if row["column_name"] == "estado")
+        estado.update(data_type="varchar", column_type="varchar(18)")
+
+        self.assertTrue(operaciones_servicio_contract(inventory)["valid"])
+
+        estado["column_type"] = "varchar(17)"
+        contract = operaciones_servicio_contract(inventory)
+        self.assertFalse(contract["valid"])
+        self.assertTrue(any(
+            issue.startswith("estado VARCHAR must fit all application-written states")
+            for issue in contract["issues"]
+        ))
+
+    def test_operaciones_servicio_contract_blocks_missing_table(self):
+        contract = operaciones_servicio_contract({"tables": [], "columns": [], "indexes": [], "foreign_keys": []})
+        self.assertEqual((contract["valid"], contract["state"]), (False, "blocked_prerequisite"))
+
+
+def _operaciones_servicio_inventory():
+    columns = [
+        ("id_operacion_servicio", "int", "NO", None, "PRI", "auto_increment"),
+        ("patente", "varchar(10)", "NO", None, "", ""),
+        ("id_tipo_vehiculo_lavado", "int", "YES", None, "", ""),
+        ("fecha_hora_inicio", "datetime", "NO", None, "", ""),
+        ("usuario_inicio", "varchar(50)", "NO", None, "", ""),
+        ("id_ingreso_generado", "int", "YES", None, "", ""),
+        ("tipo_vehiculo_lavado_snapshot", "varchar(80)", "YES", None, "", ""),
+        ("valor_lavado_snapshot", "int", "NO", "0", "", ""),
+        ("fecha_hora_fin", "datetime", "YES", None, "", ""),
+        ("duracion_minutos", "int", "NO", "0", "", ""),
+        ("usuario_fin", "varchar(50)", "YES", None, "", ""),
+        ("estado", "enum('ACTIVO','FINALIZADO_COBRADO','CONVERTIDO_ESTADIA')", "NO", "ACTIVO", "", ""),
+        ("cerrado", "tinyint(1)", "NO", "0", "", ""),
+        ("created_at", "datetime", "NO", "CURRENT_TIMESTAMP", "", ""),
+        ("updated_at", "datetime", "NO", "CURRENT_TIMESTAMP", "", "on update CURRENT_TIMESTAMP"),
+    ]
+    inventory = {
+        "tables": [{"table_name": "operaciones_servicio", "engine": "InnoDB"}, {"table_name": "ingresos", "engine": "InnoDB"}, {"table_name": "tipos_vehiculo_lavado", "engine": "InnoDB"}],
+        "columns": [{"table_name": "operaciones_servicio", "column_name": name, "data_type": column_type.split("(", 1)[0], "column_type": column_type, "is_nullable": nullable, "column_default": default, "column_key": key, "extra": extra} for name, column_type, nullable, default, key, extra in columns],
+        "indexes": [],
+        "foreign_keys": [],
+    }
+    inventory["columns"].extend([
+        {"table_name": "ingresos", "column_name": "id_ingreso", "data_type": "int", "column_type": "int", "is_nullable": "NO"},
+        {"table_name": "tipos_vehiculo_lavado", "column_name": "id_tipo_vehiculo_lavado", "data_type": "int", "column_type": "int", "is_nullable": "NO"},
+    ])
+    for index_name, table_name, names in (("PRIMARY", "operaciones_servicio", ("id_operacion_servicio",)), ("idx_operaciones_servicio_estado_fecha", "operaciones_servicio", ("estado", "fecha_hora_inicio")), ("idx_operaciones_servicio_patente", "operaciones_servicio", ("patente",)), ("idx_operaciones_servicio_ingreso_generado", "operaciones_servicio", ("id_ingreso_generado",)), ("idx_operaciones_servicio_tipo_vehiculo_lavado", "operaciones_servicio", ("id_tipo_vehiculo_lavado",)), ("idx_operaciones_servicio_cierre", "operaciones_servicio", ("cerrado", "estado", "fecha_hora_fin")), ("PRIMARY", "ingresos", ("id_ingreso",)), ("PRIMARY", "tipos_vehiculo_lavado", ("id_tipo_vehiculo_lavado",))):
+        inventory["indexes"].extend({"table_name": table_name, "index_name": index_name, "column_name": name, "seq_in_index": position, "non_unique": 0 if index_name == "PRIMARY" else 1} for position, name in enumerate(names, 1))
+    inventory["foreign_keys"] = [
+        {"constraint_name": "fk_operaciones_servicio_ingreso_generado", "table_name": "operaciones_servicio", "column_name": "id_ingreso_generado", "referenced_table_name": "ingresos", "referenced_column_name": "id_ingreso", "update_rule": "RESTRICT", "delete_rule": "RESTRICT"},
+        {"constraint_name": "fk_operaciones_servicio_tipo_vehiculo_lavado", "table_name": "operaciones_servicio", "column_name": "id_tipo_vehiculo_lavado", "referenced_table_name": "tipos_vehiculo_lavado", "referenced_column_name": "id_tipo_vehiculo_lavado", "update_rule": "RESTRICT", "delete_rule": "RESTRICT"},
+    ]
+    return inventory
 
 
 if __name__ == "__main__":

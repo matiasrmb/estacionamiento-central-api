@@ -95,6 +95,11 @@ def evaluate_schema_migration_preflight(
         "All migration statuses are known.",
     ))
     statuses.append(_check(
+        "migration_prerequisites",
+        not blocked_migrations,
+        "All migration prerequisites are satisfied.",
+    ))
+    statuses.append(_check(
         "schema_migrations_contract",
         not invalid_contract_migrations,
         "schema_migrations matches the contract required by migration 001.",

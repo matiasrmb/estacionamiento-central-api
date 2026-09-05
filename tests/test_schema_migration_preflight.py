@@ -13,7 +13,7 @@ from app.db.schema_migration_preflight import (
     evaluate_schema_migration_preflight,
     main,
 )
-from app.db.schema_migration_runner import MIGRATION_003_ID, MIGRATION_004_ID, MIGRATION_006_ID, MIGRATION_007_ID, plan_schema_migrations
+from app.db.schema_migration_runner import MIGRATION_003_ID, MIGRATION_004_ID, MIGRATION_006_ID, MIGRATION_007_ID, MIGRATION_008_ID, plan_schema_migrations
 
 
 class FakeEngine:
@@ -36,8 +36,13 @@ class SchemaMigrationPreflightTests(unittest.TestCase):
         self.assertFalse(result["apply"]["available"])
 
     def test_backup_confirmation_never_implies_execution(self):
+        plan = {
+            "database": "parking",
+            "schema_migrations": {"present": True},
+            "migrations": [{"id": "001_create_schema_migrations", "status": "pending"}],
+        }
         result = evaluate_schema_migration_preflight(
-            _inventory([]), _plan([]), {"backup_confirmed": True, "environment": "staging"}
+            _inventory(["schema_migrations"]), plan, {"backup_confirmed": True, "environment": "staging"}
         )
 
         self.assertEqual(result["status"], "READY_FOR_MANUAL_REVIEW")
@@ -137,7 +142,7 @@ class SchemaMigrationPreflightTests(unittest.TestCase):
         self.assertEqual(result["status"], "BLOCKED")
         self.assertEqual(_check_status(result, "wash_vehicle_type_pricing"), "BLOCKED")
 
-    def test_recorded_004_with_no_action_fk_rules_is_preflight_ok(self):
+    def test_recorded_004_with_unmet_later_prerequisites_blocks_preflight(self):
         inventory = _inventory(
             ["schema_migrations", "tipos_lavado", "pagos_mensuales", "operaciones_servicio", "ingresos"],
             migration_ids=[
@@ -150,7 +155,8 @@ class SchemaMigrationPreflightTests(unittest.TestCase):
         )
         result = evaluate_schema_migration_preflight(inventory, plan_schema_migrations(inventory))
 
-        self.assertEqual(result["status"], "PREFLIGHT_OK")
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertEqual(_check_status(result, "migration_prerequisites"), "BLOCKED")
         self.assertEqual(result["invalid_contract_migrations"], [])
         self.assertEqual(result["inconsistent_state_migrations"], [])
 
@@ -239,6 +245,25 @@ class SchemaMigrationPreflightTests(unittest.TestCase):
         self.assertNotEqual(
             evaluate_schema_migration_preflight(inventory, plan)["canonical_sha256"],
             evaluate_schema_migration_preflight(inventory, changed_plan)["canonical_sha256"],
+        )
+
+    def test_008_prerequisite_blocking_and_plan_sql_are_in_preflight_hash(self):
+        plan = {
+            "database": "parking", "schema_migrations": {"present": True},
+            "migrations": [{"id": MIGRATION_008_ID, "status": "blocked_prerequisite", "sql": []}],
+        }
+        blocked = evaluate_schema_migration_preflight(_inventory(["schema_migrations"]), plan)
+        self.assertEqual(blocked["blocked_migrations"], [MIGRATION_008_ID])
+        self.assertEqual(blocked["status"], "BLOCKED")
+        self.assertEqual(_check_status(blocked, "migration_prerequisites"), "BLOCKED")
+
+        pending = deepcopy(plan)
+        pending["migrations"][0] = {"id": MIGRATION_008_ID, "status": "pending", "sql": ["ALTER TABLE operaciones_servicio ADD COLUMN usuario_fin VARCHAR(50) NULL"]}
+        changed = deepcopy(pending)
+        changed["migrations"][0]["sql"].append("ALTER TABLE operaciones_servicio ADD INDEX idx_operaciones_servicio_patente (patente)")
+        self.assertNotEqual(
+            evaluate_schema_migration_preflight(_inventory(["schema_migrations"]), pending)["canonical_sha256"],
+            evaluate_schema_migration_preflight(_inventory(["schema_migrations"]), changed)["canonical_sha256"],
         )
 
     def test_canonical_hash_changes_when_plural_007_source_data_changes(self):

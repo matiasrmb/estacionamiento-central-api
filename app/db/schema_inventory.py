@@ -17,6 +17,12 @@ if TYPE_CHECKING:
 
 
 SCHEMA_INVENTORY_VERSION = 1
+_OPERACIONES_SERVICIO_ESTADOS = frozenset({
+    "ACTIVO",
+    "FINALIZADO_COBRADO",
+    "CONVERTIDO_ESTADIA",
+})
+_OPERACIONES_SERVICIO_ESTADO_MAX_LENGTH = max(map(len, _OPERACIONES_SERVICIO_ESTADOS))
 
 # Stable, migration-relevant configuration values. The query runs only when the
 # existing schema reports the configuracion table.
@@ -550,6 +556,185 @@ def operaciones_servicio_tipo_vehiculo_lavado_fk_contract(inventory: dict[str, A
     if orphan_snapshot.get("count") != 0:
         return _fk_contract(False, False, "blocked_orphans", ["orphan rows exist"], orphan_check_safe)
     return _fk_contract(False, True, "safe_to_add", [], orphan_check_safe)
+
+
+def operaciones_servicio_contract(inventory: dict[str, Any]) -> dict[str, Any]:
+    """Validate the existing service-operation table or a safe additive completion."""
+    table_name = "operaciones_servicio"
+    if table_name not in _table_names(inventory):
+        return _operaciones_servicio_result(False, "blocked_prerequisite", [
+            "operaciones_servicio table is missing; migration 008 does not create it",
+        ], (), ())
+
+    columns = {
+        str(row.get("column_name", "")).casefold(): row
+        for row in inventory.get("columns", [])
+        if isinstance(row, dict) and str(row.get("table_name", "")).casefold() == table_name
+    }
+    indexes = inventory.get("indexes", [])
+    issues = []
+    missing = []
+    for name, column_type, nullable, default, primary_key, auto_increment in (
+        ("id_operacion_servicio", "int", False, None, True, True),
+        ("patente", "varchar(10)", False, None, False, False),
+        ("id_tipo_vehiculo_lavado", "int", True, None, False, False),
+        ("fecha_hora_inicio", "datetime", False, None, False, False),
+        ("usuario_inicio", "varchar(50)", False, None, False, False),
+        ("id_ingreso_generado", "int", True, None, False, False),
+    ):
+        _operaciones_servicio_column(issues, missing, columns, name, column_type, nullable, default, primary_key, auto_increment, indexes)
+    base_missing = tuple(missing)
+    for name, column_type, nullable, default in (
+        ("fecha_hora_fin", "datetime", True, None),
+        ("usuario_fin", "varchar(50)", True, None),
+        ("cerrado", "tinyint(1)", False, "0"),
+    ):
+        _operaciones_servicio_column(issues, missing, columns, name, column_type, nullable, default, False, False, indexes)
+    _operaciones_servicio_wash_snapshot(issues, missing, columns)
+    _operaciones_servicio_duracion(issues, missing, columns)
+    _operaciones_servicio_estado(issues, missing, columns)
+    _operaciones_servicio_timestamp(issues, missing, columns, "created_at", False)
+    _operaciones_servicio_timestamp(issues, missing, columns, "updated_at", True)
+
+    missing_indexes = []
+    for index_name, expected_columns in (
+        ("idx_operaciones_servicio_estado_fecha", ("estado", "fecha_hora_inicio")),
+        ("idx_operaciones_servicio_patente", ("patente",)),
+        ("idx_operaciones_servicio_ingreso_generado", ("id_ingreso_generado",)),
+        ("idx_operaciones_servicio_tipo_vehiculo_lavado", ("id_tipo_vehiculo_lavado",)),
+        ("idx_operaciones_servicio_cierre", ("cerrado", "estado", "fecha_hora_fin")),
+    ):
+        state = _index_state(indexes, table_name, index_name, expected_columns)
+        if state == "missing":
+            missing_indexes.append(index_name)
+        elif state == "incompatible":
+            issues.append(f"{index_name} name is already used by a different index")
+
+    for contract, label in (
+        (operaciones_servicio_ingreso_generado_fk_contract(inventory), "004 generated-ingreso"),
+        (operaciones_servicio_tipo_vehiculo_lavado_fk_contract(inventory), "005 wash-vehicle-type"),
+    ):
+        if contract["valid"] is not True:
+            issues.append(f"{label} foreign key prerequisite is not valid")
+
+    if base_missing:
+        issues.extend(f"operaciones_servicio.{name} base column is missing" for name in base_missing)
+    if issues:
+        return _operaciones_servicio_result(False, "invalid", issues, tuple(missing), tuple(missing_indexes))
+    return _operaciones_servicio_result(
+        not missing and not missing_indexes,
+        "valid" if not missing and not missing_indexes else "safe_to_upgrade",
+        [], tuple(missing), tuple(missing_indexes),
+    )
+
+
+def _operaciones_servicio_column(issues, missing, columns, name, column_type, nullable, default, primary_key, auto_increment, indexes) -> None:
+    column = columns.get(name)
+    if column is None:
+        missing.append(name)
+        return
+    _require_column(issues, columns, name, column_type, nullable=nullable, auto_increment=auto_increment, indexes=indexes, default=default)
+    if primary_key and not _has_single_column_index(indexes, "operaciones_servicio", "primary", name):
+        issues.append(f"{name} must be the sole primary key column")
+
+
+def _operaciones_servicio_wash_snapshot(issues, missing, columns) -> None:
+    """Accept compatible historical CREATE and managed ALTER column forms."""
+    snapshot = columns.get("tipo_vehiculo_lavado_snapshot")
+    if snapshot is None:
+        missing.append("tipo_vehiculo_lavado_snapshot")
+    else:
+        if str(snapshot.get("column_type", "")).casefold() != "varchar(80)":
+            issues.append("tipo_vehiculo_lavado_snapshot column_type must be varchar(80)")
+        if str(snapshot.get("is_nullable", "")).casefold() not in {"yes", "no"}:
+            issues.append("tipo_vehiculo_lavado_snapshot must be NULL or NOT NULL")
+        if snapshot.get("column_default") is not None:
+            issues.append("tipo_vehiculo_lavado_snapshot default must be NULL")
+
+    value = columns.get("valor_lavado_snapshot")
+    if value is None:
+        missing.append("valor_lavado_snapshot")
+    else:
+        if str(value.get("column_type", "")).casefold() != "int":
+            issues.append("valor_lavado_snapshot column_type must be int")
+        if str(value.get("is_nullable", "")).casefold() != "no":
+            issues.append("valor_lavado_snapshot must be NOT NULL")
+        if value.get("column_default") not in {None, "0"}:
+            issues.append("valor_lavado_snapshot default must be NULL or 0")
+
+
+def _operaciones_servicio_estado(issues, missing, columns) -> None:
+    column = columns.get("estado")
+    if column is None:
+        missing.append("estado")
+        return
+    column_type = str(column.get("column_type", "")).replace(" ", "")
+    normalized_column_type = column_type.casefold()
+    varchar_length = re.fullmatch(r"varchar\((\d+)\)", normalized_column_type)
+    enum_values = set(re.findall(r"'((?:''|[^'])*)'", column_type))
+    if varchar_length and int(varchar_length.group(1)) < _OPERACIONES_SERVICIO_ESTADO_MAX_LENGTH:
+        issues.append(
+            "estado VARCHAR must fit all application-written states "
+            f"(at least {_OPERACIONES_SERVICIO_ESTADO_MAX_LENGTH} characters)"
+        )
+    elif normalized_column_type.startswith("enum(") and enum_values != _OPERACIONES_SERVICIO_ESTADOS:
+        issues.append("estado ENUM must exactly match application-written states")
+    elif not varchar_length and not normalized_column_type.startswith("enum("):
+        issues.append("estado must be a VARCHAR or ENUM containing all application-written states")
+    if str(column.get("is_nullable", "")).casefold() != "no":
+        issues.append("estado must be NOT NULL")
+    if str(column.get("column_default", "")) != "ACTIVO":
+        issues.append("estado default must be ACTIVO")
+
+
+def _operaciones_servicio_duracion(issues, missing, columns) -> None:
+    """Accept the current NOT NULL shape and the deployed nullable runtime shape."""
+    column = columns.get("duracion_minutos")
+    if column is None:
+        missing.append("duracion_minutos")
+        return
+    if str(column.get("column_type", "")).casefold() != "int":
+        issues.append("duracion_minutos column_type must be int")
+    nullable = str(column.get("is_nullable", "")).casefold()
+    if nullable == "no":
+        if str(column.get("column_default")) != "0":
+            issues.append("duracion_minutos NOT NULL default must be 0")
+    elif nullable != "yes":
+        issues.append("duracion_minutos must be NULL or NOT NULL")
+
+
+def _operaciones_servicio_timestamp(issues, missing, columns, name, on_update) -> None:
+    column = columns.get(name)
+    if column is None:
+        missing.append(name)
+        return
+    if str(column.get("data_type", "")).casefold() not in {"datetime", "timestamp"}:
+        issues.append(f"{name} must be DATETIME or TIMESTAMP")
+    if str(column.get("is_nullable", "")).casefold() != "no":
+        issues.append(f"{name} must be NOT NULL")
+    if not _has_current_timestamp_default(column.get("column_default")):
+        issues.append(f"{name} default must be CURRENT_TIMESTAMP")
+    if on_update and "on update current_timestamp" not in " ".join(str(column.get("extra", "")).casefold().split()):
+        issues.append(f"{name} must update with CURRENT_TIMESTAMP")
+
+
+def _index_state(indexes, table_name, index_name, expected_columns) -> str:
+    rows = sorted(
+        (row for row in indexes if isinstance(row, dict) and str(row.get("table_name", "")).casefold() == table_name and str(row.get("index_name", "")).casefold() == index_name),
+        key=lambda row: str(row.get("seq_in_index", "")),
+    )
+    if not rows:
+        return "missing"
+    actual_columns = tuple(str(row.get("column_name", "")).casefold() for row in rows)
+    return "valid" if (
+        actual_columns == expected_columns
+        and all(str(row.get("seq_in_index", "")) == str(position) for position, row in enumerate(rows, 1))
+        and all(str(row.get("non_unique", "")).casefold() in {"1", "true"} for row in rows)
+    ) else "incompatible"
+
+
+def _operaciones_servicio_result(valid, state, issues, missing_columns, missing_indexes) -> dict[str, Any]:
+    return {"valid": valid, "add_safe": state == "safe_to_upgrade", "state": state, "issues": issues, "missing_columns": list(missing_columns), "missing_indexes": list(missing_indexes)}
 
 
 def lavados_contract(inventory: dict[str, Any]) -> dict[str, Any]:

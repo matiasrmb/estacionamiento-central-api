@@ -4,6 +4,7 @@ from copy import deepcopy
 
 from app.db.schema_inventory import (
     collect_read_only_schema_inventory,
+    cierres_solo_lavado_totals_contract,
     pagos_mensuales_metodo_pago_contract,
     operaciones_servicio_ingreso_generado_fk_contract,
     operaciones_servicio_tipo_vehiculo_lavado_fk_contract,
@@ -638,6 +639,20 @@ class SchemaInventoryTests(unittest.TestCase):
         contract = operaciones_servicio_contract({"tables": [], "columns": [], "indexes": [], "foreign_keys": []})
         self.assertEqual((contract["valid"], contract["state"]), (False, "blocked_prerequisite"))
 
+    def test_cierres_solo_lavado_totals_contract_classifies_table_and_column_shapes(self):
+        absent = cierres_solo_lavado_totals_contract({"tables": [], "columns": []})
+        self.assertEqual((absent["valid"], absent["state"]), (False, "blocked_prerequisite"))
+        inventory = _cierres_solo_lavado_inventory()
+        self.assertEqual((cierres_solo_lavado_totals_contract(inventory)["valid"], cierres_solo_lavado_totals_contract(inventory)["state"]), (True, "valid"))
+        partial = deepcopy(inventory)
+        partial["columns"] = partial["columns"][:-1]
+        self.assertEqual((cierres_solo_lavado_totals_contract(partial)["valid"], cierres_solo_lavado_totals_contract(partial)["state"]), (False, "safe_to_add"))
+        for field, value in (("column_type", "bigint"), ("is_nullable", "YES"), ("column_default", "1")):
+            with self.subTest(field=field):
+                invalid = deepcopy(inventory)
+                invalid["columns"][0][field] = value
+                self.assertEqual(cierres_solo_lavado_totals_contract(invalid)["state"], "invalid")
+
 
 def _operaciones_servicio_inventory():
     columns = [
@@ -674,6 +689,16 @@ def _operaciones_servicio_inventory():
         {"constraint_name": "fk_operaciones_servicio_tipo_vehiculo_lavado", "table_name": "operaciones_servicio", "column_name": "id_tipo_vehiculo_lavado", "referenced_table_name": "tipos_vehiculo_lavado", "referenced_column_name": "id_tipo_vehiculo_lavado", "update_rule": "RESTRICT", "delete_rule": "RESTRICT"},
     ]
     return inventory
+
+
+def _cierres_solo_lavado_inventory():
+    return {
+        "tables": [{"table_name": "cierres_diarios"}],
+        "columns": [
+            {"table_name": "cierres_diarios", "column_name": name, "data_type": "int", "column_type": "int", "is_nullable": "NO", "column_default": "0"}
+            for name in ("total_lavados_solos", "total_lavados_solos_monto", "total_general")
+        ],
+    }
 
 
 if __name__ == "__main__":

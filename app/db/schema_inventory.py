@@ -628,6 +628,41 @@ def operaciones_servicio_contract(inventory: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def cierres_solo_lavado_totals_contract(inventory: dict[str, Any]) -> dict[str, Any]:
+    """Validate the additive solo-lavado totals on the existing daily-close table."""
+    table_name = "cierres_diarios"
+    if table_name not in _table_names(inventory):
+        return {
+            "valid": False, "add_safe": False, "state": "blocked_prerequisite",
+            "issues": ["cierres_diarios table is missing; migration 009 does not create it"],
+            "missing_columns": [],
+        }
+    columns = {
+        str(row.get("column_name", "")).casefold(): row
+        for row in inventory.get("columns", [])
+        if isinstance(row, dict) and str(row.get("table_name", "")).casefold() == table_name
+    }
+    issues = []
+    missing = []
+    for name in ("total_lavados_solos", "total_lavados_solos_monto", "total_general"):
+        column = columns.get(name)
+        if column is None:
+            missing.append(name)
+            continue
+        if not _is_int_compatible(column):
+            issues.append(f"cierres_diarios.{name} must be INT-compatible")
+        if str(column.get("is_nullable", "")).casefold() != "no":
+            issues.append(f"cierres_diarios.{name} must be NOT NULL")
+        if str(column.get("column_default")) != "0":
+            issues.append(f"cierres_diarios.{name} default must be 0")
+    if issues:
+        return {"valid": False, "add_safe": False, "state": "invalid", "issues": issues, "missing_columns": missing}
+    return {
+        "valid": not missing, "add_safe": bool(missing),
+        "state": "valid" if not missing else "safe_to_add", "issues": [], "missing_columns": missing,
+    }
+
+
 def _operaciones_servicio_column(issues, missing, columns, name, column_type, nullable, default, primary_key, auto_increment, indexes) -> None:
     column = columns.get(name)
     if column is None:
@@ -916,6 +951,14 @@ def _int_signedness(column: dict[str, Any]) -> bool | None:
     if not re.fullmatch(r"int(?:\(\d+\))?(?: unsigned)?", column_type):
         return None
     return column_type.endswith(" unsigned")
+
+
+def _is_int_compatible(column: dict[str, Any]) -> bool:
+    """Accept MySQL INT spelling variants without imposing a signedness policy."""
+    return (
+        str(column.get("data_type", "")).casefold() == "int"
+        and bool(re.fullmatch(r"int(?:\(\d+\))?(?: unsigned)?", " ".join(str(column.get("column_type", "")).casefold().split())))
+    )
 
 
 def _is_expected_fk(row: dict[str, Any]) -> bool:

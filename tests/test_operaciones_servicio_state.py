@@ -1,6 +1,8 @@
 import unittest
 from pathlib import Path
 
+from app import main
+from app.db import schema_ensure
 from app.repositories.operaciones_servicio_repo import (
     ESTADO_ACTIVO,
     ESTADO_CONVERTIDO_ESTADIA,
@@ -8,8 +10,8 @@ from app.repositories.operaciones_servicio_repo import (
     build_operacion_servicio_inicio,
     transition_operacion_servicio,
 )
+from app.repositories import operaciones_servicio_repo, wash_pricing_repo
 from app.db.schema_ensure import (
-    _ensure_operaciones_servicio_schema_on_connection,
     _ensure_wash_vehicle_type_schema_on_connection,
 )
 from app.schemas.operaciones_servicio import OperacionServicioState
@@ -89,23 +91,12 @@ class OperacionesServicioStateTests(unittest.TestCase):
         self.assertIn("id_ingreso_generado INT NULL", migration)
         self.assertIn("valor_lavado_snapshot INT NOT NULL", migration)
 
-    def test_runtime_ensure_creates_table_and_accounting_columns(self):
-        class FakeConn:
-            def __init__(self):
-                self.statements = []
-
-            def execute(self, statement):
-                self.statements.append(str(statement))
-
-        conn = FakeConn()
-
-        _ensure_operaciones_servicio_schema_on_connection(conn)
-
-        sql = "\n".join(conn.statements)
-        self.assertIn("CREATE TABLE IF NOT EXISTS operaciones_servicio", sql)
-        self.assertIn("cerrado BOOLEAN NOT NULL DEFAULT FALSE", sql)
-        self.assertIn("ALTER TABLE cierres_diarios ADD COLUMN total_lavados_solos", sql)
-        self.assertIn("idx_operaciones_servicio_cierre", sql)
+    def test_runtime_does_not_expose_operaciones_schema_ensure(self):
+        self.assertFalse(hasattr(schema_ensure, "ensure_operaciones_servicio_schema"))
+        self.assertFalse(hasattr(schema_ensure, "_ensure_operaciones_servicio_schema_on_connection"))
+        self.assertFalse(hasattr(main, "ensure_operaciones_servicio_schema"))
+        self.assertFalse(hasattr(operaciones_servicio_repo, "ensure_operaciones_servicio_schema"))
+        self.assertFalse(hasattr(wash_pricing_repo, "ensure_operaciones_servicio_schema"))
 
     def test_runtime_ensure_creates_wash_type_table_and_seeds_legacy_prices(self):
         class FakeResult:

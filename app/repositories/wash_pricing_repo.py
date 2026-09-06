@@ -5,7 +5,6 @@ from sqlalchemy import text
 from app.db.database import db_conn
 from app.db.schema_ensure import (
     NO_SOLO_LAVADO_PRICE_CONFIG_MESSAGE,
-    ensure_operaciones_servicio_schema,
     ensure_wash_vehicle_type_schema,
 )
 from app.schemas.wash_pricing import WashPriceSnapshot, WashTypeIn, WashVehicleTypeIn
@@ -225,7 +224,6 @@ def update_wash_vehicle_type(id_tipo_vehiculo_lavado: int, payload: WashVehicleT
 
 def delete_wash_vehicle_type(id_tipo_vehiculo_lavado: int) -> str:
     ensure_wash_vehicle_type_schema()
-    ensure_operaciones_servicio_schema()
     with db_conn() as conn:
         refs = conn.execute(text("""
             SELECT

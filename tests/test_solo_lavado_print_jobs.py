@@ -67,10 +67,9 @@ class SoloLavadoPrintJobTests(unittest.TestCase):
             "fecha_hora_inicio": datetime(2026, 7, 25, 10, 0),
         }
 
-    @patch.object(operaciones_servicio_repo, "ensure_operaciones_servicio_schema")
     @patch.object(operaciones_servicio_repo, "crear_print_job_solo_lavado", return_value=True)
     @patch.object(operaciones_servicio_repo, "db_conn")
-    def test_cobrar_crea_job_durable_en_la_misma_transaccion(self, db_conn, create_job, _ensure):
+    def test_cobrar_crea_job_durable_en_la_misma_transaccion(self, db_conn, create_job):
         connection = FakeConnection(self._operation())
         db_conn.return_value = FakeDbConn(connection)
 
@@ -84,10 +83,9 @@ class SoloLavadoPrintJobTests(unittest.TestCase):
         self.assertEqual(args[3], "cajero")
         self.assertTrue(result["cobra_ahora"])
 
-    @patch.object(operaciones_servicio_repo, "ensure_operaciones_servicio_schema")
     @patch.object(operaciones_servicio_repo, "crear_print_job_solo_lavado")
     @patch.object(operaciones_servicio_repo, "db_conn")
-    def test_finalized_operation_does_not_create_a_second_job(self, db_conn, create_job, _ensure):
+    def test_finalized_operation_does_not_create_a_second_job(self, db_conn, create_job):
         db_conn.return_value = FakeDbConn(FakeConnection(self._operation("FINALIZADO_COBRADO")))
 
         with self.assertRaisesRegex(RuntimeError, "SOLO_WASH_NOT_ACTIVE"):
@@ -95,10 +93,9 @@ class SoloLavadoPrintJobTests(unittest.TestCase):
 
         create_job.assert_not_called()
 
-    @patch.object(operaciones_servicio_repo, "ensure_operaciones_servicio_schema")
     @patch.object(operaciones_servicio_repo, "crear_print_job_solo_lavado", side_effect=RuntimeError("print job unavailable"))
     @patch.object(operaciones_servicio_repo, "db_conn")
-    def test_job_failure_rolls_back_service_finalization(self, db_conn, _create_job, _ensure):
+    def test_job_failure_rolls_back_service_finalization(self, db_conn, _create_job):
         connection = FakeConnection(self._operation())
         db_conn.return_value = FakeDbConn(connection)
 
@@ -108,10 +105,9 @@ class SoloLavadoPrintJobTests(unittest.TestCase):
         self.assertFalse(connection.committed)
         self.assertTrue(connection.rolled_back)
 
-    @patch.object(operaciones_servicio_repo, "ensure_operaciones_servicio_schema")
     @patch.object(operaciones_servicio_repo, "crear_print_job_solo_lavado", return_value=False)
     @patch.object(operaciones_servicio_repo, "db_conn")
-    def test_job_not_created_rolls_back_service_finalization(self, db_conn, _create_job, _ensure):
+    def test_job_not_created_rolls_back_service_finalization(self, db_conn, _create_job):
         connection = FakeConnection(self._operation())
         db_conn.return_value = FakeDbConn(connection)
 

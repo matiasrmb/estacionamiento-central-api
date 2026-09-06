@@ -18,7 +18,6 @@ from app.db.schema_ensure import (
     ensure_gastos_operacion_schema,
     ensure_monthly_payments_schema,
     ensure_noches_schema,
-    ensure_operaciones_servicio_schema,
     ensure_wash_vehicle_type_schema,
 )
 
@@ -68,7 +67,6 @@ def on_startup() -> None:
     ensure_asistencias_schema()
     try:
         ensure_wash_vehicle_type_schema()
-        ensure_operaciones_servicio_schema()
     except Exception:
         logger.exception("Could not ensure Solo lavado schema at startup")
     ensure_gastos_operacion_schema()

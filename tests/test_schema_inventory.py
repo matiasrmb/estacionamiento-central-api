@@ -4,6 +4,7 @@ from copy import deepcopy
 
 from app.db.schema_inventory import (
     collect_read_only_schema_inventory,
+    asistencias_device_sessions_contract,
     cierres_solo_lavado_totals_contract,
     pagos_mensuales_metodo_pago_contract,
     operaciones_servicio_ingreso_generado_fk_contract,
@@ -653,6 +654,49 @@ class SchemaInventoryTests(unittest.TestCase):
                 invalid["columns"][0][field] = value
                 self.assertEqual(cierres_solo_lavado_totals_contract(invalid)["state"], "invalid")
 
+    def test_asistencias_device_sessions_contract_classifies_additive_shapes(self):
+        absent = asistencias_device_sessions_contract({"tables": [], "columns": [], "indexes": []})
+        self.assertEqual((absent["valid"], absent["state"]), (False, "blocked_prerequisite"))
+
+        valid = _asistencias_device_sessions_inventory()
+        self.assertEqual((asistencias_device_sessions_contract(valid)["valid"], asistencias_device_sessions_contract(valid)["state"]), (True, "valid"))
+
+        for name in ("usuario", "hora_salida"):
+            with self.subTest(name=name):
+                missing_base = deepcopy(valid)
+                missing_base["columns"] = [row for row in missing_base["columns"] if row["column_name"] != name]
+                contract = asistencias_device_sessions_contract(missing_base)
+                self.assertEqual((contract["state"], contract["add_safe"]), ("blocked_prerequisite", False))
+                self.assertEqual(contract["missing_base_columns"], [name])
+                self.assertIn(f"asistencias.{name} base column is missing", contract["issues"])
+
+        partial = deepcopy(valid)
+        partial["columns"] = [row for row in partial["columns"] if row["column_name"] != "session_id"]
+        partial["indexes"] = []
+        contract = asistencias_device_sessions_contract(partial)
+        self.assertEqual((contract["add_safe"], contract["missing_columns"], contract["missing_indexes"]), (True, ["session_id"], ["idx_asistencias_sesion_activa"]))
+
+        for mutation, expected_issue in (
+            (lambda value: next(row for row in value["columns"] if row["column_name"] == "usuario").update(data_type="text", column_type="text"), "asistencias.usuario must be a character-compatible index column"),
+            (lambda value: next(row for row in value["columns"] if row["column_name"] == "hora_salida").update(data_type="text", column_type="text"), "asistencias.hora_salida must be a date/time-compatible index column"),
+            (lambda value: next(row for row in value["columns"] if row["column_name"] == "device_id").update(column_type="varchar(127)"), "asistencias.device_id must be VARCHAR(128) or longer"),
+            (lambda value: next(row for row in value["columns"] if row["column_name"] == "session_id").update(column_type="int", data_type="int"), "asistencias.session_id must be VARCHAR(64) or longer"),
+            (lambda value: next(row for row in value["columns"] if row["column_name"] == "session_id").update(is_nullable="NO"), "asistencias.session_id must be NULL"),
+            (lambda value: value["indexes"][1].update(column_name="hora_salida"), "idx_asistencias_sesion_activa name is already used by a different or UNIQUE index"),
+            (lambda value: (value["indexes"][0].update(seq_in_index=2), value["indexes"][1].update(seq_in_index=1)), "idx_asistencias_sesion_activa name is already used by a different or UNIQUE index"),
+            (lambda value: value["indexes"][0].update(non_unique=0), "idx_asistencias_sesion_activa name is already used by a different or UNIQUE index"),
+        ):
+            with self.subTest(expected_issue=expected_issue):
+                invalid = deepcopy(valid)
+                mutation(invalid)
+                contract = asistencias_device_sessions_contract(invalid)
+                self.assertEqual(contract["state"], "invalid")
+                self.assertIn(expected_issue, contract["issues"])
+
+        longer = deepcopy(valid)
+        next(row for row in longer["columns"] if row["column_name"] == "device_id")["column_type"] = "varchar(255)"
+        self.assertTrue(asistencias_device_sessions_contract(longer)["valid"])
+
 
 def _operaciones_servicio_inventory():
     columns = [
@@ -697,6 +741,22 @@ def _cierres_solo_lavado_inventory():
         "columns": [
             {"table_name": "cierres_diarios", "column_name": name, "data_type": "int", "column_type": "int", "is_nullable": "NO", "column_default": "0"}
             for name in ("total_lavados_solos", "total_lavados_solos_monto", "total_general")
+        ],
+    }
+
+
+def _asistencias_device_sessions_inventory():
+    return {
+        "tables": [{"table_name": "asistencias"}],
+        "columns": [
+            {"table_name": "asistencias", "column_name": "device_id", "data_type": "varchar", "column_type": "varchar(128)", "is_nullable": "YES"},
+            {"table_name": "asistencias", "column_name": "session_id", "data_type": "varchar", "column_type": "varchar(64)", "is_nullable": "YES"},
+            {"table_name": "asistencias", "column_name": "usuario", "data_type": "varchar", "column_type": "varchar(50)", "is_nullable": "NO"},
+            {"table_name": "asistencias", "column_name": "hora_salida", "data_type": "datetime", "column_type": "datetime", "is_nullable": "YES"},
+        ],
+        "indexes": [
+            {"table_name": "asistencias", "index_name": "idx_asistencias_sesion_activa", "column_name": name, "seq_in_index": position, "non_unique": 1}
+            for position, name in enumerate(("usuario", "session_id", "hora_salida"), 1)
         ],
     }
 

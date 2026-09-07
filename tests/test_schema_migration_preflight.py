@@ -13,7 +13,7 @@ from app.db.schema_migration_preflight import (
     evaluate_schema_migration_preflight,
     main,
 )
-from app.db.schema_migration_runner import MIGRATION_003_ID, MIGRATION_004_ID, MIGRATION_006_ID, MIGRATION_007_ID, MIGRATION_008_ID, MIGRATION_009_ID, plan_schema_migrations
+from app.db.schema_migration_runner import MIGRATION_003_ID, MIGRATION_004_ID, MIGRATION_006_ID, MIGRATION_007_ID, MIGRATION_008_ID, MIGRATION_009_ID, MIGRATION_010_ID, plan_schema_migrations
 
 
 class FakeEngine:
@@ -280,6 +280,25 @@ class SchemaMigrationPreflightTests(unittest.TestCase):
         repair["migrations"][0] = {"id": MIGRATION_009_ID, "status": "repair_required", "sql": ["INSERT INTO schema_migrations (migration_id) VALUES (:migration_id)"]}
         changed = deepcopy(pending)
         changed["migrations"][0]["sql"].append("ALTER TABLE cierres_diarios ADD COLUMN total_lavados_solos INT NOT NULL DEFAULT 0")
+        self.assertEqual(evaluate_schema_migration_preflight(_inventory(["schema_migrations"]), repair, {"backup_confirmed": True})["status"], "READY_FOR_MANUAL_REVIEW")
+        self.assertNotEqual(
+            evaluate_schema_migration_preflight(_inventory(["schema_migrations"]), pending)["canonical_sha256"],
+            evaluate_schema_migration_preflight(_inventory(["schema_migrations"]), changed)["canonical_sha256"],
+        )
+
+    def test_010_prerequisite_pending_repair_and_plan_sql_are_in_preflight_hash(self):
+        plan = {"database": "parking", "schema_migrations": {"present": True}, "migrations": [
+            {"id": MIGRATION_010_ID, "status": "blocked_prerequisite", "sql": []},
+        ]}
+        blocked = evaluate_schema_migration_preflight(_inventory(["schema_migrations"]), plan)
+        self.assertEqual(blocked["blocked_migrations"], [MIGRATION_010_ID])
+
+        pending = deepcopy(plan)
+        pending["migrations"][0] = {"id": MIGRATION_010_ID, "status": "pending", "sql": ["ALTER TABLE asistencias ADD COLUMN device_id VARCHAR(128) NULL"]}
+        repair = deepcopy(pending)
+        repair["migrations"][0] = {"id": MIGRATION_010_ID, "status": "repair_required", "sql": ["INSERT INTO schema_migrations (migration_id) VALUES (:migration_id)"]}
+        changed = deepcopy(pending)
+        changed["migrations"][0]["sql"].append("ALTER TABLE asistencias ADD INDEX idx_asistencias_sesion_activa (usuario, session_id, hora_salida)")
         self.assertEqual(evaluate_schema_migration_preflight(_inventory(["schema_migrations"]), repair, {"backup_confirmed": True})["status"], "READY_FOR_MANUAL_REVIEW")
         self.assertNotEqual(
             evaluate_schema_migration_preflight(_inventory(["schema_migrations"]), pending)["canonical_sha256"],

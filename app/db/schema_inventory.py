@@ -663,6 +663,63 @@ def cierres_solo_lavado_totals_contract(inventory: dict[str, Any]) -> dict[str, 
     }
 
 
+def asistencias_device_sessions_contract(inventory: dict[str, Any]) -> dict[str, Any]:
+    """Validate the additive device/session contract on the existing attendance table."""
+    table_name = "asistencias"
+    if table_name not in _table_names(inventory):
+        return {
+            "valid": False, "add_safe": False, "state": "blocked_prerequisite",
+            "issues": ["asistencias table is missing; migration 010 does not create it"],
+            "missing_columns": [], "missing_indexes": [],
+        }
+    columns = {
+        str(row.get("column_name", "")).casefold(): row
+        for row in inventory.get("columns", [])
+        if isinstance(row, dict) and str(row.get("table_name", "")).casefold() == table_name
+    }
+    missing_base_columns = [name for name in ("usuario", "hora_salida") if name not in columns]
+    if missing_base_columns:
+        return {
+            "valid": False, "add_safe": False, "state": "blocked_prerequisite",
+            "issues": [f"asistencias.{name} base column is missing" for name in missing_base_columns],
+            "missing_base_columns": missing_base_columns,
+            "missing_columns": [], "missing_indexes": [],
+        }
+    base_issues = []
+    if str(columns["usuario"].get("data_type", "")).casefold() not in {"char", "varchar", "enum"}:
+        base_issues.append("asistencias.usuario must be a character-compatible index column")
+    if str(columns["hora_salida"].get("data_type", "")).casefold() not in {"date", "datetime", "timestamp"}:
+        base_issues.append("asistencias.hora_salida must be a date/time-compatible index column")
+    issues = []
+    missing_columns = []
+    for name, minimum_length in (("device_id", 128), ("session_id", 64)):
+        column = columns.get(name)
+        if column is None:
+            missing_columns.append(name)
+            continue
+        match = re.fullmatch(r"varchar\((\d+)\)", str(column.get("column_type", "")).casefold().replace(" ", ""))
+        if match is None or int(match.group(1)) < minimum_length:
+            issues.append(f"asistencias.{name} must be VARCHAR({minimum_length}) or longer")
+        if str(column.get("is_nullable", "")).casefold() != "yes":
+            issues.append(f"asistencias.{name} must be NULL")
+    index_name = "idx_asistencias_sesion_activa"
+    index_state = _index_state(inventory.get("indexes", []), table_name, index_name, ("usuario", "session_id", "hora_salida"))
+    missing_indexes = [index_name] if index_state == "missing" else []
+    if index_state == "incompatible":
+        issues.append(f"{index_name} name is already used by a different or UNIQUE index")
+    if base_issues or issues:
+        return {
+            "valid": False, "add_safe": False, "state": "invalid", "issues": [*base_issues, *issues],
+            "missing_base_columns": [], "missing_columns": missing_columns, "missing_indexes": missing_indexes,
+        }
+    return {
+        "valid": not missing_columns and not missing_indexes,
+        "add_safe": bool(missing_columns or missing_indexes),
+        "state": "valid" if not missing_columns and not missing_indexes else "safe_to_add",
+        "issues": [], "missing_base_columns": [], "missing_columns": missing_columns, "missing_indexes": missing_indexes,
+    }
+
+
 def _operaciones_servicio_column(issues, missing, columns, name, column_type, nullable, default, primary_key, auto_increment, indexes) -> None:
     column = columns.get(name)
     if column is None:

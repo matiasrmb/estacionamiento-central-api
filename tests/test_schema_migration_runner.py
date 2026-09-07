@@ -20,6 +20,7 @@ from app.db.schema_migration_runner import (
     MIGRATION_007_ID,
     MIGRATION_008_ID,
     MIGRATION_009_ID,
+    MIGRATION_010_ID,
     WASH_VEHICLE_TYPE_DEFAULTS,
     apply_001_create_schema_migrations,
     apply_002_create_tipos_lavado,
@@ -30,6 +31,7 @@ from app.db.schema_migration_runner import (
     apply_007_migrate_wash_vehicle_type_pricing,
     apply_008_complete_operaciones_servicio_contract,
     apply_009_add_cierres_solo_lavado_totals,
+    apply_010_add_asistencias_device_sessions,
     collect_dry_run_plan,
     main,
     plan_schema_migrations,
@@ -121,6 +123,7 @@ class SchemaMigrationRunnerTests(unittest.TestCase):
             "007_migrate_wash_vehicle_type_pricing",
             "008_complete_operaciones_servicio_contract",
             "009_add_cierres_solo_lavado_totals",
+            "010_add_asistencias_device_sessions",
         ))
         self.assertEqual(
             [migration.migration_id for migration in MIGRATIONS],
@@ -1567,6 +1570,84 @@ class SchemaMigrationRunnerTests(unittest.TestCase):
         self.assertEqual(json.loads(output.getvalue()), result)
         apply.assert_called_once_with(fake_database.engine, backup_confirmed=True, dev_database_confirmed=True, expected_database="parking")
 
+    def test_010_plans_applies_repairs_noops_and_refuses_without_create_or_data_dml(self):
+        pending = _inventory_010(missing=("session_id", "idx_asistencias_sesion_activa"))
+        migration = plan_schema_migrations(pending)["migrations"][9]
+        self.assertEqual(migration["status"], "pending")
+        self.assertEqual(migration["sql"], [
+            "ALTER TABLE asistencias\n    ADD COLUMN session_id VARCHAR(64) NULL,\n    ADD INDEX idx_asistencias_sesion_activa (usuario, session_id, hora_salida)",
+            MIGRATION_001_RECORD_SQL,
+        ])
+        self.assertNotRegex("\n".join(migration["sql"]), r"(?i)CREATE TABLE|UPDATE|DELETE|INSERT INTO (?!schema_migrations)")
+        connection = ApplyConnection()
+        with patch("app.db.schema_migration_runner.collect_read_only_schema_inventory_from_engine", return_value=pending):
+            result = apply_010_add_asistencias_device_sessions(FakeEngine(connection), backup_confirmed=True, dev_database_confirmed=True, expected_database="parking")
+        self.assertEqual(result["status"], "applied")
+        self.assertEqual(connection.statements, [(migration["sql"][0], None), (MIGRATION_001_RECORD_SQL, {"migration_id": MIGRATION_010_ID})])
+
+        valid = _inventory_010()
+        repair = ApplyConnection()
+        with patch("app.db.schema_migration_runner.collect_read_only_schema_inventory_from_engine", return_value=valid):
+            self.assertEqual(apply_010_add_asistencias_device_sessions(FakeEngine(repair), backup_confirmed=True, dev_database_confirmed=True, expected_database="parking")["status"], "repaired")
+        self.assertEqual(repair.statements, [(MIGRATION_001_RECORD_SQL, {"migration_id": MIGRATION_010_ID})])
+
+        valid["migration_snapshot"]["records"].append({"migration_id": MIGRATION_010_ID})
+        noop = ApplyConnection()
+        with patch("app.db.schema_migration_runner.collect_read_only_schema_inventory_from_engine", return_value=valid):
+            self.assertEqual(apply_010_add_asistencias_device_sessions(FakeEngine(noop), backup_confirmed=True, dev_database_confirmed=True, expected_database="parking")["status"], "noop")
+        self.assertEqual(noop.statements, [])
+
+        for mutation in (
+            lambda value: value["tables"].pop(),
+            lambda value: value["columns"].pop(),
+            lambda value: value["indexes"].pop(),
+            lambda value: next(row for row in value["columns"] if row["column_name"] == "device_id").update(column_type="varchar(127)"),
+        ):
+            with self.subTest(mutation=mutation):
+                invalid = _inventory_010(recorded=True)
+                mutation(invalid)
+                connection = ApplyConnection()
+                with patch("app.db.schema_migration_runner.collect_read_only_schema_inventory_from_engine", return_value=invalid):
+                    result = apply_010_add_asistencias_device_sessions(FakeEngine(connection), backup_confirmed=True, dev_database_confirmed=True, expected_database="parking")
+                self.assertIn(plan_schema_migrations(invalid)["migrations"][9]["status"], {"blocked_prerequisite", "inconsistent_state"})
+                self.assertEqual(result["status"], "refused")
+                self.assertEqual(connection.statements, [])
+
+    def test_010_is_blocked_until_001_through_009_are_recorded(self):
+        for missing_id in _migration_010_prerequisites():
+            with self.subTest(missing_id=missing_id):
+                inventory = _inventory_010(migration_ids=[migration_id for migration_id in _migration_010_prerequisites() if migration_id != missing_id])
+                self.assertEqual(plan_schema_migrations(inventory)["migrations"][9]["status"], "blocked_prerequisite")
+
+    def test_010_blocks_missing_index_base_columns_without_planning_sql(self):
+        from app.db.schema_migration_preflight import evaluate_schema_migration_preflight
+
+        for name in ("usuario", "hora_salida"):
+            with self.subTest(name=name):
+                inventory = _inventory_010(missing=(name, "session_id", "idx_asistencias_sesion_activa"))
+                plan = plan_schema_migrations(inventory)
+                migration = plan["migrations"][9]
+                self.assertEqual(migration["status"], "blocked_prerequisite")
+                self.assertEqual(migration["sql"], [])
+                self.assertEqual(evaluate_schema_migration_preflight(inventory, plan)["status"], "BLOCKED")
+
+                connection = ApplyConnection()
+                with patch("app.db.schema_migration_runner.collect_read_only_schema_inventory_from_engine", return_value=inventory):
+                    result = apply_010_add_asistencias_device_sessions(FakeEngine(connection), backup_confirmed=True, dev_database_confirmed=True, expected_database="parking")
+                self.assertEqual(result["status"], "refused")
+                self.assertEqual(connection.statements, [])
+
+    def test_cli_010_dispatches_explicit_apply_flag(self):
+        output = io.StringIO()
+        fake_database = types.SimpleNamespace(engine=FakeEngine())
+        result = {"status": "noop"}
+        with patch.dict(sys.modules, {"app.db.database": fake_database}):
+            with patch("app.db.schema_migration_runner.apply_010_add_asistencias_device_sessions", return_value=result) as apply:
+                with redirect_stdout(output):
+                    self.assertEqual(main(["--apply-010-add-asistencias-device-sessions", "--backup-confirmed", "--confirm-dev-db", "--expected-database", "parking"]), 0)
+        self.assertEqual(json.loads(output.getvalue()), result)
+        apply.assert_called_once_with(fake_database.engine, backup_confirmed=True, dev_database_confirmed=True, expected_database="parking")
+
     def _assert_cli_apply_exit_code(self, result, expected_exit_code):
         output = io.StringIO()
         fake_database = types.SimpleNamespace(engine=FakeEngine())
@@ -1851,6 +1932,36 @@ def _inventory_009(*, missing=(), recorded=False, migration_ids=None):
     )
     if recorded:
         inventory["migration_snapshot"]["records"].append({"migration_id": MIGRATION_009_ID})
+    return inventory
+
+
+def _migration_010_prerequisites():
+    return [*_migration_009_prerequisites(), MIGRATION_009_ID]
+
+
+def _inventory_010(*, missing=(), recorded=False, migration_ids=None):
+    inventory = _inventory_009()
+    inventory["migration_snapshot"]["records"].append({"migration_id": MIGRATION_009_ID})
+    if migration_ids is not None:
+        inventory["migration_snapshot"]["records"] = [{"migration_id": migration_id} for migration_id in migration_ids]
+    inventory["tables"].append({"table_name": "asistencias", "table_collation": "utf8mb4_0900_ai_ci"})
+    inventory["columns"].extend(
+        {"table_name": "asistencias", "column_name": name, "data_type": "varchar", "column_type": column_type, "is_nullable": "YES"}
+        for name, column_type in (("device_id", "varchar(128)"), ("session_id", "varchar(64)"))
+        if name not in missing
+    )
+    inventory["columns"].extend(
+        {"table_name": "asistencias", "column_name": name, "data_type": data_type, "column_type": column_type, "is_nullable": nullable}
+        for name, data_type, column_type, nullable in (("usuario", "varchar", "varchar(50)", "NO"), ("hora_salida", "datetime", "datetime", "YES"))
+        if name not in missing
+    )
+    if "idx_asistencias_sesion_activa" not in missing:
+        inventory["indexes"].extend(
+            {"table_name": "asistencias", "index_name": "idx_asistencias_sesion_activa", "column_name": name, "seq_in_index": position, "non_unique": 1}
+            for position, name in enumerate(("usuario", "session_id", "hora_salida"), 1)
+        )
+    if recorded:
+        inventory["migration_snapshot"]["records"].append({"migration_id": MIGRATION_010_ID})
     return inventory
 
 

@@ -3,26 +3,16 @@ from datetime import datetime
 
 from sqlalchemy import create_engine, text
 
-from app.db.schema_ensure import _ensure_asistencias_schema_on_connection
+from app import main
+from app.db import schema_ensure
 from app.repositories.asistencias_repo import _calcular_resumen_sesion, _calcular_totales_turno, _cerrar_asistencias_activas
 
 
 class AsistenciasSessionSchemaTests(unittest.TestCase):
-    def test_runtime_schema_adds_device_and_session_columns(self):
-        class FakeConn:
-            def __init__(self):
-                self.statements = []
-
-            def execute(self, statement, params=None):
-                self.statements.append(str(statement))
-
-        conn = FakeConn()
-        _ensure_asistencias_schema_on_connection(conn)
-
-        sql = "\n".join(conn.statements)
-        self.assertIn("device_id VARCHAR(128) NULL", sql)
-        self.assertIn("session_id VARCHAR(64) NULL", sql)
-        self.assertIn("idx_asistencias_sesion_activa", sql)
+    def test_runtime_does_not_expose_asistencias_schema_ensure(self):
+        self.assertFalse(hasattr(schema_ensure, "ensure_asistencias_schema"))
+        self.assertFalse(hasattr(schema_ensure, "_ensure_asistencias_schema_on_connection"))
+        self.assertFalse(hasattr(main, "ensure_asistencias_schema"))
 
     def test_migration_declares_device_scoped_attendance(self):
         from pathlib import Path

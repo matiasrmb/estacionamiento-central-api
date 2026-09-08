@@ -2,9 +2,14 @@ import unittest
 from unittest.mock import patch
 
 from app import main
+from app.db import schema_ensure
 
 
 class MainStartupTests(unittest.TestCase):
+    def test_startup_does_not_import_asistencias_schema_ensure(self):
+        self.assertFalse(hasattr(schema_ensure, "ensure_asistencias_schema"))
+        self.assertFalse(hasattr(main, "ensure_asistencias_schema"))
+
     def test_successful_startup_ensures_all_schemas(self):
         with patch.object(type(main.settings), "validate_runtime_safety") as validate, \
              patch.object(main, "ensure_wash_vehicle_type_schema") as ensure_wash, \

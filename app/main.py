@@ -14,7 +14,6 @@ from app.core.errors import (
 )
 from app.api.v1.router import api_router
 from app.db.schema_ensure import (
-    ensure_asistencias_schema,
     ensure_gastos_operacion_schema,
     ensure_monthly_payments_schema,
     ensure_noches_schema,
@@ -64,7 +63,6 @@ app.add_exception_handler(Exception, unhandled_exception_handler)
 def on_startup() -> None:
     logger.info("Starting %s (env=%s)", settings.app_name, settings.env)
     settings.validate_runtime_safety()
-    ensure_asistencias_schema()
     try:
         ensure_wash_vehicle_type_schema()
     except Exception:

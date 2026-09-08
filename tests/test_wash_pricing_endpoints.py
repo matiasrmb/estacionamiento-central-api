@@ -32,6 +32,8 @@ _install_optional_dependency_stubs()
 from fastapi import HTTPException
 
 from app.api.v1.endpoints import wash_pricing
+from app.db.schema_ensure import SoloLavadoSchemaUnavailable
+from app.repositories import wash_pricing_repo
 
 
 def _allowed_roles(function):
@@ -43,6 +45,95 @@ def _allowed_roles(function):
 
 
 class WashPricingEndpointsTests(unittest.TestCase):
+    def test_missing_wash_table_errors_become_schema_unavailable_without_writes(self):
+        messages = (
+            '(pymysql.err.ProgrammingError) (1146, "Table \'estacionamiento.tipos_vehiculo_lavado\' doesn\'t exist")',
+            'psycopg.errors.UndefinedTable: relation "tipos_vehiculo_lavado" does not exist',
+            "sqlite3.OperationalError: no such table: tipos_vehiculo_lavado",
+        )
+        for message in messages:
+            with self.subTest(message=message), patch.object(wash_pricing_repo, "db_conn") as db_conn:
+                conn = db_conn.return_value.__enter__.return_value
+                conn.execute.side_effect = Exception(message)
+
+                with self.assertRaises(SoloLavadoSchemaUnavailable):
+                    wash_pricing_repo.list_wash_vehicle_types(require_config=True)
+
+                statements = [str(call.args[0]).upper() for call in conn.execute.call_args_list]
+                self.assertEqual(len(statements), 1)
+                self.assertTrue(statements[0].lstrip().startswith("SELECT"))
+                self.assertFalse(any("CREATE" in statement or "ALTER" in statement or "INSERT" in statement for statement in statements))
+
+    def test_delete_reference_check_translates_missing_wash_table_without_writes(self):
+        with patch.object(wash_pricing_repo, "db_conn") as db_conn:
+            conn = db_conn.return_value.__enter__.return_value
+            conn.execute.side_effect = Exception("Table 'estacionamiento.tipos_vehiculo_lavado' doesn't exist")
+
+            with self.assertRaises(SoloLavadoSchemaUnavailable):
+                wash_pricing_repo.delete_wash_vehicle_type(8)
+
+            statements = [str(call.args[0]).upper() for call in conn.execute.call_args_list]
+            self.assertEqual(len(statements), 1)
+            self.assertTrue(statements[0].lstrip().startswith("SELECT"))
+            conn.commit.assert_not_called()
+
+    def test_create_missing_wash_table_raises_schema_unavailable_without_commit(self):
+        with patch.object(wash_pricing_repo, "db_conn") as db_conn:
+            conn = db_conn.return_value.__enter__.return_value
+            conn.execute.side_effect = Exception("Table 'estacionamiento.tipos_vehiculo_lavado' doesn't exist")
+
+            with self.assertRaises(SoloLavadoSchemaUnavailable):
+                wash_pricing_repo.create_wash_vehicle_type(
+                    wash_pricing.WashVehicleTypeIn(codigo="suv", nombre="SUV", valor_lavado=9000)
+                )
+
+            conn.commit.assert_not_called()
+
+    def test_update_missing_wash_table_raises_schema_unavailable_without_commit(self):
+        with patch.object(wash_pricing_repo, "db_conn") as db_conn:
+            conn = db_conn.return_value.__enter__.return_value
+            conn.execute.side_effect = Exception("Table 'estacionamiento.tipos_vehiculo_lavado' doesn't exist")
+
+            with self.assertRaises(SoloLavadoSchemaUnavailable):
+                wash_pricing_repo.update_wash_vehicle_type(
+                    8,
+                    wash_pricing.WashVehicleTypeIn(codigo="suv", nombre="SUV", valor_lavado=9000),
+                )
+
+            conn.commit.assert_not_called()
+
+    @patch.object(wash_pricing, "repo_list_wash_vehicle_types")
+    def test_missing_wash_table_returns_503(self, repo_list):
+        repo_list.side_effect = SoloLavadoSchemaUnavailable("Solo lavado no disponible: falta la tabla de precios.")
+
+        with self.assertRaises(HTTPException) as ctx:
+            wash_pricing.listar_tipos_vehiculo_lavado()
+
+        self.assertEqual(ctx.exception.status_code, 503)
+
+    @patch.object(wash_pricing, "repo_create_wash_vehicle_type")
+    def test_create_missing_wash_table_returns_503(self, repo_create):
+        repo_create.side_effect = SoloLavadoSchemaUnavailable("Solo lavado no disponible: falta la tabla de precios.")
+
+        with self.assertRaises(HTTPException) as ctx:
+            wash_pricing.crear_tipo_vehiculo_lavado(
+                wash_pricing.WashVehicleTypeIn(codigo="suv", nombre="SUV", valor_lavado=9000)
+            )
+
+        self.assertEqual(ctx.exception.status_code, 503)
+
+    @patch.object(wash_pricing, "repo_update_wash_vehicle_type")
+    def test_update_missing_wash_table_returns_503(self, repo_update):
+        repo_update.side_effect = SoloLavadoSchemaUnavailable("Solo lavado no disponible: falta la tabla de precios.")
+
+        with self.assertRaises(HTTPException) as ctx:
+            wash_pricing.actualizar_tipo_vehiculo_lavado(
+                8,
+                wash_pricing.WashVehicleTypeIn(codigo="suv", nombre="SUV", valor_lavado=9000),
+            )
+
+        self.assertEqual(ctx.exception.status_code, 503)
+
     def test_vehicle_type_crud_is_admin_only(self):
         self.assertEqual(_allowed_roles(wash_pricing.listar_tipos_vehiculo_lavado), {"admin"})
         self.assertEqual(_allowed_roles(wash_pricing.crear_tipo_vehiculo_lavado), {"admin"})

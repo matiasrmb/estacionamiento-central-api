@@ -5,7 +5,8 @@ from sqlalchemy import text
 from app.db.database import db_conn
 from app.db.schema_ensure import (
     NO_SOLO_LAVADO_PRICE_CONFIG_MESSAGE,
-    ensure_wash_vehicle_type_schema,
+    SoloLavadoSchemaUnavailable,
+    raise_if_missing_solo_lavado_schema,
 )
 from app.schemas.wash_pricing import WashPriceSnapshot, WashTypeIn, WashVehicleTypeIn
 
@@ -118,15 +119,17 @@ def delete_wash_type(id_tipo_lavado: int) -> str:
 def list_wash_vehicle_types(table_name: str = "tipos_vehiculo_lavado", require_config: bool = False) -> List[Dict[str, Any]]:
     if table_name not in WASH_VEHICLE_TYPE_TABLES:
         raise ValueError("INVALID_WASH_VEHICLE_TYPE_TABLE")
-    if table_name == "tipos_vehiculo_lavado":
-        ensure_wash_vehicle_type_schema()
-
-    with db_conn() as conn:
-        rows = conn.execute(text(f"""
-            SELECT id_tipo_vehiculo_lavado, codigo, nombre, valor_lavado, activo
-            FROM {table_name}
-            ORDER BY nombre ASC
-        """)).mappings().all()
+    try:
+        with db_conn() as conn:
+            rows = conn.execute(text(f"""
+                SELECT id_tipo_vehiculo_lavado, codigo, nombre, valor_lavado, activo
+                FROM {table_name}
+                ORDER BY nombre ASC
+            """)).mappings().all()
+    except Exception as exc:
+        if table_name == "tipos_vehiculo_lavado":
+            raise_if_missing_solo_lavado_schema(exc)
+        raise
     items = [dict(r) for r in rows]
     if table_name == "tipos_vehiculo_lavado" and require_config and not items:
         raise RuntimeError(NO_SOLO_LAVADO_PRICE_CONFIG_MESSAGE)
@@ -144,7 +147,7 @@ def list_wash_vehicle_types_for_quotes() -> List[Dict[str, Any]]:
         try:
             rows = list_wash_vehicle_types(table_name)
         except Exception as exc:
-            if not _looks_like_missing_wash_table(exc):
+            if not isinstance(exc, SoloLavadoSchemaUnavailable) and not _looks_like_missing_wash_table(exc):
                 raise
             continue
         if any(int(row.get("activo") or 0) for row in rows):
@@ -193,60 +196,69 @@ def _looks_like_missing_wash_table(exc: Exception) -> bool:
 
 
 def create_wash_vehicle_type(payload: WashVehicleTypeIn) -> int:
-    ensure_wash_vehicle_type_schema()
     data = build_wash_vehicle_type_payload(payload)
-    with db_conn() as conn:
-        conn.execute(text("""
-            INSERT INTO tipos_vehiculo_lavado (codigo, nombre, valor_lavado, activo)
-            VALUES (:codigo, :nombre, :valor_lavado, :activo)
-        """), data)
-        conn.commit()
-        return int(conn.execute(text("SELECT LAST_INSERT_ID()")).scalar())
+    try:
+        with db_conn() as conn:
+            conn.execute(text("""
+                INSERT INTO tipos_vehiculo_lavado (codigo, nombre, valor_lavado, activo)
+                VALUES (:codigo, :nombre, :valor_lavado, :activo)
+            """), data)
+            conn.commit()
+            return int(conn.execute(text("SELECT LAST_INSERT_ID()")).scalar())
+    except Exception as exc:
+        raise_if_missing_solo_lavado_schema(exc)
+        raise
 
 
 def update_wash_vehicle_type(id_tipo_vehiculo_lavado: int, payload: WashVehicleTypeIn) -> None:
-    ensure_wash_vehicle_type_schema()
     data = build_wash_vehicle_type_payload(payload)
     data["id_tipo_vehiculo_lavado"] = id_tipo_vehiculo_lavado
-    with db_conn() as conn:
-        result = conn.execute(text("""
-            UPDATE tipos_vehiculo_lavado
-            SET codigo = :codigo,
-                nombre = :nombre,
-                valor_lavado = :valor_lavado,
-                activo = :activo
-            WHERE id_tipo_vehiculo_lavado = :id_tipo_vehiculo_lavado
-        """), data)
-        conn.commit()
-        if result.rowcount != 1:
-            raise LookupError("WASH_VEHICLE_TYPE_NOT_FOUND")
+    try:
+        with db_conn() as conn:
+            result = conn.execute(text("""
+                UPDATE tipos_vehiculo_lavado
+                SET codigo = :codigo,
+                    nombre = :nombre,
+                    valor_lavado = :valor_lavado,
+                    activo = :activo
+                WHERE id_tipo_vehiculo_lavado = :id_tipo_vehiculo_lavado
+            """), data)
+            conn.commit()
+            if result.rowcount != 1:
+                raise LookupError("WASH_VEHICLE_TYPE_NOT_FOUND")
+    except Exception as exc:
+        raise_if_missing_solo_lavado_schema(exc)
+        raise
 
 
 def delete_wash_vehicle_type(id_tipo_vehiculo_lavado: int) -> str:
-    ensure_wash_vehicle_type_schema()
-    with db_conn() as conn:
-        refs = conn.execute(text("""
-            SELECT
-                (SELECT COUNT(*) FROM lavados WHERE id_tipo_vehiculo_lavado = :id) +
-                (SELECT COUNT(*) FROM operaciones_servicio WHERE id_tipo_vehiculo_lavado = :id)
-        """), {"id": id_tipo_vehiculo_lavado}).scalar()
+    try:
+        with db_conn() as conn:
+            refs = conn.execute(text("""
+                SELECT
+                    (SELECT COUNT(*) FROM lavados WHERE id_tipo_vehiculo_lavado = :id) +
+                    (SELECT COUNT(*) FROM operaciones_servicio WHERE id_tipo_vehiculo_lavado = :id)
+            """), {"id": id_tipo_vehiculo_lavado}).scalar()
 
-        action = resolve_wash_type_delete_action(int(refs or 0))
-        if action == "deactivate":
-            result = conn.execute(text("""
-                UPDATE tipos_vehiculo_lavado
-                SET activo = 0
-                WHERE id_tipo_vehiculo_lavado = :id
-            """), {"id": id_tipo_vehiculo_lavado})
-            action = "deactivated"
-        else:
-            result = conn.execute(text("""
-                DELETE FROM tipos_vehiculo_lavado
-                WHERE id_tipo_vehiculo_lavado = :id
-            """), {"id": id_tipo_vehiculo_lavado})
-            action = "deleted"
+            action = resolve_wash_type_delete_action(int(refs or 0))
+            if action == "deactivate":
+                result = conn.execute(text("""
+                    UPDATE tipos_vehiculo_lavado
+                    SET activo = 0
+                    WHERE id_tipo_vehiculo_lavado = :id
+                """), {"id": id_tipo_vehiculo_lavado})
+                action = "deactivated"
+            else:
+                result = conn.execute(text("""
+                    DELETE FROM tipos_vehiculo_lavado
+                    WHERE id_tipo_vehiculo_lavado = :id
+                """), {"id": id_tipo_vehiculo_lavado})
+                action = "deleted"
 
-        conn.commit()
-        if result.rowcount != 1:
-            raise LookupError("WASH_VEHICLE_TYPE_NOT_FOUND")
+            conn.commit()
+            if result.rowcount != 1:
+                raise LookupError("WASH_VEHICLE_TYPE_NOT_FOUND")
+    except Exception as exc:
+        raise_if_missing_solo_lavado_schema(exc)
+        raise
     return action

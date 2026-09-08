@@ -1,5 +1,6 @@
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 from app import main
 from app.db import schema_ensure
@@ -11,13 +12,29 @@ from app.repositories.operaciones_servicio_repo import (
     transition_operacion_servicio,
 )
 from app.repositories import operaciones_servicio_repo, wash_pricing_repo
-from app.db.schema_ensure import (
-    _ensure_wash_vehicle_type_schema_on_connection,
-)
 from app.schemas.operaciones_servicio import OperacionServicioState
+from app.db.schema_ensure import SoloLavadoSchemaUnavailable
 
 
 class OperacionesServicioStateTests(unittest.TestCase):
+    def test_start_translates_missing_wash_table_before_any_write(self):
+        empty_result = Mock()
+        empty_result.first.return_value = None
+        missing_table = Exception('(pymysql.err.ProgrammingError) (1146, "Table \'estacionamiento.tipos_vehiculo_lavado\' doesn\'t exist")')
+
+        with patch.object(operaciones_servicio_repo, "db_conn") as db_conn:
+            conn = db_conn.return_value.__enter__.return_value
+            conn.execute.side_effect = [empty_result, empty_result, missing_table]
+
+            with self.assertRaises(SoloLavadoSchemaUnavailable):
+                operaciones_servicio_repo.iniciar_solo_lavado("AA111AA", 7, "operador")
+
+            statements = [str(call.args[0]).upper() for call in conn.execute.call_args_list]
+            self.assertEqual(len(statements), 3)
+            self.assertTrue(all(statement.lstrip().startswith("SELECT") for statement in statements))
+            self.assertFalse(any("CREATE" in statement or "ALTER" in statement or "INSERT" in statement for statement in statements))
+            conn.commit.assert_not_called()
+
     def test_active_operation_can_finish_as_charged_with_price_snapshot(self):
         operacion = build_operacion_servicio_inicio(
             patente="AA111AA",
@@ -97,33 +114,6 @@ class OperacionesServicioStateTests(unittest.TestCase):
         self.assertFalse(hasattr(main, "ensure_operaciones_servicio_schema"))
         self.assertFalse(hasattr(operaciones_servicio_repo, "ensure_operaciones_servicio_schema"))
         self.assertFalse(hasattr(wash_pricing_repo, "ensure_operaciones_servicio_schema"))
-
-    def test_runtime_ensure_creates_wash_type_table_and_seeds_legacy_prices(self):
-        class FakeResult:
-            def mappings(self):
-                return self
-
-            def all(self):
-                return [{"clave": "lavado_citycar", "valor": "5000"}]
-
-        class FakeConn:
-            def __init__(self):
-                self.statements = []
-
-            def execute(self, statement, params=None):
-                self.statements.append((str(statement), params))
-                return FakeResult()
-
-        conn = FakeConn()
-
-        _ensure_wash_vehicle_type_schema_on_connection(conn)
-
-        sql = "\n".join(statement for statement, _ in conn.statements)
-        self.assertIn("CREATE TABLE IF NOT EXISTS tipos_vehiculo_lavado", sql)
-        self.assertIn("FROM tipos_vehiculos_lavado", sql)
-        self.assertIn("INSERT INTO tipos_vehiculo_lavado", sql)
-        self.assertIn("ON DUPLICATE KEY UPDATE", sql)
-
 
 if __name__ == "__main__":
     unittest.main()

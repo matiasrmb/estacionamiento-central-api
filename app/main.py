@@ -17,7 +17,6 @@ from app.db.schema_ensure import (
     ensure_gastos_operacion_schema,
     ensure_monthly_payments_schema,
     ensure_noches_schema,
-    ensure_wash_vehicle_type_schema,
 )
 
 setup_logging()
@@ -63,10 +62,6 @@ app.add_exception_handler(Exception, unhandled_exception_handler)
 def on_startup() -> None:
     logger.info("Starting %s (env=%s)", settings.app_name, settings.env)
     settings.validate_runtime_safety()
-    try:
-        ensure_wash_vehicle_type_schema()
-    except Exception:
-        logger.exception("Could not ensure Solo lavado schema at startup")
     ensure_gastos_operacion_schema()
     ensure_monthly_payments_schema()
     ensure_noches_schema()

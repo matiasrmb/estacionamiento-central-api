@@ -5,7 +5,7 @@ from sqlalchemy import text
 
 from app.db.database import db_conn
 from app.core.plates import require_valid_plate
-from app.db.schema_ensure import ensure_wash_vehicle_type_schema
+from app.db.schema_ensure import raise_if_missing_solo_lavado_schema
 from app.services.print_jobs import crear_print_job_solo_lavado
 
 from app.schemas.operaciones_servicio import OperacionServicioContrato, OperacionServicioState
@@ -73,7 +73,6 @@ def _state_value(estado: Any) -> str:
 
 
 def iniciar_solo_lavado(patente: str, id_tipo_vehiculo_lavado: int, usuario: str) -> Dict[str, Any]:
-    ensure_wash_vehicle_type_schema()
     patente = require_valid_plate(patente)
     now = datetime.now()
     with db_conn() as conn:
@@ -99,12 +98,16 @@ def iniciar_solo_lavado(patente: str, id_tipo_vehiculo_lavado: int, usuario: str
         if active_operation:
             raise RuntimeError("SOLO_WASH_ALREADY_ACTIVE")
 
-        wash_type = conn.execute(text("""
-            SELECT id_tipo_vehiculo_lavado, nombre, valor_lavado, activo
-            FROM tipos_vehiculo_lavado
-            WHERE id_tipo_vehiculo_lavado = :id
-            LIMIT 1
-        """), {"id": id_tipo_vehiculo_lavado}).mappings().first()
+        try:
+            wash_type = conn.execute(text("""
+                SELECT id_tipo_vehiculo_lavado, nombre, valor_lavado, activo
+                FROM tipos_vehiculo_lavado
+                WHERE id_tipo_vehiculo_lavado = :id
+                LIMIT 1
+            """), {"id": id_tipo_vehiculo_lavado}).mappings().first()
+        except Exception as exc:
+            raise_if_missing_solo_lavado_schema(exc)
+            raise
         if not wash_type:
             raise LookupError("WASH_VEHICLE_TYPE_NOT_FOUND")
         if not int(wash_type.get("activo") or 0):

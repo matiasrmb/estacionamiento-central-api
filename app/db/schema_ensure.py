@@ -9,7 +9,6 @@ from app.db.database import db_conn
 
 logger = logging.getLogger(__name__)
 
-_ensured_wash_vehicle_types = False
 _ensured_gastos_operacion = False
 _ensured_monthly_payments = False
 _ensured_noches = False
@@ -26,17 +25,18 @@ NO_SOLO_LAVADO_PRICE_CONFIG_MESSAGE = (
     "Configurá o activá un precio/tipo de lavado en Configuración para Solo lavado."
 )
 
-LEGACY_WASH_CATEGORIES = {
-    "lavado_citycar": "CityCar",
-    "lavado_suv": "SUV",
-    "lavado_camioneta": "Camioneta",
-    "lavado_furgon": "Furgón",
-    "lavado_minibus": "Mini bus o vehículos grandes",
-}
-
-
 class SoloLavadoSchemaUnavailable(RuntimeError):
-    """Raised when the runtime Solo lavado schema ensure cannot be applied."""
+    """Raised when the required Solo lavado schema is unavailable."""
+
+
+def raise_if_missing_solo_lavado_schema(exc: Exception) -> None:
+    """Translate a missing canonical wash pricing table error without modifying the DB."""
+    message = str(exc).casefold()
+    if "tipos_vehiculo_lavado" in message and any(
+        marker in message
+        for marker in ("doesn't exist", "does not exist", "no such table", "undefined table")
+    ):
+        raise SoloLavadoSchemaUnavailable(SOLO_LAVADO_SCHEMA_UNAVAILABLE_MESSAGE) from exc
 
 
 def _is_duplicate_schema_error(exc: DBAPIError) -> bool:
@@ -57,23 +57,6 @@ def _execute_schema(conn: Connection, statement: str) -> None:
 def _execute_many_schema(conn: Connection, statements: Iterable[str]) -> None:
     for statement in statements:
         _execute_schema(conn, statement)
-
-
-def ensure_wash_vehicle_type_schema() -> None:
-    """Ensure canonical solo-lavado type/pricing table exists and is usable."""
-    global _ensured_wash_vehicle_types
-    if _ensured_wash_vehicle_types:
-        return
-
-    try:
-        with db_conn() as conn:
-            _ensure_wash_vehicle_type_schema_on_connection(conn)
-            conn.commit()
-    except SoloLavadoSchemaUnavailable:
-        raise
-    except Exception as exc:
-        raise SoloLavadoSchemaUnavailable(SOLO_LAVADO_SCHEMA_UNAVAILABLE_MESSAGE) from exc
-    _ensured_wash_vehicle_types = True
 
 
 def ensure_gastos_operacion_schema() -> None:
@@ -119,74 +102,6 @@ def ensure_noches_schema() -> None:
     except Exception as exc:
         raise RuntimeError("NOCHES_SCHEMA_UNAVAILABLE") from exc
     _ensured_noches = True
-
-
-def _ensure_wash_vehicle_type_schema_on_connection(conn: Connection) -> None:
-    _execute_schema(conn, """
-        CREATE TABLE IF NOT EXISTS tipos_vehiculo_lavado (
-            id_tipo_vehiculo_lavado INT AUTO_INCREMENT PRIMARY KEY,
-            codigo VARCHAR(50) NOT NULL UNIQUE,
-            nombre VARCHAR(80) NOT NULL,
-            valor_lavado INT NOT NULL,
-            activo BOOLEAN NOT NULL DEFAULT TRUE,
-            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-        )
-    """)
-    _copy_plural_wash_vehicle_types_if_present(conn)
-    _seed_wash_vehicle_types_from_legacy_config(conn)
-
-
-def _copy_plural_wash_vehicle_types_if_present(conn: Connection) -> None:
-    try:
-        conn.execute(text("""
-            INSERT INTO tipos_vehiculo_lavado (codigo, nombre, valor_lavado, activo)
-            SELECT codigo, nombre, valor_lavado, activo
-            FROM tipos_vehiculos_lavado
-            ON DUPLICATE KEY UPDATE
-                nombre = VALUES(nombre),
-                valor_lavado = VALUES(valor_lavado),
-                activo = VALUES(activo)
-        """))
-    except Exception as exc:
-        if not _looks_like_missing_wash_type_table(exc):
-            raise
-
-
-def _seed_wash_vehicle_types_from_legacy_config(conn: Connection) -> None:
-    rows = conn.execute(text("""
-        SELECT clave, valor
-        FROM configuracion
-        WHERE clave LIKE 'lavado_%'
-    """)).mappings().all()
-    configured = {row["clave"]: row["valor"] for row in rows}
-    for clave, nombre in LEGACY_WASH_CATEGORIES.items():
-        amount = _to_positive_int(configured.get(clave))
-        if amount is None:
-            continue
-        conn.execute(text("""
-            INSERT INTO tipos_vehiculo_lavado (codigo, nombre, valor_lavado, activo)
-            VALUES (:codigo, :nombre, :valor_lavado, TRUE)
-            ON DUPLICATE KEY UPDATE
-                nombre = VALUES(nombre),
-                valor_lavado = VALUES(valor_lavado),
-                activo = TRUE
-        """), {"codigo": clave, "nombre": nombre, "valor_lavado": amount})
-
-
-def _to_positive_int(value) -> int | None:
-    try:
-        amount = int(float(value))
-    except (TypeError, ValueError):
-        return None
-    return amount if amount > 0 else None
-
-
-def _looks_like_missing_wash_type_table(exc: Exception) -> bool:
-    message = str(exc).lower()
-    return any(table in message for table in ("tipos_vehiculo_lavado", "tipos_vehiculos_lavado")) and (
-        "doesn't exist" in message or "does not exist" in message or "no such table" in message
-    )
 
 
 def _ensure_gastos_operacion_schema_on_connection(conn: Connection) -> None:

@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.api.deps import require_role
+from app.db.schema_ensure import SoloLavadoSchemaUnavailable
 from app.repositories.wash_pricing_repo import (
     create_wash_type as repo_create_wash_type,
     create_wash_vehicle_type as repo_create_wash_vehicle_type,
@@ -18,6 +19,8 @@ router = APIRouter(tags=["wash-pricing"])
 
 
 def _handle_wash_pricing_error(exc: Exception) -> None:
+    if isinstance(exc, SoloLavadoSchemaUnavailable):
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
     if isinstance(exc, LookupError):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
     if isinstance(exc, ValueError):
@@ -59,7 +62,10 @@ def eliminar_tipo_lavado(id_tipo_lavado: int, _user=Depends(require_role("admin"
 
 @router.get("/tipos-vehiculo-lavado")
 def listar_tipos_vehiculo_lavado(_user=Depends(require_role("admin"))):
-    return {"items": repo_list_wash_vehicle_types()}
+    try:
+        return {"items": repo_list_wash_vehicle_types()}
+    except Exception as exc:
+        _handle_wash_pricing_error(exc)
 
 
 @router.post("/tipos-vehiculo-lavado", status_code=status.HTTP_201_CREATED)

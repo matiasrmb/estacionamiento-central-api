@@ -21,6 +21,7 @@ from app.db.schema_migration_runner import (
     MIGRATION_008_ID,
     MIGRATION_009_ID,
     MIGRATION_010_ID,
+    MIGRATION_011_ID,
     WASH_VEHICLE_TYPE_DEFAULTS,
     apply_001_create_schema_migrations,
     apply_002_create_tipos_lavado,
@@ -32,6 +33,7 @@ from app.db.schema_migration_runner import (
     apply_008_complete_operaciones_servicio_contract,
     apply_009_add_cierres_solo_lavado_totals,
     apply_010_add_asistencias_device_sessions,
+    apply_011_manage_noches_contract,
     collect_dry_run_plan,
     main,
     plan_schema_migrations,
@@ -124,6 +126,7 @@ class SchemaMigrationRunnerTests(unittest.TestCase):
             "008_complete_operaciones_servicio_contract",
             "009_add_cierres_solo_lavado_totals",
             "010_add_asistencias_device_sessions",
+            "011_manage_noches_contract",
         ))
         self.assertEqual(
             [migration.migration_id for migration in MIGRATIONS],
@@ -1648,6 +1651,78 @@ class SchemaMigrationRunnerTests(unittest.TestCase):
         self.assertEqual(json.loads(output.getvalue()), result)
         apply.assert_called_once_with(fake_database.engine, backup_confirmed=True, dev_database_confirmed=True, expected_database="parking")
 
+    def test_011_plans_missing_contract_elements_preserves_existing_config_and_registers_last(self):
+        inventory = _inventory_011(missing=("cobros_noches", "total_noches", "noches_activo", "noches_valor"))
+        migration = plan_schema_migrations(inventory)["migrations"][10]
+        self.assertEqual(migration["status"], "pending")
+        self.assertIn("ALTER TABLE cierres_diarios", migration["sql"][0])
+        self.assertIn("CREATE TABLE cobros_noches", migration["sql"][1])
+        self.assertEqual(migration["sql"][-3:], ["INSERT INTO configuracion (clave, valor) VALUES ('noches_activo', '1')", "INSERT INTO configuracion (clave, valor) VALUES ('noches_valor', '5000')", MIGRATION_001_RECORD_SQL])
+        self.assertNotIn("22:00", "\n".join(migration["sql"]))
+        connection = ApplyConnection()
+        with patch("app.db.schema_migration_runner.collect_read_only_schema_inventory_from_engine", return_value=inventory), patch(
+            "app.db.schema_migration_preflight.evaluate_schema_migration_preflight",
+            return_value={"checks": []},
+        ):
+            result = apply_011_manage_noches_contract(FakeEngine(connection), backup_confirmed=True, dev_database_confirmed=True, expected_database="parking")
+        self.assertEqual(result["status"], "applied")
+        self.assertEqual(connection.statements[-1], (MIGRATION_001_RECORD_SQL, {"migration_id": MIGRATION_011_ID}))
+
+    def test_011_repair_applied_and_prerequisite_states(self):
+        valid = _inventory_011()
+        self.assertEqual(plan_schema_migrations(valid)["migrations"][10]["status"], "repair_required")
+        valid["migration_snapshot"]["records"].append({"migration_id": MIGRATION_011_ID})
+        self.assertEqual(plan_schema_migrations(valid)["migrations"][10]["status"], "applied")
+        for missing in _migration_011_prerequisites():
+                blocked = _inventory_011(migration_ids=[item for item in _migration_011_prerequisites() if item != missing])
+                self.assertEqual(plan_schema_migrations(blocked)["migrations"][10]["status"], "blocked_prerequisite")
+
+    def test_011_rejects_ambiguous_or_non_unique_config_before_planning_sql(self):
+        cases = (
+            ([('noches_activo', '1'), ('noches_activo', '0')], True),
+            ([('Noches_Activo', '1')], True),
+            (None, False),
+        )
+        for config_values, config_key_unique in cases:
+            with self.subTest(config_values=config_values, config_key_unique=config_key_unique):
+                inventory = _inventory_011(
+                    missing=("cobros_noches", "total_noches"),
+                    config_values=config_values,
+                    config_key_unique=config_key_unique,
+                )
+                migration = plan_schema_migrations(inventory)["migrations"][10]
+                self.assertEqual(migration["status"], "invalid_contract")
+                self.assertEqual(migration["sql"], [])
+
+    def test_011_preserves_canonical_config_and_only_seeds_safe_missing_keys(self):
+        complete = _inventory_011(missing=("cobros_noches",))
+        complete_sql = plan_schema_migrations(complete)["migrations"][10]["sql"]
+        self.assertFalse(any(statement.startswith("INSERT INTO configuracion") for statement in complete_sql))
+
+        partial = _inventory_011(
+            missing=("cobros_noches",),
+            config_values=[("noches_activo", "0"), ("noches_hora_inicio", "22:00")],
+        )
+        partial_sql = plan_schema_migrations(partial)["migrations"][10]["sql"]
+        self.assertEqual(
+            [statement for statement in partial_sql if statement.startswith("INSERT INTO configuracion")],
+            [
+                "INSERT INTO configuracion (clave, valor) VALUES ('noches_hora_fin', '09:30')",
+                "INSERT INTO configuracion (clave, valor) VALUES ('noches_valor', '5000')",
+            ],
+        )
+
+    def test_cli_011_dispatches_explicit_apply_flag(self):
+        output = io.StringIO()
+        fake_database = types.SimpleNamespace(engine=FakeEngine())
+        result = {"status": "noop"}
+        with patch.dict(sys.modules, {"app.db.database": fake_database}):
+            with patch("app.db.schema_migration_runner.apply_011_manage_noches_contract", return_value=result) as apply:
+                with redirect_stdout(output):
+                    self.assertEqual(main(["--apply-011-manage-noches-contract", "--backup-confirmed", "--confirm-dev-db", "--expected-database", "parking"]), 0)
+        self.assertEqual(json.loads(output.getvalue()), result)
+        apply.assert_called_once_with(fake_database.engine, backup_confirmed=True, dev_database_confirmed=True, expected_database="parking")
+
     def _assert_cli_apply_exit_code(self, result, expected_exit_code):
         output = io.StringIO()
         fake_database = types.SimpleNamespace(engine=FakeEngine())
@@ -1962,6 +2037,35 @@ def _inventory_010(*, missing=(), recorded=False, migration_ids=None):
         )
     if recorded:
         inventory["migration_snapshot"]["records"].append({"migration_id": MIGRATION_010_ID})
+    return inventory
+
+
+def _migration_011_prerequisites():
+    return [*_migration_010_prerequisites(), MIGRATION_010_ID]
+
+
+def _inventory_011(*, missing=(), migration_ids=None, config_values=None, config_key_unique=True):
+    inventory = _inventory(["schema_migrations"], migration_ids=_migration_011_prerequisites() if migration_ids is None else migration_ids)
+    inventory["tables"].extend({"table_name": name, "engine": "InnoDB", "table_collation": "utf8mb4_0900_ai_ci"} for name in ("ingresos", "cierres_diarios", "configuracion") if name not in missing)
+    inventory.setdefault("columns", []).extend([
+        {"table_name": "ingresos", "column_name": "id_ingreso", "data_type": "int", "column_type": "int", "is_nullable": "NO"},
+        {"table_name": "cierres_diarios", "column_name": "id_cierre", "data_type": "int", "column_type": "int", "is_nullable": "NO"},
+        {"table_name": "configuracion", "column_name": "clave", "data_type": "varchar", "column_type": "varchar(50)", "is_nullable": "NO"},
+        {"table_name": "configuracion", "column_name": "valor", "data_type": "varchar", "column_type": "varchar(100)", "is_nullable": "NO"},
+        *[{"table_name": "cierres_diarios", "column_name": name, "data_type": "int", "column_type": "int", "is_nullable": "NO", "column_default": "0"} for name in ("total_noches", "total_noches_monto") if name not in missing],
+    ])
+    for table, index, names in (("ingresos", "PRIMARY", ("id_ingreso",)), ("cierres_diarios", "PRIMARY", ("id_cierre",)), ("configuracion", "PRIMARY", ("clave",))):
+        non_unique = 0 if table != "configuracion" or config_key_unique else 1
+        inventory.setdefault("indexes", []).extend({"table_name": table, "index_name": index, "column_name": name, "seq_in_index": position, "non_unique": non_unique} for position, name in enumerate(names, 1))
+    config_values = config_values if config_values is not None else [("noches_activo", "1"), ("noches_hora_inicio", "22:00"), ("noches_hora_fin", "08:00"), ("noches_valor", "5000")]
+    inventory["config_seed_snapshot"] = {"available": True, "values": [{"clave": key, "valor": value} for key, value in config_values if key not in missing]}
+    if "cobros_noches" not in missing:
+        inventory["tables"].append({"table_name": "cobros_noches", "engine": "InnoDB", "table_collation": "utf8mb4_0900_ai_ci"})
+        columns = [("id_cobro_noche", "int", "NO", None, "PRI", "auto_increment"), ("id_ingreso", "int", "NO", None, "", ""), ("monto_snapshot", "int", "NO", None, "", ""), ("hora_inicio_snapshot", "time", "NO", None, "", ""), ("hora_fin_snapshot", "time", "NO", None, "", ""), ("fecha_hora_pago", "datetime", "NO", None, "", ""), ("usuario", "varchar(50)", "NO", None, "", ""), ("estado", "enum('PAGADO','ANULADO')", "NO", "PAGADO", "", ""), ("estado_operativo", "enum('PENDIENTE','RETIRADO','CONVERTIDO')", "NO", "PENDIENTE", "", ""), ("fecha_hora_resolucion", "datetime", "YES", None, "", ""), ("id_cierre", "int", "YES", None, "", ""), ("created_at", "datetime", "NO", "CURRENT_TIMESTAMP", "", "")]
+        inventory["columns"].extend({"table_name": "cobros_noches", "column_name": name, "data_type": column_type.split("(", 1)[0], "column_type": column_type, "is_nullable": nullable, "column_default": default, "column_key": key, "extra": extra} for name, column_type, nullable, default, key, extra in columns if name not in missing)
+        for index, names in (("PRIMARY", ("id_cobro_noche",)), ("idx_cobros_noches_ingreso", ("id_ingreso",)), ("idx_cobros_noches_pendiente_cierre", ("id_cierre", "fecha_hora_pago")), ("idx_cobros_noches_estado_operativo", ("estado_operativo", "id_ingreso"))):
+            inventory["indexes"].extend({"table_name": "cobros_noches", "index_name": index, "column_name": name, "seq_in_index": position, "non_unique": 0 if index == "PRIMARY" else 1} for position, name in enumerate(names, 1) if index not in missing)
+        inventory["foreign_keys"] = [{"constraint_name": "fk_cobros_noches_ingreso", "table_name": "cobros_noches", "column_name": "id_ingreso", "referenced_table_name": "ingresos", "referenced_column_name": "id_ingreso", "update_rule": "RESTRICT", "delete_rule": "RESTRICT"}, {"constraint_name": "fk_cobros_noches_cierre", "table_name": "cobros_noches", "column_name": "id_cierre", "referenced_table_name": "cierres_diarios", "referenced_column_name": "id_cierre", "update_rule": "RESTRICT", "delete_rule": "RESTRICT"}]
     return inventory
 
 

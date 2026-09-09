@@ -10,6 +10,7 @@ from app.db.schema_inventory import (
     operaciones_servicio_ingreso_generado_fk_contract,
     operaciones_servicio_tipo_vehiculo_lavado_fk_contract,
     operaciones_servicio_contract,
+    noches_contract,
     tipos_lavado_contract,
 )
 from app.db.schema_migration_runner import _wash_pricing_issues, plan_schema_migrations
@@ -697,6 +698,60 @@ class SchemaInventoryTests(unittest.TestCase):
         next(row for row in longer["columns"] if row["column_name"] == "device_id")["column_type"] = "varchar(255)"
         self.assertTrue(asistencias_device_sessions_contract(longer)["valid"])
 
+    def test_noches_contract_classifies_complete_safe_additive_and_invalid_shapes(self):
+        valid = _noches_inventory()
+        self.assertEqual((noches_contract(valid)["valid"], noches_contract(valid)["state"]), (True, "valid"))
+        partial = deepcopy(valid)
+        partial["columns"] = [row for row in partial["columns"] if row["column_name"] not in {"estado_operativo", "fecha_hora_resolucion"}]
+        partial["indexes"] = [row for row in partial["indexes"] if row["index_name"] != "idx_cobros_noches_estado_operativo"]
+        contract = noches_contract(partial)
+        self.assertEqual((contract["add_safe"], contract["missing_columns"], contract["missing_indexes"]), (True, ["estado_operativo", "fecha_hora_resolucion"], ["idx_cobros_noches_estado_operativo"]))
+        for mutation, issue in (
+            (lambda value: next(row for row in value["columns"] if row["column_name"] == "estado").update(column_type="varchar(10)", data_type="varchar"), "estado column_type must be enum('pagado','anulado')"),
+            (lambda value: next(row for row in value["indexes"] if row["index_name"] == "idx_cobros_noches_ingreso").update(column_name="id_cierre"), "idx_cobros_noches_ingreso name is already used by a different or UNIQUE index"),
+            (lambda value: next(row for row in value["foreign_keys"] if row["constraint_name"] == "fk_cobros_noches_ingreso").update(referenced_table_name="other"), "fk_cobros_noches_ingreso name is already used by a different foreign key"),
+            (lambda value: next(row for row in value["tables"] if row["table_name"] == "ingresos").update(engine="MyISAM"), "ingresos engine must be InnoDB"),
+        ):
+            with self.subTest(issue=issue):
+                invalid = deepcopy(valid)
+                mutation(invalid)
+                self.assertEqual(noches_contract(invalid)["state"], "invalid")
+                self.assertIn(issue, noches_contract(invalid)["issues"])
+
+    def test_noches_contract_blocks_missing_parents_and_preserves_present_config_values(self):
+        valid = _noches_inventory()
+        valid["config_seed_snapshot"]["values"] = [{"clave": "noches_hora_inicio", "valor": "22:00"}, {"clave": "noches_hora_fin", "valor": "08:00"}]
+        contract = noches_contract(valid)
+        self.assertEqual(contract["missing_config_keys"], ["noches_activo", "noches_valor"])
+        blocked = deepcopy(valid)
+        blocked["tables"] = [row for row in blocked["tables"] if row["table_name"] != "ingresos"]
+        self.assertEqual(noches_contract(blocked)["state"], "invalid")
+        self.assertIn("ingresos table is missing", noches_contract(blocked)["issues"])
+
+    def test_noches_contract_rejects_duplicate_or_case_variant_config_keys(self):
+        for values, key in (
+            ([{"clave": "noches_activo", "valor": "1"}, {"clave": "noches_activo", "valor": "0"}], "noches_activo"),
+            ([{"clave": "Noches_Activo", "valor": "1"}], "noches_activo"),
+        ):
+            with self.subTest(values=values):
+                inventory = _noches_inventory()
+                inventory["config_seed_snapshot"]["values"] = values
+                contract = noches_contract(inventory)
+                self.assertEqual(contract["state"], "invalid")
+                self.assertEqual(contract["ambiguous_config_keys"], [key])
+                self.assertIn("configuracion has duplicate or ambiguous Noches config keys", contract["issues"][0])
+
+    def test_noches_contract_requires_a_single_column_unique_config_key(self):
+        inventory = _noches_inventory()
+        for index in inventory["indexes"]:
+            if index["table_name"] == "configuracion":
+                index["non_unique"] = 1
+
+        contract = noches_contract(inventory)
+
+        self.assertEqual(contract["state"], "invalid")
+        self.assertIn("configuracion.clave must have a single-column unique index", contract["issues"])
+
 
 def _operaciones_servicio_inventory():
     columns = [
@@ -759,6 +814,16 @@ def _asistencias_device_sessions_inventory():
             for position, name in enumerate(("usuario", "session_id", "hora_salida"), 1)
         ],
     }
+
+
+def _noches_inventory():
+    columns = [("id_cobro_noche", "int", "NO", None, "PRI", "auto_increment"), ("id_ingreso", "int", "NO", None, "", ""), ("monto_snapshot", "int", "NO", None, "", ""), ("hora_inicio_snapshot", "time", "NO", None, "", ""), ("hora_fin_snapshot", "time", "NO", None, "", ""), ("fecha_hora_pago", "datetime", "NO", None, "", ""), ("usuario", "varchar(50)", "NO", None, "", ""), ("estado", "enum('PAGADO','ANULADO')", "NO", "PAGADO", "", ""), ("estado_operativo", "enum('PENDIENTE','RETIRADO','CONVERTIDO')", "NO", "PENDIENTE", "", ""), ("fecha_hora_resolucion", "datetime", "YES", None, "", ""), ("id_cierre", "int", "YES", None, "", ""), ("created_at", "datetime", "NO", "CURRENT_TIMESTAMP", "", "")]
+    inventory = {"tables": [{"table_name": name, "engine": "InnoDB"} for name in ("cobros_noches", "ingresos", "cierres_diarios", "configuracion")], "columns": [{"table_name": "cobros_noches", "column_name": name, "data_type": column_type.split("(", 1)[0], "column_type": column_type, "is_nullable": nullable, "column_default": default, "column_key": key, "extra": extra} for name, column_type, nullable, default, key, extra in columns], "indexes": [], "foreign_keys": [], "config_seed_snapshot": {"available": True, "values": [{"clave": key, "valor": value} for key, value in (("noches_activo", "1"), ("noches_hora_inicio", "19:30"), ("noches_hora_fin", "09:30"), ("noches_valor", "5000"))]}}
+    inventory["columns"].extend([{"table_name": "ingresos", "column_name": "id_ingreso", "data_type": "int", "column_type": "int", "is_nullable": "NO"}, {"table_name": "cierres_diarios", "column_name": "id_cierre", "data_type": "int", "column_type": "int", "is_nullable": "NO"}, {"table_name": "configuracion", "column_name": "clave", "data_type": "varchar", "column_type": "varchar(50)", "is_nullable": "NO"}, {"table_name": "configuracion", "column_name": "valor", "data_type": "varchar", "column_type": "varchar(100)", "is_nullable": "NO"}, *[{"table_name": "cierres_diarios", "column_name": name, "data_type": "int", "column_type": "int", "is_nullable": "NO", "column_default": "0"} for name in ("total_noches", "total_noches_monto")]])
+    for table, index, names in (("cobros_noches", "PRIMARY", ("id_cobro_noche",)), ("cobros_noches", "idx_cobros_noches_ingreso", ("id_ingreso",)), ("cobros_noches", "idx_cobros_noches_pendiente_cierre", ("id_cierre", "fecha_hora_pago")), ("cobros_noches", "idx_cobros_noches_estado_operativo", ("estado_operativo", "id_ingreso")), ("ingresos", "PRIMARY", ("id_ingreso",)), ("cierres_diarios", "PRIMARY", ("id_cierre",)), ("configuracion", "PRIMARY", ("clave",))):
+        inventory["indexes"].extend({"table_name": table, "index_name": index, "column_name": name, "seq_in_index": position, "non_unique": 0 if index == "PRIMARY" else 1} for position, name in enumerate(names, 1))
+    inventory["foreign_keys"] = [{"constraint_name": "fk_cobros_noches_ingreso", "table_name": "cobros_noches", "column_name": "id_ingreso", "referenced_table_name": "ingresos", "referenced_column_name": "id_ingreso", "update_rule": "RESTRICT", "delete_rule": "RESTRICT"}, {"constraint_name": "fk_cobros_noches_cierre", "table_name": "cobros_noches", "column_name": "id_cierre", "referenced_table_name": "cierres_diarios", "referenced_column_name": "id_cierre", "update_rule": "RESTRICT", "delete_rule": "RESTRICT"}]
+    return inventory
 
 
 if __name__ == "__main__":

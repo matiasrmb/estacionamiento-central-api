@@ -13,7 +13,7 @@ from app.db.schema_migration_preflight import (
     evaluate_schema_migration_preflight,
     main,
 )
-from app.db.schema_migration_runner import MIGRATION_003_ID, MIGRATION_004_ID, MIGRATION_006_ID, MIGRATION_007_ID, MIGRATION_008_ID, MIGRATION_009_ID, MIGRATION_010_ID, plan_schema_migrations
+from app.db.schema_migration_runner import MIGRATION_003_ID, MIGRATION_004_ID, MIGRATION_006_ID, MIGRATION_007_ID, MIGRATION_008_ID, MIGRATION_009_ID, MIGRATION_010_ID, MIGRATION_011_ID, plan_schema_migrations
 
 
 class FakeEngine:
@@ -304,6 +304,36 @@ class SchemaMigrationPreflightTests(unittest.TestCase):
             evaluate_schema_migration_preflight(_inventory(["schema_migrations"]), pending)["canonical_sha256"],
             evaluate_schema_migration_preflight(_inventory(["schema_migrations"]), changed)["canonical_sha256"],
         )
+
+    def test_011_state_and_plan_sql_are_in_preflight_hash(self):
+        plan = {"database": "parking", "schema_migrations": {"present": True}, "migrations": [{"id": MIGRATION_011_ID, "status": "pending", "sql": ["ALTER TABLE cierres_diarios ADD COLUMN total_noches INT NOT NULL DEFAULT 0"]}]}
+        changed = deepcopy(plan)
+        changed["migrations"][0]["status"] = "repair_required"
+        changed["migrations"][0]["sql"] = ["INSERT INTO schema_migrations (migration_id) VALUES (:migration_id)"]
+        pending = evaluate_schema_migration_preflight(_inventory(["schema_migrations"]), plan, {"backup_confirmed": True})
+        self.assertEqual(pending["pending_migrations"]["ids"], [MIGRATION_011_ID])
+        self.assertNotEqual(pending["canonical_sha256"], evaluate_schema_migration_preflight(_inventory(["schema_migrations"]), changed, {"backup_confirmed": True})["canonical_sha256"])
+
+    def test_011_config_snapshot_and_ambiguity_are_in_preflight_status_and_hash(self):
+        plan = {
+            "database": "parking",
+            "schema_migrations": {"present": True},
+            "migrations": [{"id": MIGRATION_011_ID, "status": "pending", "sql": ["INSERT INTO configuracion (clave, valor) VALUES ('noches_valor', '5000')"]}],
+            "noches_contract": {"issues": [], "config_snapshot": {"noches_valor": []}, "ambiguous_config_keys": []},
+        }
+        ambiguous = deepcopy(plan)
+        ambiguous["noches_contract"] = {
+            "issues": ["configuracion has duplicate or ambiguous Noches config keys: noches_activo"],
+            "config_snapshot": {"noches_activo": [{"clave": "Noches_Activo", "valor": "1"}]},
+            "ambiguous_config_keys": ["noches_activo"],
+        }
+
+        safe_preflight = evaluate_schema_migration_preflight(_inventory(["schema_migrations"]), plan, {"backup_confirmed": True})
+        ambiguous_preflight = evaluate_schema_migration_preflight(_inventory(["schema_migrations"]), ambiguous, {"backup_confirmed": True})
+
+        self.assertEqual(safe_preflight["status"], "READY_FOR_MANUAL_REVIEW")
+        self.assertEqual(ambiguous_preflight["status"], "BLOCKED")
+        self.assertNotEqual(safe_preflight["canonical_sha256"], ambiguous_preflight["canonical_sha256"])
 
     def test_canonical_hash_changes_when_plural_007_source_data_changes(self):
         plan = _plan([])

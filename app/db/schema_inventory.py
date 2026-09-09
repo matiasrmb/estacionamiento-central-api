@@ -77,6 +77,7 @@ _CONFIG_SQL = """
     SELECT clave, valor
     FROM configuracion
     WHERE clave IN :config_keys
+       OR LOWER(TRIM(clave)) IN :noches_config_keys
        OR LOWER(TRIM(clave)) LIKE :wash_key_prefix
 """
 _SCHEMA_MIGRATIONS_SQL = """
@@ -152,11 +153,18 @@ def collect_read_only_schema_inventory(conn: Connection) -> dict[str, Any]:
     )
     config_values = []
     if config_available:
-        config_query = text(_CONFIG_SQL).bindparams(bindparam("config_keys", expanding=True))
+        config_query = text(_CONFIG_SQL).bindparams(
+            bindparam("config_keys", expanding=True),
+            bindparam("noches_config_keys", expanding=True),
+        )
         config_rows = _read_rows(
             conn,
             config_query,
-            {"config_keys": CONFIG_SEED_KEYS, "wash_key_prefix": "lavado%"},
+            {
+                "config_keys": CONFIG_SEED_KEYS,
+                "noches_config_keys": tuple(NOCHES_CONFIG_DEFAULTS),
+                "wash_key_prefix": "lavado%",
+            },
             ("clave",),
         )
         config_values = [row for row in config_rows if _is_inventory_config_key(row.get("clave"))]
@@ -720,6 +728,157 @@ def asistencias_device_sessions_contract(inventory: dict[str, Any]) -> dict[str,
     }
 
 
+def noches_contract(inventory: dict[str, Any]) -> dict[str, Any]:
+    """Validate the managed Noches contract or its narrowly safe additive completion."""
+    tables = _table_names(inventory)
+    columns = inventory.get("columns", [])
+    indexes = inventory.get("indexes", [])
+    foreign_keys = inventory.get("foreign_keys", [])
+    issues = []
+    missing_cierre_totals = []
+    if "cierres_diarios" not in tables:
+        issues.append("cierres_diarios table is missing; migration 011 does not create it")
+    else:
+        for name in ("total_noches", "total_noches_monto"):
+            column = _find_column(columns, "cierres_diarios", name)
+            if column is None:
+                missing_cierre_totals.append(name)
+            elif not _is_int_compatible(column) or str(column.get("is_nullable", "")).casefold() != "no" or str(column.get("column_default")) != "0":
+                issues.append(f"cierres_diarios.{name} must be INT NOT NULL DEFAULT 0")
+    issues.extend(_noches_parent_issues(inventory))
+    config_snapshot = _noches_config_snapshot(inventory)
+    if "configuracion" not in tables:
+        issues.append("configuracion table is missing; migration 011 does not create it")
+    else:
+        clave = _find_column(columns, "configuracion", "clave")
+        valor = _find_column(columns, "configuracion", "valor")
+        if clave is None or str(clave.get("data_type", "")).casefold() not in {"char", "varchar"}:
+            issues.append("configuracion.clave must be a character column")
+        elif not _single_column_unique_index(clave, indexes):
+            issues.append("configuracion.clave must have a single-column unique index")
+        if valor is None or str(valor.get("data_type", "")).casefold() not in {"char", "varchar", "text"}:
+            issues.append("configuracion.valor must be a character-compatible column")
+    ambiguous_config_keys = [
+        key for key in NOCHES_CONFIG_DEFAULTS
+        if config_snapshot[key]
+        and (len(config_snapshot[key]) != 1 or config_snapshot[key][0]["clave"] != key)
+    ]
+    if ambiguous_config_keys:
+        issues.append(
+            "configuracion has duplicate or ambiguous Noches config keys: "
+            + ", ".join(ambiguous_config_keys)
+        )
+    missing_config_keys = [key for key in NOCHES_CONFIG_DEFAULTS if not config_snapshot[key]]
+
+    if "cobros_noches" not in tables:
+        issues.extend(_noches_name_collisions(inventory))
+        state = "safe_to_create" if not issues else "blocked_prerequisite" if any("table is missing" in issue for issue in issues) else "invalid"
+        return _noches_result(not issues and not missing_cierre_totals and not missing_config_keys, state, issues, missing_cierre_totals, (), (), missing_config_keys, config_snapshot, ambiguous_config_keys)
+
+    if _table_engine(inventory, "cobros_noches") != "innodb":
+        issues.append("cobros_noches engine must be InnoDB")
+    expected = (
+        ("id_cobro_noche", "int", False, None, True, True), ("id_ingreso", "int", False, None, False, False),
+        ("monto_snapshot", "int", False, None, False, False), ("hora_inicio_snapshot", "time", False, None, False, False),
+        ("hora_fin_snapshot", "time", False, None, False, False), ("fecha_hora_pago", "datetime", False, None, False, False),
+        ("usuario", "varchar(50)", False, None, False, False), ("estado", "enum('pagado','anulado')", False, "PAGADO", False, False),
+        ("id_cierre", "int", True, None, False, False), ("created_at", "datetime", False, "CURRENT_TIMESTAMP", False, False),
+    )
+    missing_base = []
+    by_name = {str(row.get("column_name", "")).casefold(): row for row in columns if isinstance(row, dict) and str(row.get("table_name", "")).casefold() == "cobros_noches"}
+    for name, column_type, nullable, default, primary_key, auto_increment in expected:
+        if name not in by_name:
+            missing_base.append(name)
+        else:
+            _require_column(issues, by_name, name, column_type, nullable=nullable, default=default, auto_increment=auto_increment, indexes=indexes)
+            if primary_key and not _has_single_column_index(indexes, "cobros_noches", "primary", name):
+                issues.append(f"{name} must be the sole primary key column")
+    missing_columns = []
+    for name, column_type, nullable, default in (("estado_operativo", "enum('pendiente','retirado','convertido')", False, "PENDIENTE"), ("fecha_hora_resolucion", "datetime", True, None)):
+        if name not in by_name:
+            missing_columns.append(name)
+        else:
+            _require_column(issues, by_name, name, column_type, nullable=nullable, default=default)
+    if missing_base:
+        issues.extend(f"cobros_noches.{name} base column is missing" for name in missing_base)
+    missing_indexes = []
+    for name, expected_columns in (("idx_cobros_noches_ingreso", ("id_ingreso",)), ("idx_cobros_noches_pendiente_cierre", ("id_cierre", "fecha_hora_pago")), ("idx_cobros_noches_estado_operativo", ("estado_operativo", "id_ingreso"))):
+        state = _index_state(indexes, "cobros_noches", name, expected_columns)
+        if state == "missing":
+            missing_indexes.append(name)
+        elif state == "incompatible":
+            issues.append(f"{name} name is already used by a different or UNIQUE index")
+    issues.extend(_noches_fk_issues(inventory, by_name))
+    if any(name in {"idx_cobros_noches_ingreso", "idx_cobros_noches_pendiente_cierre"} for name in missing_indexes):
+        issues.append("cobros_noches base indexes are missing")
+    if issues:
+        return _noches_result(False, "invalid", issues, missing_cierre_totals, tuple(missing_columns), tuple(missing_indexes), missing_config_keys, config_snapshot, ambiguous_config_keys)
+    return _noches_result(
+        not missing_cierre_totals and not missing_columns and not missing_indexes and not missing_config_keys,
+        "valid" if not missing_cierre_totals and not missing_columns and not missing_indexes and not missing_config_keys else "safe_to_add",
+        [], missing_cierre_totals, tuple(missing_columns), tuple(missing_indexes), missing_config_keys, config_snapshot, ambiguous_config_keys,
+    )
+
+
+NOCHES_CONFIG_DEFAULTS = {"noches_activo": "1", "noches_hora_inicio": "19:30", "noches_hora_fin": "09:30", "noches_valor": "5000"}
+
+
+def _noches_config_snapshot(inventory: dict[str, Any]) -> dict[str, list[dict[str, str | None]]]:
+    snapshot = inventory.get("config_seed_snapshot", {})
+    values = snapshot.get("values", []) if isinstance(snapshot, dict) and snapshot.get("available") is True else []
+    rows = {key: [] for key in NOCHES_CONFIG_DEFAULTS}
+    for row in values:
+        if not isinstance(row, dict):
+            continue
+        normalized = _normalise_config_key(row.get("clave"))
+        if normalized in rows:
+            rows[normalized].append({
+                "clave": str(row.get("clave") or ""),
+                "valor": None if row.get("valor") is None else str(row.get("valor")),
+            })
+    return {key: sorted(value, key=lambda row: (row["clave"], row["valor"] or "")) for key, value in rows.items()}
+
+
+def _noches_parent_issues(inventory: dict[str, Any]) -> list[str]:
+    issues = []
+    for table_name, column_name in (("ingresos", "id_ingreso"), ("cierres_diarios", "id_cierre")):
+        if table_name not in _table_names(inventory):
+            issues.append(f"{table_name} table is missing")
+            continue
+        column = _find_column(inventory.get("columns", []), table_name, column_name)
+        if _table_engine(inventory, table_name) != "innodb":
+            issues.append(f"{table_name} engine must be InnoDB")
+        if column is None or _int_signedness(column) is not False or not _has_single_column_index(inventory.get("indexes", []), table_name, "primary", column_name):
+            issues.append(f"{table_name}.{column_name} must be a signed INT sole primary key")
+    return issues
+
+
+def _noches_name_collisions(inventory: dict[str, Any]) -> list[str]:
+    names = {"fk_cobros_noches_ingreso", "fk_cobros_noches_cierre"}
+    return [f"{name} name is already used by a different foreign key" for name in sorted({str(row.get("constraint_name", "")).casefold() for row in inventory.get("foreign_keys", []) if isinstance(row, dict)} & names)]
+
+
+def _noches_fk_issues(inventory: dict[str, Any], columns: dict[str, dict[str, Any]]) -> list[str]:
+    issues = []
+    for suffix, child, parent_table, parent in (("ingreso", "id_ingreso", "ingresos", "id_ingreso"), ("cierre", "id_cierre", "cierres_diarios", "id_cierre")):
+        if child not in columns or _int_signedness(columns[child]) is not False:
+            issues.append(f"cobros_noches.{child} must be a signed INT")
+            continue
+        name = f"fk_cobros_noches_{suffix}"
+        matching = [row for row in inventory.get("foreign_keys", []) if isinstance(row, dict) and str(row.get("table_name", "")).casefold() == "cobros_noches" and str(row.get("column_name", "")).casefold() == child]
+        exact = [row for row in matching if str(row.get("constraint_name", "")).casefold() == name and str(row.get("referenced_table_name", "")).casefold() == parent_table and str(row.get("referenced_column_name", "")).casefold() == parent and _is_restrictive_fk_rule(row.get("update_rule")) and _is_restrictive_fk_rule(row.get("delete_rule"))]
+        named = [row for row in inventory.get("foreign_keys", []) if isinstance(row, dict) and str(row.get("constraint_name", "")).casefold() == name]
+        if named and not exact:
+            issues.append(f"{name} name is already used by a different foreign key")
+        elif len(matching) != 1 or len(exact) != 1:
+            issues.append(f"cobros_noches.{child} has an unexpected or missing foreign key")
+    return issues
+
+
+def _noches_result(valid, state, issues, missing_cierre_totals, missing_columns, missing_indexes, missing_config_keys, config_snapshot, ambiguous_config_keys):
+    return {"valid": valid, "create_safe": state == "safe_to_create", "add_safe": state == "safe_to_add", "state": state, "issues": issues, "missing_cierre_totals": list(missing_cierre_totals), "missing_columns": list(missing_columns), "missing_indexes": list(missing_indexes), "missing_config_keys": list(missing_config_keys), "config_snapshot": config_snapshot, "ambiguous_config_keys": list(ambiguous_config_keys)}
+
+
 def _operaciones_servicio_column(issues, missing, columns, name, column_type, nullable, default, primary_key, auto_increment, indexes) -> None:
     column = columns.get(name)
     if column is None:
@@ -1098,6 +1257,8 @@ def _single_column_index(column: dict[str, Any], indexes: list[dict[str, Any]], 
 def _single_column_unique_index(column: dict[str, Any], indexes: list[dict[str, Any]]) -> bool:
     indexes_by_name: dict[str, list[dict[str, Any]]] = {}
     for index in indexes:
+        if str(index.get("table_name", "")).casefold() != str(column.get("table_name", "")).casefold():
+            continue
         index_name = str(index.get("index_name", "")).casefold()
         indexes_by_name.setdefault(index_name, []).append(index)
     return any(
@@ -1156,9 +1317,10 @@ def _json_value(value: Any) -> Any:
 
 
 def _is_inventory_config_key(value: Any) -> bool:
-    """Keep exact seed keys plus wash-price variants safe for migration 007."""
+    """Keep seed keys and normalized managed variants needed for safe planning."""
     key = str(value or "")
-    return key in CONFIG_SEED_KEYS or _normalise_config_key(key) in _wash_price_config_keys()
+    normalized = _normalise_config_key(key)
+    return key in CONFIG_SEED_KEYS or normalized in _wash_price_config_keys() or normalized in NOCHES_CONFIG_DEFAULTS
 
 
 def _normalise_config_key(value: Any) -> str:

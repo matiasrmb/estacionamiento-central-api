@@ -82,6 +82,12 @@ def evaluate_schema_migration_preflight(
     ] if isinstance(lavados_contract, dict) else []
     wash_pricing = plan.get("wash_vehicle_type_pricing", {})
     wash_pricing_issues = wash_pricing.get("issues", []) if isinstance(wash_pricing, dict) else []
+    noches_contract = plan.get("noches_contract", {})
+    noches_status = next((
+        migration.get("status") for migration in plan.get("migrations", [])
+        if isinstance(migration, dict) and migration.get("id") == "011_manage_noches_contract"
+    ), None)
+    noches_issues = noches_contract.get("issues", []) if isinstance(noches_contract, dict) and noches_status in {"pending", "repair_required", "invalid_contract", "inconsistent_state"} else []
     statuses = []
     statuses.append(_check("database_name", bool(database), "Database name is present."))
     statuses.append(_check(
@@ -128,6 +134,11 @@ def evaluate_schema_migration_preflight(
         "wash_vehicle_type_pricing",
         not wash_pricing_issues,
         "Wash vehicle pricing contracts, codes, and legacy configuration values are safe to migrate.",
+    ))
+    statuses.append(_check(
+        "noches_contract",
+        not noches_issues,
+        "Noches configuration keys are uniquely constrained and unambiguous before planning seeds.",
     ))
     statuses.append(_check(
         "backup_confirmed_for_future_apply",
@@ -183,6 +194,7 @@ def evaluate_schema_migration_preflight(
             *lavados_orphan_blockers,
         ],
         "wash_vehicle_type_pricing": wash_pricing,
+        "noches_contract": noches_contract,
         "apply": {
             "available": apply_requested and not has_failures,
             "will_execute": apply_requested and not has_failures and bool(pending_migrations),
@@ -213,6 +225,7 @@ def canonical_preflight_sha256(preflight: dict[str, Any]) -> str:
         "migration_plan": preflight.get("migration_plan"),
         "orphan_blockers": preflight.get("orphan_blockers"),
         "wash_vehicle_type_pricing": preflight.get("wash_vehicle_type_pricing"),
+        "noches_contract": preflight.get("noches_contract"),
     }
     canonical_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()

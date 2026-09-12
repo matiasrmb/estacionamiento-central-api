@@ -48,8 +48,7 @@ class ResumenTurnoTests(unittest.TestCase):
         ]
 
         with patch.object(resumen_turno, "ensure_monthly_payments_schema"), \
-             patch.object(resumen_turno, "ensure_noches_schema"), \
-             patch.object(resumen_turno, "datetime") as mocked_datetime, \
+              patch.object(resumen_turno, "datetime") as mocked_datetime, \
               patch.object(resumen_turno, "db_conn", return_value=_DbConn()), \
               patch.object(resumen_turno, "build_active_items", return_value=activos) as build_activos, \
               patch.object(resumen_turno, "_build_pending_summary", return_value=pendientes) as build_pendientes, \

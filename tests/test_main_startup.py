@@ -15,23 +15,25 @@ class MainStartupTests(unittest.TestCase):
         self.assertFalse(hasattr(schema_ensure, "_ensure_wash_vehicle_type_schema_on_connection"))
         self.assertFalse(hasattr(main, "ensure_wash_vehicle_type_schema"))
 
-    def test_successful_startup_ensures_all_schemas(self):
+    def test_startup_does_not_import_noches_schema_ensure(self):
+        self.assertFalse(hasattr(schema_ensure, "ensure_noches_schema"))
+        self.assertFalse(hasattr(schema_ensure, "_ensure_noches_schema_on_connection"))
+        self.assertFalse(hasattr(main, "ensure_noches_schema"))
+
+    def test_successful_startup_ensures_remaining_runtime_schemas(self):
         with patch.object(type(main.settings), "validate_runtime_safety") as validate, \
-             patch.object(main, "ensure_gastos_operacion_schema") as ensure_expenses, \
-             patch.object(main, "ensure_monthly_payments_schema") as ensure_monthly, \
-             patch.object(main, "ensure_noches_schema") as ensure_noches:
+              patch.object(main, "ensure_gastos_operacion_schema") as ensure_expenses, \
+              patch.object(main, "ensure_monthly_payments_schema") as ensure_monthly:
             main.on_startup()
 
         validate.assert_called_once_with()
         ensure_expenses.assert_called_once_with()
         ensure_monthly.assert_called_once_with()
-        ensure_noches.assert_called_once_with()
 
     def test_gastos_schema_failure_prevents_startup(self):
         with patch.object(type(main.settings), "validate_runtime_safety"), \
-             patch.object(main, "ensure_monthly_payments_schema"), \
-             patch.object(main, "ensure_noches_schema"), \
-             patch.object(main, "ensure_gastos_operacion_schema", side_effect=RuntimeError("GASTOS_SCHEMA_UNAVAILABLE")):
+              patch.object(main, "ensure_monthly_payments_schema"), \
+              patch.object(main, "ensure_gastos_operacion_schema", side_effect=RuntimeError("GASTOS_SCHEMA_UNAVAILABLE")):
             with self.assertRaisesRegex(RuntimeError, "GASTOS_SCHEMA_UNAVAILABLE"):
                 main.on_startup()
 

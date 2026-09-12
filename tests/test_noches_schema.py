@@ -1,46 +1,32 @@
 import unittest
 from pathlib import Path
 
-from app.db.schema_ensure import _ensure_noches_schema_on_connection
+from app.api.v1.endpoints import resumen_turno
+from app.db import schema_ensure
+from app.repositories import cierres_repo
 
 
 class NochesSchemaTests(unittest.TestCase):
-    def test_migration_declares_prepaid_charge_snapshots_and_close_link(self):
-        migration = Path(__file__).resolve().parents[1].joinpath(
-            "app", "db", "migrations", "006_cobros_noches.sql"
-        ).read_text(encoding="utf-8")
+    def test_runtime_does_not_expose_noches_schema_ensure(self):
+        self.assertFalse(hasattr(schema_ensure, "ensure_noches_schema"))
+        self.assertFalse(hasattr(schema_ensure, "_ensure_noches_schema_on_connection"))
 
-        self.assertIn("CREATE TABLE IF NOT EXISTS cobros_noches", migration)
-        self.assertIn("monto_snapshot INT NOT NULL", migration)
-        self.assertIn("hora_inicio_snapshot TIME NOT NULL", migration)
-        self.assertIn("hora_fin_snapshot TIME NOT NULL", migration)
-        self.assertIn("fecha_hora_pago DATETIME NOT NULL", migration)
-        self.assertIn("id_cierre INT NULL", migration)
-        self.assertIn("estado_operativo ENUM('PENDIENTE', 'RETIRADO', 'CONVERTIDO')", migration)
-        self.assertIn("'noches_activo', '0'", migration)
+    def test_runtime_schema_ensure_contains_no_noches_ddl_or_seed(self):
+        source = Path(schema_ensure.__file__).read_text(encoding="utf-8")
 
-    def test_runtime_ensure_creates_charge_table_and_default_configuration(self):
-        class FakeConn:
-            def __init__(self):
-                self.statements = []
+        self.assertNotIn("cobros_noches", source)
+        self.assertNotIn("noches_activo", source)
+        self.assertNotIn("total_noches", source)
 
-            def execute(self, statement, params=None):
-                self.statements.append((str(statement), params))
+    def test_cierre_and_resumen_runtime_paths_do_not_ensure_noches_schema(self):
+        for module in (cierres_repo, resumen_turno):
+            source = Path(module.__file__).read_text(encoding="utf-8")
 
-        conn = FakeConn()
-        _ensure_noches_schema_on_connection(conn)
-
-        sql = "\n".join(statement for statement, _ in conn.statements)
-        params = [params for _, params in conn.statements if params]
-        self.assertIn("CREATE TABLE IF NOT EXISTS cobros_noches", sql)
-        self.assertIn("estado ENUM('PAGADO', 'ANULADO')", sql)
-        self.assertIn("estado_operativo ENUM('PENDIENTE', 'RETIRADO', 'CONVERTIDO')", sql)
-        self.assertIn("idx_cobros_noches_estado_operativo", sql)
-        self.assertIn("idx_cobros_noches_pendiente_cierre", sql)
-        self.assertEqual(
-            {item["clave"] for item in params},
-            {"noches_activo", "noches_hora_inicio", "noches_hora_fin", "noches_valor"},
-        )
+            self.assertNotIn("ensure_noches_schema", source)
+            self.assertNotIn("_ensure_noches_schema_on_connection", source)
+            self.assertNotIn("CREATE TABLE IF NOT EXISTS cobros_noches", source)
+            self.assertNotIn("ALTER TABLE cobros_noches", source)
+            self.assertNotIn("noches_activo", source)
 
 
 if __name__ == "__main__":

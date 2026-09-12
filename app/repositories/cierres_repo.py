@@ -4,7 +4,7 @@ from typing import Any, Dict, List
 from sqlalchemy import text
 
 from app.db.database import db_conn
-from app.db.schema_ensure import ensure_monthly_payments_schema, ensure_noches_schema
+from app.db.schema_ensure import ensure_monthly_payments_schema
 from app.repositories.accounting_contracts import build_accounting_summary
 
 
@@ -190,7 +190,6 @@ def _build_pending_summary(
 
 def get_cierre_pendiente() -> Dict[str, Any]:
     ensure_monthly_payments_schema()
-    ensure_noches_schema()
     with db_conn() as conn:
         summary = _build_pending_summary(conn)
     return _serialize_summary(summary)
@@ -198,7 +197,6 @@ def get_cierre_pendiente() -> Dict[str, Any]:
 
 def realizar_cierre(usuario: str) -> Dict[str, Any]:
     ensure_monthly_payments_schema()
-    ensure_noches_schema()
     with db_conn() as conn:
         lock_acquired = False
         try:

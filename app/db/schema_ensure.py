@@ -11,7 +11,6 @@ logger = logging.getLogger(__name__)
 
 _ensured_gastos_operacion = False
 _ensured_monthly_payments = False
-_ensured_noches = False
 
 _DUPLICATE_SCHEMA_ERROR_CODES = {1060, 1061}
 
@@ -90,20 +89,6 @@ def ensure_monthly_payments_schema() -> None:
     _ensured_monthly_payments = True
 
 
-def ensure_noches_schema() -> None:
-    """Ensure prepaid overnight charges and their default configuration exist."""
-    global _ensured_noches
-    if _ensured_noches:
-        return
-    try:
-        with db_conn() as conn:
-            _ensure_noches_schema_on_connection(conn)
-            conn.commit()
-    except Exception as exc:
-        raise RuntimeError("NOCHES_SCHEMA_UNAVAILABLE") from exc
-    _ensured_noches = True
-
-
 def _ensure_gastos_operacion_schema_on_connection(conn: Connection) -> None:
     _execute_schema(conn, """
         CREATE TABLE IF NOT EXISTS gastos_operacion (
@@ -160,46 +145,3 @@ def _ensure_monthly_payments_schema_on_connection(conn: Connection) -> None:
                 FOREIGN KEY (id_cierre) REFERENCES cierres_diarios(id_cierre)
         )
     """)
-
-
-def _ensure_noches_schema_on_connection(conn: Connection) -> None:
-    _execute_many_schema(conn, [
-        "ALTER TABLE cierres_diarios ADD COLUMN total_noches INT NOT NULL DEFAULT 0",
-        "ALTER TABLE cierres_diarios ADD COLUMN total_noches_monto INT NOT NULL DEFAULT 0",
-    ])
-    _execute_schema(conn, """
-        CREATE TABLE IF NOT EXISTS cobros_noches (
-            id_cobro_noche INT AUTO_INCREMENT PRIMARY KEY,
-            id_ingreso INT NOT NULL,
-            monto_snapshot INT NOT NULL,
-            hora_inicio_snapshot TIME NOT NULL,
-            hora_fin_snapshot TIME NOT NULL,
-            fecha_hora_pago DATETIME NOT NULL,
-            usuario VARCHAR(50) NOT NULL,
-            estado ENUM('PAGADO', 'ANULADO') NOT NULL DEFAULT 'PAGADO',
-            id_cierre INT NULL,
-            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            INDEX idx_cobros_noches_ingreso (id_ingreso),
-            INDEX idx_cobros_noches_pendiente_cierre (id_cierre, fecha_hora_pago),
-            CONSTRAINT fk_cobros_noches_ingreso
-                FOREIGN KEY (id_ingreso) REFERENCES ingresos(id_ingreso),
-            CONSTRAINT fk_cobros_noches_cierre
-                FOREIGN KEY (id_cierre) REFERENCES cierres_diarios(id_cierre)
-        )
-    """)
-    _execute_many_schema(conn, [
-        "ALTER TABLE cobros_noches ADD COLUMN estado_operativo ENUM('PENDIENTE', 'RETIRADO', 'CONVERTIDO') NOT NULL DEFAULT 'PENDIENTE'",
-        "ALTER TABLE cobros_noches ADD COLUMN fecha_hora_resolucion DATETIME NULL",
-        "ALTER TABLE cobros_noches ADD INDEX idx_cobros_noches_estado_operativo (estado_operativo, id_ingreso)",
-    ])
-    for clave, valor in {
-        "noches_activo": "0",
-        "noches_hora_inicio": "19:30",
-        "noches_hora_fin": "09:30",
-        "noches_valor": "0",
-    }.items():
-        conn.execute(text("""
-            INSERT INTO configuracion (clave, valor)
-            VALUES (:clave, :valor)
-            ON DUPLICATE KEY UPDATE clave = VALUES(clave)
-        """), {"clave": clave, "valor": valor})

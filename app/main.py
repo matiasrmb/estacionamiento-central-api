@@ -16,7 +16,6 @@ from app.api.v1.router import api_router
 from app.db.schema_ensure import (
     ensure_gastos_operacion_schema,
     ensure_monthly_payments_schema,
-    ensure_noches_schema,
 )
 
 setup_logging()
@@ -64,4 +63,3 @@ def on_startup() -> None:
     settings.validate_runtime_safety()
     ensure_gastos_operacion_schema()
     ensure_monthly_payments_schema()
-    ensure_noches_schema()

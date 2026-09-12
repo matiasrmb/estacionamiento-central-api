@@ -199,8 +199,7 @@ class CierresGastosTests(unittest.TestCase):
             "ids_gastos": [5, 8],
         }
         with patch.object(cierres_repo, "ensure_monthly_payments_schema"), \
-             patch.object(cierres_repo, "ensure_noches_schema"), \
-             patch.object(cierres_repo, "db_conn", return_value=FakeDbConn(conn)), \
+              patch.object(cierres_repo, "db_conn", return_value=FakeDbConn(conn)), \
              patch.object(cierres_repo, "_build_pending_summary", return_value=summary) as build:
             result = cierres_repo.realizar_cierre("admin")
 
@@ -257,8 +256,7 @@ class CierresGastosTests(unittest.TestCase):
             "ids_cobros_noches": [],
         }
         with patch.object(cierres_repo, "ensure_monthly_payments_schema"), \
-             patch.object(cierres_repo, "ensure_noches_schema"), \
-             patch.object(cierres_repo, "db_conn", return_value=FakeDbConn(conn)), \
+              patch.object(cierres_repo, "db_conn", return_value=FakeDbConn(conn)), \
              patch.object(cierres_repo, "_build_pending_summary", return_value=summary):
             cierres_repo.realizar_cierre("operador")
 
@@ -282,8 +280,7 @@ class CierresGastosTests(unittest.TestCase):
 
         conn.execute = unavailable_lock
         with patch.object(cierres_repo, "ensure_monthly_payments_schema"), \
-             patch.object(cierres_repo, "ensure_noches_schema"), \
-             patch.object(cierres_repo, "db_conn", return_value=FakeDbConn(conn)), \
+              patch.object(cierres_repo, "db_conn", return_value=FakeDbConn(conn)), \
              patch.object(cierres_repo, "_build_pending_summary") as build:
             with self.assertRaises(cierres_repo.DailyCloseInProgressError):
                 cierres_repo.realizar_cierre("operador")
@@ -295,8 +292,7 @@ class CierresGastosTests(unittest.TestCase):
     def test_no_pending_close_does_not_link_expenses(self):
         conn = FakeConnection()
         with patch.object(cierres_repo, "ensure_monthly_payments_schema"), \
-             patch.object(cierres_repo, "ensure_noches_schema"), \
-             patch.object(cierres_repo, "db_conn", return_value=FakeDbConn(conn)), \
+              patch.object(cierres_repo, "db_conn", return_value=FakeDbConn(conn)), \
              patch.object(cierres_repo, "_build_pending_summary", return_value={"hay_pendiente": False}):
             with self.assertRaises(LookupError):
                 cierres_repo.realizar_cierre("admin")

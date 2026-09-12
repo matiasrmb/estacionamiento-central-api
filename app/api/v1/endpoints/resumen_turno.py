@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends
 from app.api.deps import require_role
 from app.api.v1.endpoints.activos import build_active_items
 from app.db.database import db_conn
-from app.db.schema_ensure import ensure_monthly_payments_schema, ensure_noches_schema
+from app.db.schema_ensure import ensure_monthly_payments_schema
 from app.repositories.cierres_repo import _build_pending_summary
 from app.repositories.operaciones_servicio_repo import total_solo_lavados_activos
 
@@ -16,7 +16,6 @@ router = APIRouter(tags=["resumen-turno"])
 @router.get("/resumen-turno")
 def obtener_resumen_turno(_user=Depends(require_role("operador", "admin"))):
     ensure_monthly_payments_schema()
-    ensure_noches_schema()
     consultado_a = datetime.now().replace(microsecond=0)
 
     with db_conn() as conn:

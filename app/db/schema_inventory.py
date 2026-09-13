@@ -129,6 +129,32 @@ _LAVADOS_TIPO_VEHICULO_ORPHANS_SQL = """
     WHERE child.id_tipo_vehiculo_lavado IS NOT NULL
       AND parent.id_tipo_vehiculo_lavado IS NULL
 """
+_PAGOS_MENSUALES_DUPLICATES_SQL = """
+    SELECT COUNT(*) AS duplicate_count
+    FROM (
+        SELECT id_vehiculo, periodo
+        FROM pagos_mensuales
+        GROUP BY id_vehiculo, periodo
+        HAVING COUNT(*) > 1
+    ) AS duplicates
+"""
+_PAGOS_MENSUALES_ROW_COUNT_SQL = """
+    SELECT COUNT(*) AS row_count
+    FROM pagos_mensuales
+"""
+_PAGOS_MENSUALES_VEHICULO_ORPHANS_SQL = """
+    SELECT COUNT(*) AS orphan_count
+    FROM pagos_mensuales AS child
+    LEFT JOIN vehiculos AS parent ON parent.id_vehiculo = child.id_vehiculo
+    WHERE parent.id_vehiculo IS NULL
+"""
+_PAGOS_MENSUALES_CIERRE_ORPHANS_SQL = """
+    SELECT COUNT(*) AS orphan_count
+    FROM pagos_mensuales AS child
+    LEFT JOIN cierres_diarios AS parent ON parent.id_cierre = child.id_cierre
+    WHERE child.id_cierre IS NOT NULL
+      AND parent.id_cierre IS NULL
+"""
 
 
 def collect_read_only_schema_inventory(conn: Connection) -> dict[str, Any]:
@@ -222,6 +248,19 @@ def collect_read_only_schema_inventory(conn: Connection) -> dict[str, Any]:
         "vehiculo": _lavados_orphan_snapshot(conn, tables, columns, "id_vehiculo", "vehiculos", "id_vehiculo", _LAVADOS_VEHICULO_ORPHANS_SQL),
         "tipo_vehiculo_lavado": _lavados_orphan_snapshot(conn, tables, columns, "id_tipo_vehiculo_lavado", "tipos_vehiculo_lavado", "id_tipo_vehiculo_lavado", _LAVADOS_TIPO_VEHICULO_ORPHANS_SQL),
     }
+    duplicates = {"available": False, "count": None}
+    row_count = {"available": False, "count": None}
+    orphans = {"vehiculo": {"available": False, "count": None}, "cierre": {"available": False, "count": None}}
+    if "pagos_mensuales" in {str(row.get("table_name", "")).casefold() for row in tables}:
+        row_count = {"available": True, "count": conn.execute(text(_PAGOS_MENSUALES_ROW_COUNT_SQL)).scalar()}
+    if all(_find_column(columns, "pagos_mensuales", name) is not None for name in ("id_vehiculo", "periodo")):
+        duplicates = {"available": True, "count": conn.execute(text(_PAGOS_MENSUALES_DUPLICATES_SQL)).scalar()}
+    for name, child, parent, parent_column, query in (
+        ("vehiculo", "id_vehiculo", "vehiculos", "id_vehiculo", _PAGOS_MENSUALES_VEHICULO_ORPHANS_SQL),
+        ("cierre", "id_cierre", "cierres_diarios", "id_cierre", _PAGOS_MENSUALES_CIERRE_ORPHANS_SQL),
+    ):
+        if _pagos_mensuales_orphan_check_safe(tables, columns, child, parent, parent_column):
+            orphans[name] = {"available": True, "count": conn.execute(text(query)).scalar()}
 
     return {
         "inventory_version": SCHEMA_INVENTORY_VERSION,
@@ -251,6 +290,9 @@ def collect_read_only_schema_inventory(conn: Connection) -> dict[str, Any]:
         "operaciones_servicio_ingreso_generado_orphans": orphan_snapshot,
         "operaciones_servicio_tipo_vehiculo_lavado_orphans": tipo_vehiculo_lavado_orphan_snapshot,
         "lavados_orphans": lavados_orphans,
+        "pagos_mensuales_row_count": row_count,
+        "pagos_mensuales_duplicates": duplicates,
+        "pagos_mensuales_orphans": orphans,
     }
 
 
@@ -726,6 +768,192 @@ def asistencias_device_sessions_contract(inventory: dict[str, Any]) -> dict[str,
         "state": "valid" if not missing_columns and not missing_indexes else "safe_to_add",
         "issues": [], "missing_base_columns": [], "missing_columns": missing_columns, "missing_indexes": missing_indexes,
     }
+
+
+def pagos_mensuales_contract(inventory: dict[str, Any]) -> dict[str, Any]:
+    """Validate the managed Mensualidades contract or safe additive completion."""
+    tables = _table_names(inventory)
+    columns = inventory.get("columns", [])
+    indexes = inventory.get("indexes", [])
+    foreign_keys = inventory.get("foreign_keys", [])
+    issues: list[str] = []
+    missing_vehiculos = []
+    missing_cierres = []
+    for table, names, missing in (
+        ("vehiculos", (("dia_vencimiento", "tinyint unsigned", False, "1"), ("telefono", "varchar(30)", True, None)), missing_vehiculos),
+        ("cierres_diarios", (("total_mensualidades", "int", False, "0"), ("total_mensualidades_monto", "int", False, "0")), missing_cierres),
+    ):
+        if table not in tables:
+            issues.append(f"{table} table is missing; migration 012 does not create it")
+            continue
+        for name, column_type, nullable, default in names:
+            column = _find_column(columns, table, name)
+            if column is None:
+                missing.append(name)
+            else:
+                _require_column(issues, {name: column}, name, column_type, nullable=nullable, default=default)
+
+    parent_issues = _pagos_mensuales_parent_issues(inventory)
+    issues.extend(parent_issues)
+    if "pagos_mensuales" not in tables:
+        issues.extend(_pagos_mensuales_name_collisions(inventory))
+        state = "safe_to_create" if not issues else "blocked_prerequisite" if parent_issues else "invalid"
+        return _pagos_mensuales_result(not issues and not missing_vehiculos and not missing_cierres, state, issues, missing_vehiculos, missing_cierres, (), (), ())
+
+    if _table_engine(inventory, "pagos_mensuales") != "innodb":
+        issues.append("pagos_mensuales engine must be InnoDB")
+    has_primary_key = any(
+        isinstance(row, dict)
+        and str(row.get("table_name", "")).casefold() == "pagos_mensuales"
+        and str(row.get("index_name", "")).casefold() == "primary"
+        for row in indexes
+    )
+    canonical_primary_key = _has_single_column_index(
+        indexes, "pagos_mensuales", "primary", "id_pago_mensual"
+    )
+    if has_primary_key and not canonical_primary_key:
+        issues.append("pagos_mensuales primary key must be id_pago_mensual")
+    expected = (
+        ("id_pago_mensual", "int", False, None, True, True), ("id_vehiculo", "int", False, None, False, False),
+        ("periodo", "date", False, None, False, False), ("dia_vencimiento_snapshot", "tinyint unsigned", False, None, False, False),
+        ("monto_snapshot", "int", False, None, False, False), ("fecha_pago", "datetime", False, None, False, False),
+        ("usuario", "varchar(50)", False, None, False, False), ("metodo_pago", "varchar(50)", True, None, False, False),
+        ("observacion", "varchar(500)", True, None, False, False), ("id_cierre", "int", True, None, False, False),
+        ("created_at", "datetime", False, "CURRENT_TIMESTAMP", False, False),
+    )
+    by_name = {str(row.get("column_name", "")).casefold(): row for row in columns if isinstance(row, dict) and str(row.get("table_name", "")).casefold() == "pagos_mensuales"}
+    missing_columns = []
+    for name, column_type, nullable, default, primary_key, auto_increment in expected:
+        if name not in by_name:
+            missing_columns.append(name)
+            continue
+        _require_column(issues, by_name, name, column_type, nullable=nullable, default=default, auto_increment=auto_increment, indexes=indexes)
+        if nullable and default is None and by_name[name].get("column_default") is not None:
+            issues.append(f"{name} default must be NULL")
+        if primary_key and not has_primary_key and not canonical_primary_key:
+            issues.append(f"{name} must be the sole primary key column")
+    missing_indexes = []
+    for name, expected_columns, unique in (
+        ("uq_pagos_mensuales_vehiculo_periodo", ("id_vehiculo", "periodo"), True),
+        ("idx_pagos_mensuales_pendiente_cierre", ("id_cierre", "fecha_pago"), False),
+        ("idx_pagos_mensuales_periodo", ("periodo",), False),
+    ):
+        state = _pagos_mensuales_index_state(indexes, name, expected_columns, unique)
+        if state == "missing":
+            missing_indexes.append(name)
+        elif state == "incompatible":
+            issues.append(f"{name} name is already used by a different index")
+    missing_fks = _pagos_mensuales_fk_issues(inventory, by_name, issues)
+    required_not_null_columns = {name for name, _, nullable, _, _, _ in expected if not nullable}
+    missing_required_columns = required_not_null_columns.intersection(missing_columns)
+    if missing_required_columns:
+        row_count = inventory.get("pagos_mensuales_row_count")
+        if not isinstance(row_count, dict) or row_count.get("available") is not True:
+            issues.append("pagos_mensuales row count is unavailable for missing required NOT NULL columns")
+        elif row_count.get("count") != 0:
+            issues.append("pagos_mensuales has rows; missing required NOT NULL columns cannot be added safely")
+    duplicate_snapshot = inventory.get("pagos_mensuales_duplicates")
+    duplicate_safe = all(name in by_name for name in ("id_vehiculo", "periodo"))
+    if "uq_pagos_mensuales_vehiculo_periodo" in missing_indexes and duplicate_safe:
+        if not isinstance(duplicate_snapshot, dict) or duplicate_snapshot.get("available") is not True:
+            issues.append("duplicate count is unavailable")
+        elif duplicate_snapshot.get("count") != 0:
+            issues.append("duplicate (id_vehiculo, periodo) rows exist")
+    for suffix, child in (("vehiculo", "id_vehiculo"), ("cierre", "id_cierre")):
+        if suffix in missing_fks and child in by_name:
+            snapshot = (inventory.get("pagos_mensuales_orphans") or {}).get(suffix)
+            if not isinstance(snapshot, dict) or snapshot.get("available") is not True:
+                issues.append(f"{suffix} orphan count is unavailable")
+            elif snapshot.get("count") != 0:
+                issues.append(f"pagos_mensuales.{child} has orphan rows")
+    if issues:
+        state = "blocked_prerequisite" if any(
+            "orphan rows" in issue or issue == "duplicate (id_vehiculo, periodo) rows exist"
+            for issue in issues
+        ) else "invalid"
+        return _pagos_mensuales_result(False, state, issues, missing_vehiculos, missing_cierres, missing_columns, missing_indexes, missing_fks)
+    complete = not any((missing_vehiculos, missing_cierres, missing_columns, missing_indexes, missing_fks))
+    return _pagos_mensuales_result(complete, "valid" if complete else "safe_to_add", [], missing_vehiculos, missing_cierres, missing_columns, missing_indexes, missing_fks)
+
+
+def _pagos_mensuales_parent_issues(inventory: dict[str, Any]) -> list[str]:
+    issues = []
+    for table, column in (("vehiculos", "id_vehiculo"), ("cierres_diarios", "id_cierre")):
+        if table not in _table_names(inventory):
+            issues.append(f"{table} table is missing")
+            continue
+        parent = _find_column(inventory.get("columns", []), table, column)
+        if _table_engine(inventory, table) != "innodb":
+            issues.append(f"{table} engine must be InnoDB")
+        if parent is None or _int_signedness(parent) is not False or not _has_single_column_index(inventory.get("indexes", []), table, "primary", column):
+            issues.append(f"{table}.{column} must be a signed INT sole primary key")
+    return issues
+
+
+def _pagos_mensuales_name_collisions(inventory: dict[str, Any]) -> list[str]:
+    names = {"fk_pagos_mensuales_vehiculo", "fk_pagos_mensuales_cierre"}
+    used = {str(row.get("constraint_name", "")).casefold() for row in inventory.get("foreign_keys", []) if isinstance(row, dict)}
+    return [f"{name} name is already used by a different foreign key" for name in sorted(used & names)]
+
+
+def _pagos_mensuales_index_state(indexes, name, columns, unique):
+    rows = [row for row in indexes if isinstance(row, dict) and str(row.get("table_name", "")).casefold() == "pagos_mensuales" and str(row.get("index_name", "")).casefold() == name]
+    if not rows:
+        return "missing"
+    ordered = sorted(rows, key=lambda row: str(row.get("seq_in_index", "")))
+    if tuple(str(row.get("column_name", "")).casefold() for row in ordered) != columns or any((str(row.get("non_unique", "")).casefold() in {"0", "false"}) != unique for row in ordered):
+        return "incompatible"
+    return "valid"
+
+
+def _pagos_mensuales_fk_issues(inventory, columns, issues):
+    missing = []
+    managed_foreign_keys = [
+        row for row in inventory.get("foreign_keys", [])
+        if isinstance(row, dict)
+        and str(row.get("table_name", "")).casefold() == "pagos_mensuales"
+    ]
+    for row in managed_foreign_keys:
+        if not _is_canonical_pagos_mensuales_fk(row):
+            issues.append("pagos_mensuales has an unexpected foreign key")
+    for suffix, child, table, parent in (("vehiculo", "id_vehiculo", "vehiculos", "id_vehiculo"), ("cierre", "id_cierre", "cierres_diarios", "id_cierre")):
+        name = f"fk_pagos_mensuales_{suffix}"
+        matching = [row for row in inventory.get("foreign_keys", []) if isinstance(row, dict) and str(row.get("table_name", "")).casefold() == "pagos_mensuales" and str(row.get("column_name", "")).casefold() == child]
+        named = [row for row in inventory.get("foreign_keys", []) if isinstance(row, dict) and str(row.get("constraint_name", "")).casefold() == name]
+        exact = [row for row in matching if str(row.get("constraint_name", "")).casefold() == name and str(row.get("referenced_table_name", "")).casefold() == table and str(row.get("referenced_column_name", "")).casefold() == parent and _is_restrictive_fk_rule(row.get("update_rule")) and _is_restrictive_fk_rule(row.get("delete_rule"))]
+        if child in columns and _int_signedness(columns[child]) is not False:
+            issues.append(f"pagos_mensuales.{child} must be a signed INT")
+        if named and len(exact) != 1:
+            issues.append(f"{name} name is already used by a different foreign key")
+        elif matching and (len(matching) != 1 or len(exact) != 1):
+            issues.append(f"pagos_mensuales.{child} has an unexpected foreign key")
+        elif not matching:
+            missing.append(suffix)
+    return missing
+
+
+def _is_canonical_pagos_mensuales_fk(row):
+    expected = {
+        "fk_pagos_mensuales_vehiculo": ("id_vehiculo", "vehiculos", "id_vehiculo"),
+        "fk_pagos_mensuales_cierre": ("id_cierre", "cierres_diarios", "id_cierre"),
+    }
+    name = str(row.get("constraint_name", "")).casefold()
+    return (
+        name in expected
+        and tuple(str(row.get(key, "")).casefold() for key in (
+            "column_name", "referenced_table_name", "referenced_column_name",
+        )) == expected[name]
+        and str(row.get("update_rule", "")).casefold() == "restrict"
+        and str(row.get("delete_rule", "")).casefold() == "restrict"
+    )
+
+
+def _pagos_mensuales_orphan_check_safe(tables, columns, child, parent, parent_column):
+    return all(name in {str(row.get("table_name", "")).casefold() for row in tables} for name in ("pagos_mensuales", parent)) and _find_column(columns, "pagos_mensuales", child) is not None and _find_column(columns, parent, parent_column) is not None
+
+
+def _pagos_mensuales_result(valid, state, issues, missing_vehiculos, missing_cierres, missing_columns, missing_indexes, missing_fks):
+    return {"valid": valid, "create_safe": state == "safe_to_create", "add_safe": state == "safe_to_add", "state": state, "issues": issues, "missing_vehiculos_columns": list(missing_vehiculos), "missing_cierres_columns": list(missing_cierres), "missing_columns": list(missing_columns), "missing_indexes": list(missing_indexes), "missing_foreign_keys": list(missing_fks), "duplicate_check_safe": True, "orphan_check_safe": True}
 
 
 def noches_contract(inventory: dict[str, Any]) -> dict[str, Any]:

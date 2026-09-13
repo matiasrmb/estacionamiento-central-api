@@ -88,6 +88,13 @@ def evaluate_schema_migration_preflight(
         if isinstance(migration, dict) and migration.get("id") == "011_manage_noches_contract"
     ), None)
     noches_issues = noches_contract.get("issues", []) if isinstance(noches_contract, dict) and noches_status in {"pending", "repair_required", "invalid_contract", "inconsistent_state"} else []
+    mensualidades_contract = plan.get("mensualidades_contract", {})
+    mensualidades_status = next((migration.get("status") for migration in plan.get("migrations", []) if isinstance(migration, dict) and migration.get("id") == "012_manage_mensualidades_contract"), None)
+    mensualidades_issues = mensualidades_contract.get("issues", []) if isinstance(mensualidades_contract, dict) and mensualidades_status in {
+        "pending", "repair_required", "invalid_contract", "inconsistent_state",
+    } else []
+    mensualidades_orphan_blockers = [issue.removesuffix(" has orphan rows") for issue in mensualidades_issues if isinstance(issue, str) and issue.endswith(" has orphan rows")]
+    mensualidades_duplicate_blocked = "duplicate (id_vehiculo, periodo) rows exist" in mensualidades_issues
     statuses = []
     statuses.append(_check("database_name", bool(database), "Database name is present."))
     statuses.append(_check(
@@ -141,6 +148,11 @@ def evaluate_schema_migration_preflight(
         "Noches configuration keys are uniquely constrained and unambiguous before planning seeds.",
     ))
     statuses.append(_check(
+        "mensualidades_contract",
+        not mensualidades_issues,
+        "Mensualidades contract has no duplicate, orphan, or incompatible schema blockers.",
+    ))
+    statuses.append(_check(
         "backup_confirmed_for_future_apply",
         not pending_migrations or backup_confirmed,
         "A backup must be confirmed before any future apply with pending migrations.",
@@ -192,9 +204,12 @@ def evaluate_schema_migration_preflight(
             *(["operaciones_servicio.id_ingreso_generado"] if orphan_blocked else []),
             *(["operaciones_servicio.id_tipo_vehiculo_lavado"] if tipo_vehiculo_lavado_orphan_blocked else []),
             *lavados_orphan_blockers,
+            *mensualidades_orphan_blockers,
+            *(["pagos_mensuales.(id_vehiculo, periodo) duplicates"] if mensualidades_duplicate_blocked else []),
         ],
         "wash_vehicle_type_pricing": wash_pricing,
         "noches_contract": noches_contract,
+        "mensualidades_contract": mensualidades_contract,
         "apply": {
             "available": apply_requested and not has_failures,
             "will_execute": apply_requested and not has_failures and bool(pending_migrations),
@@ -226,6 +241,7 @@ def canonical_preflight_sha256(preflight: dict[str, Any]) -> str:
         "orphan_blockers": preflight.get("orphan_blockers"),
         "wash_vehicle_type_pricing": preflight.get("wash_vehicle_type_pricing"),
         "noches_contract": preflight.get("noches_contract"),
+        "mensualidades_contract": preflight.get("mensualidades_contract"),
     }
     canonical_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()

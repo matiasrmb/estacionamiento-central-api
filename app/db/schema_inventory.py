@@ -155,6 +155,20 @@ _PAGOS_MENSUALES_CIERRE_ORPHANS_SQL = """
     WHERE child.id_cierre IS NOT NULL
       AND parent.id_cierre IS NULL
 """
+_GASTOS_OPERACION_CIERRE_ORPHANS_SQL = """
+    SELECT COUNT(*) AS orphan_count
+    FROM gastos_operacion AS child
+    LEFT JOIN cierres_diarios AS parent ON parent.id_cierre = child.id_cierre
+    WHERE child.id_cierre IS NOT NULL
+      AND parent.id_cierre IS NULL
+"""
+_USOS_BANO_CIERRE_ORPHANS_SQL = """
+    SELECT COUNT(*) AS orphan_count
+    FROM usos_bano AS child
+    LEFT JOIN cierres_diarios AS parent ON parent.id_cierre = child.id_cierre
+    WHERE child.id_cierre IS NOT NULL
+      AND parent.id_cierre IS NULL
+"""
 
 
 def collect_read_only_schema_inventory(conn: Connection) -> dict[str, Any]:
@@ -261,6 +275,14 @@ def collect_read_only_schema_inventory(conn: Connection) -> dict[str, Any]:
     ):
         if _pagos_mensuales_orphan_check_safe(tables, columns, child, parent, parent_column):
             orphans[name] = {"available": True, "count": conn.execute(text(query)).scalar()}
+    gastos_cierres_orphans = {
+        "gastos_operacion": _cierre_orphan_snapshot(
+            conn, tables, columns, "gastos_operacion", _GASTOS_OPERACION_CIERRE_ORPHANS_SQL,
+        ),
+        "usos_bano": _cierre_orphan_snapshot(
+            conn, tables, columns, "usos_bano", _USOS_BANO_CIERRE_ORPHANS_SQL,
+        ),
+    }
 
     return {
         "inventory_version": SCHEMA_INVENTORY_VERSION,
@@ -293,6 +315,7 @@ def collect_read_only_schema_inventory(conn: Connection) -> dict[str, Any]:
         "pagos_mensuales_row_count": row_count,
         "pagos_mensuales_duplicates": duplicates,
         "pagos_mensuales_orphans": orphans,
+        "gastos_cierres_orphans": gastos_cierres_orphans,
     }
 
 
@@ -876,6 +899,116 @@ def pagos_mensuales_contract(inventory: dict[str, Any]) -> dict[str, Any]:
     return _pagos_mensuales_result(complete, "valid" if complete else "safe_to_add", [], missing_vehiculos, missing_cierres, missing_columns, missing_indexes, missing_fks)
 
 
+def gastos_cierres_banos_contract(inventory: dict[str, Any]) -> dict[str, Any]:
+    """Validate migration 013's additive expense, close, and bathroom contract."""
+    tables = _table_names(inventory)
+    issues = _cierres_parent_issues(inventory)
+    missing_cierre_totals = []
+    for name in ("total_gastos", "total_neto"):
+        column = _find_column(inventory.get("columns", []), "cierres_diarios", name)
+        if column is None:
+            missing_cierre_totals.append(name)
+        elif not _is_int_compatible(column) or str(column.get("is_nullable", "")).casefold() != "no" or str(column.get("column_default")) != "0":
+            issues.append(f"cierres_diarios.{name} must be INT NOT NULL DEFAULT 0")
+    gastos = _gastos_operacion_contract(inventory)
+    banos = _usos_bano_contract(inventory)
+    issues.extend(gastos["issues"])
+    issues.extend(banos["issues"])
+    if issues:
+        state = "blocked_orphans" if any("orphan" in issue for issue in issues) else "blocked_prerequisite" if any("cierres_diarios" in issue and "missing" in issue for issue in issues) else "invalid"
+        return _gastos_cierres_banos_result(False, state, issues, missing_cierre_totals, gastos, banos)
+    complete = not missing_cierre_totals and gastos["valid"] and banos["valid"]
+    return _gastos_cierres_banos_result(complete, "valid" if complete else "safe_to_add", [], missing_cierre_totals, gastos, banos)
+
+
+def _cierres_parent_issues(inventory: dict[str, Any]) -> list[str]:
+    if "cierres_diarios" not in _table_names(inventory):
+        return ["cierres_diarios table is missing"]
+    parent = _find_column(inventory.get("columns", []), "cierres_diarios", "id_cierre")
+    if _table_engine(inventory, "cierres_diarios") != "innodb" or parent is None or _int_signedness(parent) is not False or not _has_single_column_index(inventory.get("indexes", []), "cierres_diarios", "primary", "id_cierre"):
+        return ["cierres_diarios.id_cierre must be a signed INT sole primary key on InnoDB"]
+    return []
+
+
+def _gastos_operacion_contract(inventory: dict[str, Any]) -> dict[str, Any]:
+    return _cierre_child_contract(
+        inventory, "gastos_operacion", "id_gasto", "fk_gastos_operacion_cierre",
+        "idx_gastos_operacion_pendiente", ("id_cierre", "fecha_hora"),
+        (("fecha_hora", "datetime", False, None, False), ("categoria", "varchar(80)", False, None, False),
+         ("descripcion", "varchar(500)", False, None, False), ("monto", "int", False, None, False),
+         ("usuario", "varchar(50)", False, None, False), ("created_at", "datetime", False, "CURRENT_TIMESTAMP", False)),
+        allow_category_widen=True,
+    )
+
+
+def _usos_bano_contract(inventory: dict[str, Any]) -> dict[str, Any]:
+    return _cierre_child_contract(
+        inventory, "usos_bano", "id", "fk_usos_bano_cierre",
+        "idx_usos_bano_pendiente", ("id_cierre", "fecha_hora"),
+        (("fecha_hora", "datetime", False, None, False), ("monto", "int", False, None, False),
+         ("usuario", "varchar(50)", False, None, False)),
+    )
+
+
+def _cierre_child_contract(inventory, table, primary_key, constraint, index_name, index_columns, columns, *, allow_category_widen=False):
+    tables = _table_names(inventory)
+    if table not in tables:
+        if any(
+            isinstance(row, dict)
+            and str(row.get("constraint_name", "")).casefold() == constraint
+            for row in inventory.get("foreign_keys", [])
+        ):
+            return {"valid": False, "create_safe": False, "add_safe": False, "state": "invalid", "issues": [f"{constraint} name is already used by a different foreign key"], "missing_columns": [], "missing_indexes": [], "missing_foreign_keys": ["cierre"], "widen_category": False}
+        return {"valid": False, "create_safe": True, "add_safe": False, "state": "safe_to_create", "issues": [], "missing_columns": [], "missing_indexes": [], "missing_foreign_keys": ["cierre"], "widen_category": False}
+    issues = []
+    by_name = {str(row.get("column_name", "")).casefold(): row for row in inventory.get("columns", []) if isinstance(row, dict) and str(row.get("table_name", "")).casefold() == table}
+    indexes = inventory.get("indexes", [])
+    table_indexes = [row for row in indexes if isinstance(row, dict) and str(row.get("table_name", "")).casefold() == table]
+    if _table_engine(inventory, table) != "innodb":
+        issues.append(f"{table} engine must be InnoDB")
+    _require_column(issues, by_name, primary_key, "int", nullable=False, primary_key=True, auto_increment=True, indexes=table_indexes)
+    for name, column_type, nullable, default, _ in columns:
+        column = by_name.get(name)
+        if allow_category_widen and name == "categoria" and column is not None and str(column.get("column_type", "")).casefold() == "varchar(50)" and str(column.get("is_nullable", "")).casefold() == "no":
+            continue
+        _require_column(issues, by_name, name, column_type, nullable=nullable, default=default)
+    category = by_name.get("categoria") if allow_category_widen else None
+    widen_category = category is not None and str(category.get("column_type", "")).casefold() == "varchar(50)" and str(category.get("is_nullable", "")).casefold() == "no"
+    child = by_name.get("id_cierre")
+    missing_columns = [] if child is not None else ["id_cierre"]
+    if child is not None and (_int_signedness(child) is not False or str(child.get("is_nullable", "")).casefold() != "yes"):
+        issues.append(f"{table}.id_cierre must be signed INT NULL")
+    index_state = _index_state(indexes, table, index_name, index_columns)
+    if index_state == "incompatible":
+        issues.append(f"{index_name} name is already used by a different index")
+    missing_indexes = [index_name] if index_state == "missing" else []
+    named = [row for row in inventory.get("foreign_keys", []) if isinstance(row, dict) and str(row.get("constraint_name", "")).casefold() == constraint]
+    child_foreign_keys = [row for row in inventory.get("foreign_keys", []) if isinstance(row, dict) and str(row.get("table_name", "")).casefold() == table]
+    matching = [row for row in inventory.get("foreign_keys", []) if isinstance(row, dict) and str(row.get("table_name", "")).casefold() == table and str(row.get("column_name", "")).casefold() == "id_cierre"]
+    exact = [row for row in matching if str(row.get("constraint_name", "")).casefold() == constraint and str(row.get("referenced_table_name", "")).casefold() == "cierres_diarios" and str(row.get("referenced_column_name", "")).casefold() == "id_cierre" and _is_restrictive_fk_rule(row.get("update_rule")) and _is_restrictive_fk_rule(row.get("delete_rule"))]
+    if named and len(exact) != 1:
+        issues.append(f"{constraint} name is already used by a different foreign key")
+    elif matching and (len(matching) != 1 or len(exact) != 1):
+        issues.append(f"{table}.id_cierre has an unexpected foreign key")
+    missing_fks = [] if matching else ["cierre"]
+    if any(row not in exact for row in child_foreign_keys):
+        issues.append(f"{table} has an unexpected foreign key")
+    if child is not None:
+        snapshot = (inventory.get("gastos_cierres_orphans") or {}).get(table)
+        if not isinstance(snapshot, dict) or snapshot.get("available") is not True:
+            issues.append(f"{table}.id_cierre orphan count is unavailable")
+        elif snapshot.get("count") != 0:
+            issues.append(f"{table}.id_cierre has orphan rows")
+    if issues:
+        return {"valid": False, "create_safe": False, "add_safe": False, "state": "invalid", "issues": issues, "missing_columns": missing_columns, "missing_indexes": missing_indexes, "missing_foreign_keys": missing_fks, "widen_category": widen_category}
+    valid = not missing_columns and not missing_indexes and not missing_fks and not widen_category
+    return {"valid": valid, "create_safe": False, "add_safe": not valid, "state": "valid" if valid else "safe_to_add", "issues": [], "missing_columns": missing_columns, "missing_indexes": missing_indexes, "missing_foreign_keys": missing_fks, "widen_category": widen_category}
+
+
+def _gastos_cierres_banos_result(valid, state, issues, missing_cierre_totals, gastos, banos):
+    return {"valid": valid, "create_safe": gastos["create_safe"] or banos["create_safe"], "add_safe": state == "safe_to_add", "state": state, "issues": issues, "missing_cierre_totals": missing_cierre_totals, "gastos_operacion": gastos, "usos_bano": banos}
+
+
 def _pagos_mensuales_parent_issues(inventory: dict[str, Any]) -> list[str]:
     issues = []
     for table, column in (("vehiculos", "id_vehiculo"), ("cierres_diarios", "id_cierre")):
@@ -950,6 +1083,17 @@ def _is_canonical_pagos_mensuales_fk(row):
 
 def _pagos_mensuales_orphan_check_safe(tables, columns, child, parent, parent_column):
     return all(name in {str(row.get("table_name", "")).casefold() for row in tables} for name in ("pagos_mensuales", parent)) and _find_column(columns, "pagos_mensuales", child) is not None and _find_column(columns, parent, parent_column) is not None
+
+
+def _cierre_orphan_snapshot(conn, tables, columns, table, query):
+    if (
+        table in {str(row.get("table_name", "")).casefold() for row in tables}
+        and "cierres_diarios" in {str(row.get("table_name", "")).casefold() for row in tables}
+        and _find_column(columns, table, "id_cierre") is not None
+        and _find_column(columns, "cierres_diarios", "id_cierre") is not None
+    ):
+        return {"available": True, "count": conn.execute(text(query)).scalar()}
+    return {"available": False, "count": None}
 
 
 def _pagos_mensuales_result(valid, state, issues, missing_vehiculos, missing_cierres, missing_columns, missing_indexes, missing_fks):

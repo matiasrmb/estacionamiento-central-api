@@ -943,8 +943,8 @@ def _is_canonical_pagos_mensuales_fk(row):
         and tuple(str(row.get(key, "")).casefold() for key in (
             "column_name", "referenced_table_name", "referenced_column_name",
         )) == expected[name]
-        and str(row.get("update_rule", "")).casefold() == "restrict"
-        and str(row.get("delete_rule", "")).casefold() == "restrict"
+        and _is_restrictive_fk_rule(row.get("update_rule"))
+        and _is_restrictive_fk_rule(row.get("delete_rule"))
     )
 
 

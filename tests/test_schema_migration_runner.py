@@ -23,6 +23,7 @@ from app.db.schema_migration_runner import (
     MIGRATION_010_ID,
     MIGRATION_011_ID,
     MIGRATION_012_ID,
+    MIGRATION_013_ID,
     WASH_VEHICLE_TYPE_DEFAULTS,
     apply_001_create_schema_migrations,
     apply_002_create_tipos_lavado,
@@ -36,6 +37,7 @@ from app.db.schema_migration_runner import (
     apply_010_add_asistencias_device_sessions,
     apply_011_manage_noches_contract,
     apply_012_manage_mensualidades_contract,
+    apply_013_manage_gastos_cierres_banos_contract,
     collect_dry_run_plan,
     main,
     plan_schema_migrations,
@@ -130,6 +132,7 @@ class SchemaMigrationRunnerTests(unittest.TestCase):
             "010_add_asistencias_device_sessions",
             "011_manage_noches_contract",
             "012_manage_mensualidades_contract",
+            "013_manage_gastos_cierres_banos_contract",
         ))
         self.assertEqual(
             [migration.migration_id for migration in MIGRATIONS],

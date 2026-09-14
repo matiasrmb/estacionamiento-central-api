@@ -199,6 +199,21 @@ class MensualidadesContractTests(unittest.TestCase):
         self.assertTrue(pagos_mensuales_contract(inventory)["valid"])
         self.assertEqual(_migration(inventory)["status"], "repair_required")
 
+    def test_canonical_foreign_keys_accept_no_action_and_reject_unsafe_rules(self):
+        inventory = _inventory()
+        for foreign_key in inventory["foreign_keys"]:
+            foreign_key.update(update_rule="NO ACTION", delete_rule="NO ACTION")
+        self.assertTrue(pagos_mensuales_contract(inventory)["valid"])
+        self.assertEqual(_migration(inventory)["status"], "repair_required")
+
+        for rule in ("CASCADE", "SET NULL", "SET DEFAULT"):
+            for field in ("update_rule", "delete_rule"):
+                with self.subTest(rule=rule, field=field):
+                    inventory = _inventory()
+                    _fk(inventory, "fk_pagos_mensuales_vehiculo").update(**{field: rule})
+                    self.assertFalse(pagos_mensuales_contract(inventory)["valid"])
+                    self.assertEqual(_migration(inventory)["status"], "invalid_contract")
+
     def test_extra_foreign_key_on_canonical_column_is_invalid(self):
         inventory = _inventory()
         inventory["foreign_keys"].append({"constraint_name": "fk_legacy_pagos_mensuales_vehiculo", "table_name": "pagos_mensuales", "column_name": "id_vehiculo", "referenced_table_name": "vehiculos", "referenced_column_name": "id_vehiculo", "update_rule": "RESTRICT", "delete_rule": "RESTRICT"})

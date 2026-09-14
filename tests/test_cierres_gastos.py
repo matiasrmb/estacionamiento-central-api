@@ -1,7 +1,9 @@
+import inspect
 import unittest
 from datetime import datetime
 from unittest.mock import patch
 
+from app.db import schema_ensure
 from app.repositories import cierres_repo
 
 
@@ -54,6 +56,28 @@ class FakeConnection:
 
 
 class CierresGastosTests(unittest.TestCase):
+    def test_cierres_do_not_expose_monthly_schema_ensure(self):
+        self.assertFalse(hasattr(cierres_repo, "ensure_monthly_payments_schema"))
+        self.assertNotIn("ensure_monthly_payments_schema", inspect.getsource(cierres_repo))
+
+    def test_missing_monthly_payments_table_error_propagates_without_runtime_repair(self):
+        class MissingMonthlyPaymentsConnection(FakeConnection):
+            def execute(self, statement, params=None):
+                sql = str(statement)
+                self.executed.append((sql, params))
+                if "FROM pagos_mensuales" in sql:
+                    raise RuntimeError("Table 'pagos_mensuales' doesn't exist")
+                return FakeResult()
+
+        conn = MissingMonthlyPaymentsConnection()
+        with patch.object(cierres_repo, "db_conn", return_value=FakeDbConn(conn)), \
+             patch.object(schema_ensure, "db_conn", return_value=FakeDbConn(conn)):
+            with self.assertRaisesRegex(RuntimeError, "pagos_mensuales"):
+                cierres_repo.get_cierre_pendiente()
+
+        self.assertFalse(conn.committed)
+        self.assertFalse(any("CREATE TABLE" in sql or "ALTER TABLE" in sql for sql, _ in conn.executed))
+
     def test_mixed_close_keeps_gross_revenue_and_subtracts_expenses_from_net(self):
         summary = cierres_repo.build_cierre_summary_from_rows(
             parking_movements=[{
@@ -198,8 +222,7 @@ class CierresGastosTests(unittest.TestCase):
             "ids_banos": [3, 4],
             "ids_gastos": [5, 8],
         }
-        with patch.object(cierres_repo, "ensure_monthly_payments_schema"), \
-              patch.object(cierres_repo, "db_conn", return_value=FakeDbConn(conn)), \
+        with patch.object(cierres_repo, "db_conn", return_value=FakeDbConn(conn)), \
              patch.object(cierres_repo, "_build_pending_summary", return_value=summary) as build:
             result = cierres_repo.realizar_cierre("admin")
 
@@ -255,8 +278,7 @@ class CierresGastosTests(unittest.TestCase):
             "ids_pagos_mensuales": [],
             "ids_cobros_noches": [],
         }
-        with patch.object(cierres_repo, "ensure_monthly_payments_schema"), \
-              patch.object(cierres_repo, "db_conn", return_value=FakeDbConn(conn)), \
+        with patch.object(cierres_repo, "db_conn", return_value=FakeDbConn(conn)), \
              patch.object(cierres_repo, "_build_pending_summary", return_value=summary):
             cierres_repo.realizar_cierre("operador")
 
@@ -279,8 +301,7 @@ class CierresGastosTests(unittest.TestCase):
             return FakeResult()
 
         conn.execute = unavailable_lock
-        with patch.object(cierres_repo, "ensure_monthly_payments_schema"), \
-              patch.object(cierres_repo, "db_conn", return_value=FakeDbConn(conn)), \
+        with patch.object(cierres_repo, "db_conn", return_value=FakeDbConn(conn)), \
              patch.object(cierres_repo, "_build_pending_summary") as build:
             with self.assertRaises(cierres_repo.DailyCloseInProgressError):
                 cierres_repo.realizar_cierre("operador")
@@ -291,8 +312,7 @@ class CierresGastosTests(unittest.TestCase):
 
     def test_no_pending_close_does_not_link_expenses(self):
         conn = FakeConnection()
-        with patch.object(cierres_repo, "ensure_monthly_payments_schema"), \
-              patch.object(cierres_repo, "db_conn", return_value=FakeDbConn(conn)), \
+        with patch.object(cierres_repo, "db_conn", return_value=FakeDbConn(conn)), \
              patch.object(cierres_repo, "_build_pending_summary", return_value={"hay_pendiente": False}):
             with self.assertRaises(LookupError):
                 cierres_repo.realizar_cierre("admin")

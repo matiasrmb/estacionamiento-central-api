@@ -1,3 +1,4 @@
+import inspect
 import unittest
 from datetime import datetime
 from unittest.mock import patch
@@ -31,6 +32,10 @@ class _ScalarConnection:
 
 
 class ResumenTurnoTests(unittest.TestCase):
+    def test_resumen_turno_does_not_expose_monthly_schema_ensure(self):
+        self.assertFalse(hasattr(resumen_turno, "ensure_monthly_payments_schema"))
+        self.assertNotIn("ensure_monthly_payments_schema", inspect.getsource(resumen_turno))
+
     def test_returns_collected_total_and_safe_active_projection(self):
         consultado_a = datetime(2026, 8, 2, 21, 40)
         pendientes = {
@@ -47,8 +52,7 @@ class ResumenTurnoTests(unittest.TestCase):
             {"monto_acumulado": 0, "en_espera": 1},
         ]
 
-        with patch.object(resumen_turno, "ensure_monthly_payments_schema"), \
-              patch.object(resumen_turno, "datetime") as mocked_datetime, \
+        with patch.object(resumen_turno, "datetime") as mocked_datetime, \
               patch.object(resumen_turno, "db_conn", return_value=_DbConn()), \
               patch.object(resumen_turno, "build_active_items", return_value=activos) as build_activos, \
               patch.object(resumen_turno, "_build_pending_summary", return_value=pendientes) as build_pendientes, \

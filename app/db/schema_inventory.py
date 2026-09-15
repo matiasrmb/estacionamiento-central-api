@@ -985,13 +985,13 @@ def _cierre_child_contract(inventory, table, primary_key, constraint, index_name
     named = [row for row in inventory.get("foreign_keys", []) if isinstance(row, dict) and str(row.get("constraint_name", "")).casefold() == constraint]
     child_foreign_keys = [row for row in inventory.get("foreign_keys", []) if isinstance(row, dict) and str(row.get("table_name", "")).casefold() == table]
     matching = [row for row in inventory.get("foreign_keys", []) if isinstance(row, dict) and str(row.get("table_name", "")).casefold() == table and str(row.get("column_name", "")).casefold() == "id_cierre"]
-    exact = [row for row in matching if str(row.get("constraint_name", "")).casefold() == constraint and str(row.get("referenced_table_name", "")).casefold() == "cierres_diarios" and str(row.get("referenced_column_name", "")).casefold() == "id_cierre" and _is_restrictive_fk_rule(row.get("update_rule")) and _is_restrictive_fk_rule(row.get("delete_rule"))]
-    if named and len(exact) != 1:
+    compatible = [row for row in matching if str(row.get("referenced_table_name", "")).casefold() == "cierres_diarios" and str(row.get("referenced_column_name", "")).casefold() == "id_cierre" and _is_restrictive_fk_rule(row.get("update_rule")) and _is_restrictive_fk_rule(row.get("delete_rule"))]
+    if not matching and named:
         issues.append(f"{constraint} name is already used by a different foreign key")
-    elif matching and (len(matching) != 1 or len(exact) != 1):
+    elif matching and (len(matching) != 1 or len(compatible) != 1):
         issues.append(f"{table}.id_cierre has an unexpected foreign key")
     missing_fks = [] if matching else ["cierre"]
-    if any(row not in exact for row in child_foreign_keys):
+    if any(row not in compatible for row in child_foreign_keys):
         issues.append(f"{table} has an unexpected foreign key")
     if child is not None:
         snapshot = (inventory.get("gastos_cierres_orphans") or {}).get(table)

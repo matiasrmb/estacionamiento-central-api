@@ -82,6 +82,73 @@ class GastosCierresBanosContractTests(unittest.TestCase):
         inventory["foreign_keys"].append({"constraint_name": "fk_gastos_usuario", "table_name": "gastos_operacion", "column_name": "usuario", "referenced_table_name": "usuarios", "referenced_column_name": "usuario", "update_rule": "RESTRICT", "delete_rule": "RESTRICT"})
         self.assertEqual(_migration(inventory)["status"], "invalid_contract")
 
+    def test_legacy_cierre_fk_names_are_accepted_when_semantically_compatible(self):
+        for table, canonical_name, legacy_name in (
+            ("gastos_operacion", "fk_gastos_operacion_cierre", "gastos_operacion_ibfk_1"),
+            ("usos_bano", "fk_usos_bano_cierre", "usos_bano_ibfk_1"),
+        ):
+            with self.subTest(table=table):
+                inventory = _inventory()
+                _fk(inventory, canonical_name).update(
+                    constraint_name=legacy_name,
+                    update_rule="NO ACTION",
+                    delete_rule="NO ACTION",
+                )
+
+                self.assertTrue(gastos_cierres_banos_contract(inventory)["valid"])
+                self.assertEqual(_migration(inventory)["status"], "repair_required")
+
+    def test_legacy_gastos_fk_with_missing_index_plans_only_the_index(self):
+        inventory = _inventory(missing=("idx_gastos_operacion_pendiente",))
+        _fk(inventory, "fk_gastos_operacion_cierre")["constraint_name"] = "gastos_operacion_ibfk_1"
+
+        migration = _migration(inventory)
+
+        self.assertEqual(migration["status"], "pending")
+        self.assertIn("ADD INDEX idx_gastos_operacion_pendiente", migration["sql"][0])
+        self.assertNotIn("ADD CONSTRAINT fk_gastos_operacion_cierre", migration["sql"][0])
+
+    def test_incompatible_or_multiple_cierre_fks_are_rejected(self):
+        cases = (
+            {"referenced_table_name": "other_table"},
+            {"referenced_column_name": "other_column"},
+            {"delete_rule": "CASCADE"},
+            {"constraint_name": "gastos_operacion_ibfk_1"},
+        )
+        for changes in cases:
+            with self.subTest(changes=changes):
+                inventory = _inventory()
+                _fk(inventory, "fk_gastos_operacion_cierre").update(changes)
+                if changes.get("constraint_name"):
+                    inventory["foreign_keys"].append({
+                        "constraint_name": "gastos_operacion_ibfk_2",
+                        "table_name": "gastos_operacion",
+                        "column_name": "id_cierre",
+                        "referenced_table_name": "cierres_diarios",
+                        "referenced_column_name": "id_cierre",
+                        "update_rule": "RESTRICT",
+                        "delete_rule": "RESTRICT",
+                    })
+
+                self.assertEqual(_migration(inventory)["status"], "invalid_contract")
+
+    def test_missing_cierre_fk_with_canonical_name_collision_is_rejected(self):
+        inventory = _inventory(missing=("fk_gastos_operacion_cierre",))
+        inventory["foreign_keys"].append({
+            "constraint_name": "fk_gastos_operacion_cierre",
+            "table_name": "other_table",
+            "column_name": "other_column",
+            "referenced_table_name": "cierres_diarios",
+            "referenced_column_name": "id_cierre",
+            "update_rule": "RESTRICT",
+            "delete_rule": "RESTRICT",
+        })
+
+        migration = _migration(inventory)
+
+        self.assertEqual(migration["status"], "invalid_contract")
+        self.assertEqual(migration["sql"], [])
+
     def test_orphans_block_before_sql_and_recorded_invalid_state_is_inconsistent(self):
         for table in ("gastos_operacion", "usos_bano"):
             for snapshot in ({"available": True, "count": 1}, {"available": False, "count": None}):

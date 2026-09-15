@@ -4,11 +4,9 @@ from typing import Any, Dict, List
 from sqlalchemy import text
 
 from app.db.database import db_conn
-from app.db.schema_ensure import ensure_gastos_operacion_schema
 
 
 def crear_gasto(categoria: str, descripcion: str, monto: int, usuario: str) -> Dict[str, Any]:
-    ensure_gastos_operacion_schema()
     fecha_hora = datetime.now()
     with db_conn() as conn:
         conn.execute(
@@ -39,7 +37,6 @@ def crear_gasto(categoria: str, descripcion: str, monto: int, usuario: str) -> D
 
 
 def list_gastos_pendientes() -> Dict[str, Any]:
-    ensure_gastos_operacion_schema()
     with db_conn() as conn:
         rows = conn.execute(
             text("""

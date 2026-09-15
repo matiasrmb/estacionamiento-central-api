@@ -8,9 +8,19 @@ from app.api.v1.endpoints import health
 
 
 class FakeConnection:
-    def __init__(self, tables=None, columns=None, fail=False):
+    def __init__(self, tables=None, columns=None, asistencias_columns=None, asistencias_index=None, fail=False):
         self.tables = tables if tables is not None else health.REQUIRED_TABLES
         self.columns = columns if columns is not None else health.REQUIRED_PRINT_JOB_COLUMNS
+        self.asistencias_columns = (
+            asistencias_columns
+            if asistencias_columns is not None
+            else health.REQUIRED_ASISTENCIAS_COLUMNS
+        )
+        self.asistencias_index = (
+            asistencias_index
+            if asistencias_index is not None
+            else health.REQUIRED_ASISTENCIAS_SESSION_INDEX_COLUMNS
+        )
         self.fail = fail
 
     def execute(self, statement, params=None):
@@ -25,7 +35,10 @@ class FakeConnection:
             return [(name,) for name in sorted(self.tables & requested)]
         if "information_schema.columns" in sql:
             requested = set(params["columns"])
-            return [(name,) for name in sorted(self.columns & requested)]
+            available = self.asistencias_columns if "table_name = 'asistencias'" in sql else self.columns
+            return [(name,) for name in sorted(available & requested)]
+        if "information_schema.statistics" in sql:
+            return [(name, position, 1) for position, name in enumerate(self.asistencias_index, 1)]
         raise AssertionError(f"Unexpected query: {sql}")
 
 
@@ -45,6 +58,8 @@ class DeepHealthTests(unittest.TestCase):
         self.assertEqual(result["checks"]["db_connection"]["status"], "ok")
         self.assertEqual(result["checks"]["required_tables"], {"status": "ok", "missing": []})
         self.assertEqual(result["checks"]["print_jobs_columns"], {"status": "ok", "missing": []})
+        self.assertEqual(result["checks"]["asistencias_columns"], {"status": "ok", "missing": []})
+        self.assertEqual(result["checks"]["asistencias_session_index"], {"status": "ok", "missing": []})
 
     @patch.object(health, "db_conn")
     def test_deep_health_raises_503_when_required_table_is_missing(self, db_conn):
@@ -69,6 +84,30 @@ class DeepHealthTests(unittest.TestCase):
         self.assertEqual(raised.exception.status_code, 503)
         self.assertEqual(raised.exception.detail["status"], "fail")
         self.assertEqual(raised.exception.detail["checks"]["print_jobs_columns"]["missing"], ["locked_by"])
+
+    @patch.object(health, "db_conn")
+    def test_deep_health_raises_503_when_asistencias_column_is_missing(self, db_conn):
+        columns = health.REQUIRED_ASISTENCIAS_COLUMNS - {"device_id"}
+        db_conn.return_value = fake_db_conn(FakeConnection(asistencias_columns=columns))
+
+        with self.assertRaises(HTTPException) as raised:
+            health.deep_health()
+
+        self.assertEqual(raised.exception.status_code, 503)
+        self.assertEqual(raised.exception.detail["checks"]["asistencias_columns"]["missing"], ["device_id"])
+
+    @patch.object(health, "db_conn")
+    def test_deep_health_raises_503_when_asistencias_session_index_is_missing(self, db_conn):
+        db_conn.return_value = fake_db_conn(FakeConnection(asistencias_index=()))
+
+        with self.assertRaises(HTTPException) as raised:
+            health.deep_health()
+
+        self.assertEqual(raised.exception.status_code, 503)
+        self.assertEqual(
+            raised.exception.detail["checks"]["asistencias_session_index"]["missing"],
+            ["idx_asistencias_sesion_activa"],
+        )
 
     @patch.object(health, "db_conn")
     def test_deep_health_raises_503_without_exposing_db_error(self, db_conn):

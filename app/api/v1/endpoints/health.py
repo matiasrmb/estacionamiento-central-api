@@ -5,7 +5,7 @@ from app.db.database import db_conn
 
 router = APIRouter()
 
-REQUIRED_TABLES = {"usuarios", "vehiculos", "ingresos", "configuracion", "print_jobs"}
+REQUIRED_TABLES = {"usuarios", "vehiculos", "ingresos", "configuracion", "print_jobs", "asistencias"}
 REQUIRED_PRINT_JOB_COLUMNS = {
     "id_print_job",
     "estado",
@@ -17,6 +17,8 @@ REQUIRED_PRINT_JOB_COLUMNS = {
     "intentos",
     "max_intentos",
 }
+REQUIRED_ASISTENCIAS_COLUMNS = {"device_id", "session_id"}
+REQUIRED_ASISTENCIAS_SESSION_INDEX_COLUMNS = ("usuario", "session_id", "hora_salida")
 
 
 @router.get("/health", tags=["system"])
@@ -77,6 +79,43 @@ def deep_health():
             checks["print_jobs_columns"] = {
                 "status": "ok" if not missing_columns else "fail",
                 "missing": missing_columns,
+            }
+
+            asistencia_column_rows = conn.execute(
+                text(
+                    """
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_schema = DATABASE()
+                      AND table_name = 'asistencias'
+                      AND column_name IN :columns
+                    """
+                ).bindparams(bindparam("columns", expanding=True)),
+                {"columns": tuple(REQUIRED_ASISTENCIAS_COLUMNS)},
+            )
+            found_asistencia_columns = {row[0] for row in asistencia_column_rows}
+            missing_asistencia_columns = sorted(REQUIRED_ASISTENCIAS_COLUMNS - found_asistencia_columns)
+            checks["asistencias_columns"] = {
+                "status": "ok" if not missing_asistencia_columns else "fail",
+                "missing": missing_asistencia_columns,
+            }
+
+            index_rows = conn.execute(
+                text(
+                    """
+                    SELECT column_name, seq_in_index, non_unique
+                    FROM information_schema.statistics
+                    WHERE table_schema = DATABASE()
+                      AND table_name = 'asistencias'
+                      AND index_name = 'idx_asistencias_sesion_activa'
+                    ORDER BY seq_in_index
+                    """
+                )
+            )
+            index_columns = tuple(row[0] for row in index_rows if row[2] == 1)
+            checks["asistencias_session_index"] = {
+                "status": "ok" if index_columns == REQUIRED_ASISTENCIAS_SESSION_INDEX_COLUMNS else "fail",
+                "missing": [] if index_columns == REQUIRED_ASISTENCIAS_SESSION_INDEX_COLUMNS else ["idx_asistencias_sesion_activa"],
             }
     except Exception:
         if "db_connection" in checks:

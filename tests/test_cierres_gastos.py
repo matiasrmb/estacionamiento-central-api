@@ -3,7 +3,6 @@ import unittest
 from datetime import datetime
 from unittest.mock import patch
 
-from app.db import schema_ensure
 from app.repositories import cierres_repo
 
 
@@ -60,6 +59,13 @@ class CierresGastosTests(unittest.TestCase):
         self.assertFalse(hasattr(cierres_repo, "ensure_monthly_payments_schema"))
         self.assertNotIn("ensure_monthly_payments_schema", inspect.getsource(cierres_repo))
 
+    def test_cierres_do_not_expose_gastos_cierres_banos_schema_ensure(self):
+        source = inspect.getsource(cierres_repo).casefold()
+        self.assertNotIn("ensure_gastos_operacion_schema", source)
+        self.assertNotIn("create table", source)
+        self.assertNotIn("alter table", source)
+        self.assertNotIn("create index", source)
+
     def test_missing_monthly_payments_table_error_propagates_without_runtime_repair(self):
         class MissingMonthlyPaymentsConnection(FakeConnection):
             def execute(self, statement, params=None):
@@ -70,8 +76,7 @@ class CierresGastosTests(unittest.TestCase):
                 return FakeResult()
 
         conn = MissingMonthlyPaymentsConnection()
-        with patch.object(cierres_repo, "db_conn", return_value=FakeDbConn(conn)), \
-             patch.object(schema_ensure, "db_conn", return_value=FakeDbConn(conn)):
+        with patch.object(cierres_repo, "db_conn", return_value=FakeDbConn(conn)):
             with self.assertRaisesRegex(RuntimeError, "pagos_mensuales"):
                 cierres_repo.get_cierre_pendiente()
 

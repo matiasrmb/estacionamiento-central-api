@@ -13,7 +13,6 @@ from app.core.errors import (
     unhandled_exception_handler,
 )
 from app.api.v1.router import api_router
-from app.db.schema_ensure import ensure_gastos_operacion_schema
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -58,4 +57,3 @@ app.add_exception_handler(Exception, unhandled_exception_handler)
 def on_startup() -> None:
     logger.info("Starting %s (env=%s)", settings.app_name, settings.env)
     settings.validate_runtime_safety()
-    ensure_gastos_operacion_schema()

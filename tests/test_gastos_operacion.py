@@ -101,9 +101,8 @@ class GastosOperacionTests(unittest.TestCase):
 
     def test_create_uses_server_timestamp_and_authenticated_user(self):
         conn = FakeConnection()
-        with patch.object(gastos_repo, "ensure_gastos_operacion_schema"), \
-             patch.object(gastos_repo, "db_conn", return_value=FakeDbConn(conn)), \
-             patch.object(gastos_repo, "datetime") as now:
+        with patch.object(gastos_repo, "db_conn", return_value=FakeDbConn(conn)), \
+              patch.object(gastos_repo, "datetime") as now:
             now.now.return_value = datetime(2026, 7, 1, 10, 30)
             result = gastos_repo.crear_gasto("Insumos", "Agua", 250, "admin")
 
@@ -114,6 +113,7 @@ class GastosOperacionTests(unittest.TestCase):
         self.assertEqual(result["id_gasto"], 17)
         self.assertEqual(result["id_cierre"], None)
         self.assertTrue(conn.committed)
+        self.assertFalse(any(keyword in sql.upper() for sql, _ in conn.executed for keyword in ("CREATE TABLE", "ALTER TABLE", "CREATE INDEX")))
 
     def test_pending_list_excludes_closed_expenses_and_sums_amounts(self):
         conn = FakeConnection(rows=[
@@ -127,11 +127,11 @@ class GastosOperacionTests(unittest.TestCase):
                 "id_cierre": None,
             },
         ])
-        with patch.object(gastos_repo, "ensure_gastos_operacion_schema"), \
-             patch.object(gastos_repo, "db_conn", return_value=FakeDbConn(conn)):
+        with patch.object(gastos_repo, "db_conn", return_value=FakeDbConn(conn)):
             result = gastos_repo.list_gastos_pendientes()
 
         self.assertIn("WHERE id_cierre IS NULL", conn.executed[0][0])
+        self.assertFalse(any(keyword in sql.upper() for sql, _ in conn.executed for keyword in ("CREATE TABLE", "ALTER TABLE", "CREATE INDEX")))
         self.assertEqual(result["total_gastos"], 250)
         self.assertEqual(result["items"][0]["fecha_hora"], "2026-07-01T09:00:00")
 

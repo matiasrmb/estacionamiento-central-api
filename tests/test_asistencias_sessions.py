@@ -8,6 +8,52 @@ from app.db import schema_ensure
 from app.repositories.asistencias_repo import _calcular_resumen_sesion, _calcular_totales_turno, _cerrar_asistencias_activas
 
 
+def _create_summary_tables(conn):
+    conn.execute(text("""
+        CREATE TABLE asistencias (
+            id_asistencia INTEGER PRIMARY KEY,
+            usuario TEXT NOT NULL,
+            device_id TEXT,
+            hora_inicio DATETIME NOT NULL,
+            hora_salida DATETIME,
+            cantidad_movimientos INTEGER,
+            total_recaudado INTEGER,
+            session_id TEXT
+        )
+    """))
+    conn.execute(text("""
+        CREATE TABLE ingresos (
+            id_ingreso INTEGER PRIMARY KEY,
+            usuario TEXT,
+            fecha_hora_salida DATETIME,
+            tarifa_aplicada INTEGER
+        )
+    """))
+    conn.execute(text("CREATE TABLE ingresos_eliminados (id_ingreso_original INTEGER)"))
+    conn.execute(text("CREATE TABLE usos_bano (usuario TEXT, fecha_hora DATETIME, monto INTEGER)"))
+    conn.execute(text("CREATE TABLE pagos_mensuales (usuario TEXT, fecha_pago DATETIME, monto_snapshot INTEGER)"))
+    conn.execute(text("""
+        CREATE TABLE cobros_noches (
+            usuario TEXT, fecha_hora_pago DATETIME, monto_snapshot INTEGER,
+            estado TEXT, id_ingreso INTEGER
+        )
+    """))
+    conn.execute(text("""
+        CREATE TABLE operaciones_servicio (
+            usuario_fin TEXT, fecha_hora_fin DATETIME, valor_lavado_snapshot INTEGER,
+            estado TEXT, id_ingreso_generado INTEGER
+        )
+    """))
+    conn.execute(text("CREATE TABLE gastos_operacion (usuario TEXT, fecha_hora DATETIME, monto INTEGER)"))
+
+
+def _insert_paid_exit(conn, salida: datetime, amount: int = 1700):
+    conn.execute(text("""
+        INSERT INTO ingresos (id_ingreso, usuario, fecha_hora_salida, tarifa_aplicada)
+        VALUES (1, 'operador', :salida, :amount)
+    """), {"salida": salida, "amount": amount})
+
+
 class AsistenciasSessionSchemaTests(unittest.TestCase):
     def test_runtime_does_not_expose_asistencias_schema_ensure(self):
         self.assertFalse(hasattr(schema_ensure, "ensure_asistencias_schema"))
@@ -145,7 +191,7 @@ class AsistenciasSessionRepositoryTests(unittest.TestCase):
                 self.assertIn("o.fecha_hora_fin >= :inicio", sql)
                 self.assertIn("o.fecha_hora_fin < :fin", sql)
 
-    def test_sessionized_attendance_uses_the_same_deterministic_owner_rule(self):
+    def test_sessionized_attendance_uses_its_user_time_window_without_overlap_owner(self):
         class Result:
             def mappings(self):
                 return self
@@ -168,9 +214,99 @@ class AsistenciasSessionRepositoryTests(unittest.TestCase):
 
         for sql, params in conn.calls:
             if "FROM gastos_operacion" in sql:
+                self.assertNotIn("anterior.id_asistencia < :id_asistencia", sql)
                 continue
-            self.assertIn("anterior.id_asistencia < :id_asistencia", sql)
+            self.assertNotIn("anterior.id_asistencia < :id_asistencia", sql)
             self.assertEqual(params["session_id"], "session-b")
+
+    def test_desktop_only_session_summary_includes_paid_exit(self):
+        engine = create_engine("sqlite://")
+        with engine.begin() as conn:
+            _create_summary_tables(conn)
+            conn.execute(text("""
+                INSERT INTO asistencias (id_asistencia, usuario, device_id, hora_inicio, hora_salida, session_id)
+                VALUES (10, 'operador', 'desktop-main', :inicio, NULL, 'desktop-session')
+            """), {"inicio": datetime(2026, 1, 1, 9)})
+            _insert_paid_exit(conn, datetime(2026, 1, 1, 9, 30), 1700)
+
+            summary = _calcular_resumen_sesion(
+                conn, "operador", 10, datetime(2026, 1, 1, 9), datetime(2026, 1, 1, 10), "desktop-session"
+            )
+
+        self.assertEqual(summary["ingresos"], {"cantidad": 1, "total": 1700})
+        self.assertEqual(summary["total_ingresos"], 1700)
+
+    def test_mobile_active_first_does_not_zero_later_desktop_summary(self):
+        engine = create_engine("sqlite://")
+        with engine.begin() as conn:
+            _create_summary_tables(conn)
+            conn.execute(text("""
+                INSERT INTO asistencias (id_asistencia, usuario, device_id, hora_inicio, hora_salida, session_id)
+                VALUES (10, 'operador', 'mobile-phone', :mobile_start, NULL, 'mobile-session'),
+                       (11, 'operador', 'desktop-main', :desktop_start, NULL, 'desktop-session')
+            """), {
+                "mobile_start": datetime(2026, 1, 1, 9),
+                "desktop_start": datetime(2026, 1, 1, 10),
+            })
+            _insert_paid_exit(conn, datetime(2026, 1, 1, 10, 30), 1700)
+
+            summary = _calcular_resumen_sesion(
+                conn, "operador", 11, datetime(2026, 1, 1, 10), datetime(2026, 1, 1, 11), "desktop-session"
+            )
+
+        self.assertEqual(summary["ingresos"], {"cantidad": 1, "total": 1700})
+        self.assertEqual(summary["neto_caja"], 1700)
+
+    def test_desktop_active_first_keeps_desktop_summary_after_mobile_login(self):
+        engine = create_engine("sqlite://")
+        with engine.begin() as conn:
+            _create_summary_tables(conn)
+            conn.execute(text("""
+                INSERT INTO asistencias (id_asistencia, usuario, device_id, hora_inicio, hora_salida, session_id)
+                VALUES (10, 'operador', 'desktop-main', :desktop_start, NULL, 'desktop-session'),
+                       (11, 'operador', 'mobile-phone', :mobile_start, NULL, 'mobile-session')
+            """), {
+                "desktop_start": datetime(2026, 1, 1, 9),
+                "mobile_start": datetime(2026, 1, 1, 10),
+            })
+            _insert_paid_exit(conn, datetime(2026, 1, 1, 10, 30), 1700)
+
+            summary = _calcular_resumen_sesion(
+                conn, "operador", 10, datetime(2026, 1, 1, 9), datetime(2026, 1, 1, 11), "desktop-session"
+            )
+
+        self.assertEqual(summary["ingresos"], {"cantidad": 1, "total": 1700})
+        self.assertEqual(summary["total_ingresos"], 1700)
+
+    def test_mobile_logout_closes_only_mobile_sid_and_desktop_summary_later_keeps_charges(self):
+        engine = create_engine("sqlite://")
+        with engine.begin() as conn:
+            _create_summary_tables(conn)
+            conn.execute(text("""
+                INSERT INTO asistencias (id_asistencia, usuario, device_id, hora_inicio, hora_salida, session_id)
+                VALUES (10, 'operador', 'mobile-phone', :mobile_start, NULL, 'mobile-session'),
+                       (11, 'operador', 'desktop-main', :desktop_start, NULL, 'desktop-session')
+            """), {
+                "mobile_start": datetime(2026, 1, 1, 9),
+                "desktop_start": datetime(2026, 1, 1, 10),
+            })
+            _insert_paid_exit(conn, datetime(2026, 1, 1, 10, 30), 1700)
+
+            _cerrar_asistencias_activas(conn, "operador", datetime(2026, 1, 1, 10, 45), "mobile-session")
+            rows = conn.execute(text("""
+                SELECT session_id, hora_salida
+                FROM asistencias
+                ORDER BY id_asistencia
+            """)).mappings().all()
+            desktop_summary = _calcular_resumen_sesion(
+                conn, "operador", 11, datetime(2026, 1, 1, 10), datetime(2026, 1, 1, 11), "desktop-session"
+            )
+
+        self.assertIsNotNone(rows[0]["hora_salida"])
+        self.assertIsNone(rows[1]["hora_salida"])
+        self.assertEqual(rows[0]["session_id"], "mobile-session")
+        self.assertEqual(rows[1]["session_id"], "desktop-session")
+        self.assertEqual(desktop_summary["ingresos"], {"cantidad": 1, "total": 1700})
 
     def test_single_session_keeps_all_of_its_movements(self):
         class Result:
@@ -322,7 +458,7 @@ class AsistenciasSessionRepositoryTests(unittest.TestCase):
 
         self.assertEqual(first, {"cantidad": 0, "total": 0})
         self.assertEqual(second, {"cantidad": 1, "total": 1700})
-        self.assertEqual(simultaneous["total_ingresos"], 0)
+        self.assertEqual(simultaneous["total_ingresos"], 1700)
         self.assertEqual(summary["gastos_asociados"], 200)
         self.assertEqual(summary["neto_caja"], 1500)
 

@@ -74,9 +74,37 @@ def _cargar_contexto_tarifas(conn: Connection) -> tuple[dict[str, str], dict[str
 
 
 def _time_as_hhmm(value: object) -> str:
+    if isinstance(value, timedelta):
+        total_seconds = int(value.total_seconds()) % (24 * 60 * 60)
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        return f"{hours:02}:{minutes:02}"
     if hasattr(value, "strftime"):
         return value.strftime("%H:%M")
+    parts = str(value).split(":")
+    if len(parts) >= 2:
+        return f"{int(parts[0]):02}:{int(parts[1]):02}"
     return str(value)[:5]
+
+
+def _materializar_ventana_subida(
+    referencia: datetime,
+    hora_inicio: object,
+    hora_fin: object,
+) -> tuple[datetime, datetime]:
+    hora_inicio_time = datetime.strptime(_time_as_hhmm(hora_inicio), "%H:%M").time()
+    hora_fin_time = datetime.strptime(_time_as_hhmm(hora_fin), "%H:%M").time()
+
+    fecha_base = referencia.date()
+    cruza_medianoche = hora_fin_time <= hora_inicio_time
+    if cruza_medianoche and referencia.time() <= hora_fin_time:
+        fecha_base -= timedelta(days=1)
+
+    inicio = datetime.combine(fecha_base, hora_inicio_time)
+    fin = datetime.combine(fecha_base, hora_fin_time)
+    if cruza_medianoche:
+        fin += timedelta(days=1)
+    return inicio, fin
 
 
 def _calcular_minutos_completos(segundos: float) -> int:
@@ -150,25 +178,29 @@ def _calcular_minutos_en_subida(
     hora_inicio: object,
     hora_fin: object,
 ) -> int:
-    hora_inicio_dt = datetime.combine(
-        fecha_hora_ingreso.date(),
-        datetime.strptime(_time_as_hhmm(hora_inicio), "%H:%M").time(),
-    )
-    hora_fin_dt = datetime.combine(
-        fecha_hora_ingreso.date(),
-        datetime.strptime(_time_as_hhmm(hora_fin), "%H:%M").time(),
-    )
-
-    if hora_fin_dt <= hora_inicio_dt:
-        hora_fin_dt += timedelta(days=1)
-
-    inicio_real = max(fecha_hora_ingreso, hora_inicio_dt)
-    fin_real = min(fecha_hora_salida, hora_fin_dt)
-
-    if inicio_real >= fin_real:
+    if fecha_hora_salida <= fecha_hora_ingreso:
         return 0
 
-    return int((fin_real - inicio_real).total_seconds() / 60)
+    ventanas = set()
+    hora_inicio_time = datetime.strptime(_time_as_hhmm(hora_inicio), "%H:%M").time()
+    hora_fin_time = datetime.strptime(_time_as_hhmm(hora_fin), "%H:%M").time()
+    cruza_medianoche = hora_fin_time <= hora_inicio_time
+    fecha = fecha_hora_ingreso.date() - timedelta(days=1)
+    while fecha <= fecha_hora_salida.date():
+        inicio = datetime.combine(fecha, hora_inicio_time)
+        fin = datetime.combine(fecha, hora_fin_time)
+        if cruza_medianoche:
+            fin += timedelta(days=1)
+        ventanas.add((inicio, fin))
+        fecha += timedelta(days=1)
+
+    minutos = 0
+    for inicio_subida, fin_subida in ventanas:
+        inicio_real = max(fecha_hora_ingreso, inicio_subida)
+        fin_real = min(fecha_hora_salida, fin_subida)
+        if inicio_real < fin_real:
+            minutos += int((fin_real - inicio_real).total_seconds() / 60)
+    return minutos
 
 
 def _calcular_monto_desde_minutos_con_contexto(
@@ -214,16 +246,11 @@ def _calcular_monto_desde_minutos_con_contexto(
 
     if modo == "personalizado":
         if subida:
-            hora_inicio = datetime.combine(
-                fecha_salida.date(),
-                datetime.strptime(_time_as_hhmm(subida["hora_inicio"]), "%H:%M").time(),
+            hora_inicio, hora_fin = _materializar_ventana_subida(
+                fecha_salida,
+                subida["hora_inicio"],
+                subida["hora_fin"],
             )
-            hora_fin = datetime.combine(
-                fecha_salida.date(),
-                datetime.strptime(_time_as_hhmm(subida["hora_fin"]), "%H:%M").time(),
-            )
-            if hora_fin <= hora_inicio:
-                hora_fin += timedelta(days=1)
             if hora_inicio <= fecha_salida <= hora_fin:
                 tramos = [
                     {**tramo, "valor": tramo["valor"] + int(subida["monto_adicional"])}

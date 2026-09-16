@@ -355,6 +355,78 @@ class CalcularMontoMvpTests(unittest.TestCase):
         self.assertEqual(monto, 1550)
         self.assertEqual(detalle, "Modo minuto")
 
+    def test_minute_mode_applies_midnight_subida_window(self):
+        conn = _FakeConnection(
+            {"modo_cobro": "minuto", "tarifa_minima": "0", "valor_minuto": "0"},
+            subida={"hora_inicio": "23:00", "hora_fin": "02:00", "monto_adicional": 1},
+        )
+
+        casos = [
+            (datetime(2026, 1, 1, 9, 30), datetime(2026, 1, 1, 18, 0), 0),
+            (datetime(2026, 1, 1, 23, 30), datetime(2026, 1, 1, 23, 59), 29),
+            (datetime(2026, 1, 1, 23, 30), datetime(2026, 1, 2, 0, 0), 30),
+            (datetime(2026, 1, 1, 23, 30), datetime(2026, 1, 2, 0, 1), 31),
+            (datetime(2026, 1, 2, 0, 10), datetime(2026, 1, 2, 1, 0), 50),
+            (datetime(2026, 1, 2, 1, 30), datetime(2026, 1, 2, 2, 0), 30),
+            (datetime(2026, 1, 2, 2, 0), datetime(2026, 1, 2, 2, 30), 0),
+        ]
+
+        for ingreso, salida, monto_esperado in casos:
+            with self.subTest(ingreso=ingreso, salida=salida):
+                _minutos, monto, _detalle = calcular_monto_mvp(conn, ingreso, salida)
+
+                self.assertEqual(monto, monto_esperado)
+
+    def test_minute_mode_accepts_database_time_values_without_leading_zero(self):
+        conn = _FakeConnection(
+            {"modo_cobro": "minuto", "tarifa_minima": "0", "valor_minuto": "0"},
+            subida={
+                "hora_inicio": timedelta(hours=23),
+                "hora_fin": timedelta(hours=2),
+                "monto_adicional": 1,
+            },
+        )
+
+        _minutos, monto, _detalle = calcular_monto_mvp(
+            conn,
+            datetime(2026, 1, 2, 0, 10),
+            datetime(2026, 1, 2, 1, 0),
+        )
+
+        self.assertEqual(monto, 50)
+
+    def test_minute_mode_accepts_unpadded_database_time_strings(self):
+        conn = _FakeConnection(
+            {"modo_cobro": "minuto", "tarifa_minima": "0", "valor_minuto": "0"},
+            subida={"hora_inicio": "23:00:00", "hora_fin": "2:00:00", "monto_adicional": 1},
+        )
+
+        _minutos, monto, _detalle = calcular_monto_mvp(
+            conn,
+            datetime(2026, 1, 2, 1, 30),
+            datetime(2026, 1, 2, 2, 0),
+        )
+
+        self.assertEqual(monto, 30)
+
+    def test_custom_mode_applies_midnight_subida_at_inclusive_end(self):
+        conn = _FakeConnection(
+            {"modo_cobro": "personalizado", "tarifa_minima": "0"},
+            tramos=[{"minuto_inicio": 0, "minuto_fin": 59, "valor": 100}],
+            subida={"hora_inicio": "23:00", "hora_fin": "02:00", "monto_adicional": 7},
+        )
+
+        for salida in [
+            datetime(2026, 1, 2, 0, 1),
+            datetime(2026, 1, 2, 1, 0),
+            datetime(2026, 1, 2, 2, 0),
+        ]:
+            with self.subTest(salida=salida):
+                ingreso = salida - timedelta(minutes=10)
+                _minutos, monto, _detalle = calcular_monto_mvp(conn, ingreso, salida)
+
+                self.assertEqual(monto, 107)
+
     def test_active_batch_quote_uses_fixed_aggregate_and_tariff_queries(self):
         conn = _BatchConnection()
         calculado_a = datetime(2026, 7, 1, 11, 0)

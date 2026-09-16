@@ -193,6 +193,10 @@ class EndpointAuthTests(unittest.TestCase):
         self.assertEqual(_allowed_roles(gastos.crear_gasto_endpoint), allowed)
         self.assertEqual(_allowed_roles(gastos.listar_gastos_pendientes), allowed)
 
+    def test_gastos_update_and_delete_require_admin(self):
+        self.assertEqual(_allowed_roles(gastos.editar_gasto_endpoint), {"admin"})
+        self.assertEqual(_allowed_roles(gastos.eliminar_gasto_endpoint), {"admin"})
+
     def test_reportes_requires_admin(self):
         self.assertEqual(_allowed_roles(reportes.listar_movimientos), {"admin"})
 

@@ -241,8 +241,9 @@ def _calcular_resumen_sesion(
     fin: datetime,
     session_id: str | None = None,
 ) -> Dict[str, Any]:
-    # Movements do not persist a sid. The oldest attendance active at the movement
-    # timestamp owns it, preventing simultaneous sessions from counting it twice.
+    # Movements do not persist a sid/device_id. For an exact authenticated session,
+    # the logout summary must use that session's user/time window; otherwise an
+    # older overlapping session can incorrectly hide the desktop totals.
     params = {
         "usuario": usuario,
         "id_asistencia": id_asistencia,
@@ -251,7 +252,7 @@ def _calcular_resumen_sesion(
         "session_id": session_id,
     }
     def total_desde(tabla, alias, fecha, monto, extra="", usuario_col="usuario"):
-        ownership = f"""
+        ownership = "" if session_id else f"""
             AND NOT EXISTS (
                 SELECT 1 FROM asistencias anterior
                 WHERE anterior.usuario = :usuario
@@ -281,11 +282,7 @@ def _calcular_resumen_sesion(
     lavados = total_desde("operaciones_servicio", "o", "fecha_hora_fin", "valor_lavado_snapshot", """
             AND o.estado = 'FINALIZADO_COBRADO' AND o.id_ingreso_generado IS NULL
         """, "usuario_fin")
-    gastos_row = conn.execute(text("""
-        SELECT COALESCE(SUM(g.monto), 0) AS total
-        FROM gastos_operacion g
-        WHERE g.usuario = :usuario
-          AND g.fecha_hora >= :inicio AND g.fecha_hora < :fin
+    gastos_ownership = "" if session_id else """
           AND NOT EXISTS (
               SELECT 1 FROM asistencias anterior
               WHERE anterior.usuario = :usuario
@@ -293,6 +290,13 @@ def _calcular_resumen_sesion(
                 AND anterior.hora_inicio <= g.fecha_hora
                 AND (anterior.hora_salida IS NULL OR anterior.hora_salida > g.fecha_hora)
           )
+    """
+    gastos_row = conn.execute(text(f"""
+        SELECT COALESCE(SUM(g.monto), 0) AS total
+        FROM gastos_operacion g
+        WHERE g.usuario = :usuario
+          AND g.fecha_hora >= :inicio AND g.fecha_hora < :fin
+          {gastos_ownership}
     """), params).mappings().first() or {}
     gastos = gastos_row.get("total") or 0
     movimientos = (ingresos, usos_bano, lavados, mensualidades, noches)

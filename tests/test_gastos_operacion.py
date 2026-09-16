@@ -40,6 +40,16 @@ class FakeResult:
         return self.scalar_value
 
 
+class TrackingResult(FakeResult):
+    def __init__(self, rows=None, scalar_value=None):
+        super().__init__(rows=rows, scalar_value=scalar_value)
+        self.scalar_called = False
+
+    def scalar(self):
+        self.scalar_called = True
+        return super().scalar()
+
+
 class FakeConnection:
     def __init__(self, rows=None):
         self.rows = rows or []
@@ -65,6 +75,19 @@ class MissingAuditConnection(FakeConnection):
         if "gastos_operacion_auditoria" in sql:
             self.executed.append((sql, params))
             raise RuntimeError("audit table missing")
+        return super().execute(statement, params)
+
+
+class AuditCheckConnection(FakeConnection):
+    def __init__(self, rows=None):
+        super().__init__(rows=rows)
+        self.audit_check_result = TrackingResult(scalar_value=1)
+
+    def execute(self, statement, params=None):
+        sql = str(statement)
+        if "SELECT 1 FROM gastos_operacion_auditoria" in sql:
+            self.executed.append((sql, params))
+            return self.audit_check_result
         return super().execute(statement, params)
 
 
@@ -198,7 +221,7 @@ class GastosOperacionTests(unittest.TestCase):
         self.assertEqual(raised.exception.detail, "GASTOS_AUDIT_MIGRATION_REQUIRED")
 
     def test_repository_updates_pending_expense_and_inserts_audit_snapshot(self):
-        conn = FakeConnection(rows=[{
+        conn = AuditCheckConnection(rows=[{
             "id_gasto": 7,
             "fecha_hora": datetime(2026, 7, 1, 9, 0),
             "categoria": "Insumos",
@@ -214,6 +237,7 @@ class GastosOperacionTests(unittest.TestCase):
         self.assertIn("FOR UPDATE", sql)
         self.assertIn("UPDATE gastos_operacion", sql)
         self.assertIn("INSERT INTO gastos_operacion_auditoria", sql)
+        self.assertTrue(conn.audit_check_result.scalar_called)
         audit_params = conn.executed[-1][1]
         self.assertEqual(audit_params["accion"], "EDITAR")
         self.assertIn('"categoria": "Insumos"', audit_params["snapshot_anterior"])

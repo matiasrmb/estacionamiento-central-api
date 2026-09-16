@@ -377,6 +377,38 @@ class CalcularMontoMvpTests(unittest.TestCase):
 
                 self.assertEqual(monto, monto_esperado)
 
+    def test_minute_mode_accepts_database_time_values_without_leading_zero(self):
+        conn = _FakeConnection(
+            {"modo_cobro": "minuto", "tarifa_minima": "0", "valor_minuto": "0"},
+            subida={
+                "hora_inicio": timedelta(hours=23),
+                "hora_fin": timedelta(hours=2),
+                "monto_adicional": 1,
+            },
+        )
+
+        _minutos, monto, _detalle = calcular_monto_mvp(
+            conn,
+            datetime(2026, 1, 2, 0, 10),
+            datetime(2026, 1, 2, 1, 0),
+        )
+
+        self.assertEqual(monto, 50)
+
+    def test_minute_mode_accepts_unpadded_database_time_strings(self):
+        conn = _FakeConnection(
+            {"modo_cobro": "minuto", "tarifa_minima": "0", "valor_minuto": "0"},
+            subida={"hora_inicio": "23:00:00", "hora_fin": "2:00:00", "monto_adicional": 1},
+        )
+
+        _minutos, monto, _detalle = calcular_monto_mvp(
+            conn,
+            datetime(2026, 1, 2, 1, 30),
+            datetime(2026, 1, 2, 2, 0),
+        )
+
+        self.assertEqual(monto, 30)
+
     def test_custom_mode_applies_midnight_subida_at_inclusive_end(self):
         conn = _FakeConnection(
             {"modo_cobro": "personalizado", "tarifa_minima": "0"},

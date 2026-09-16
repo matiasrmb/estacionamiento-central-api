@@ -126,7 +126,7 @@ def _leer_gasto_para_actualizar(conn, id_gasto: int):
 
 def _asegurar_auditoria_disponible(conn) -> None:
     try:
-        conn.execute(text("SELECT 1 FROM gastos_operacion_auditoria LIMIT 1"))
+        conn.execute(text("SELECT 1 FROM gastos_operacion_auditoria LIMIT 1")).scalar()
     except Exception as exc:
         raise GastoAuditUnavailableError() from exc
 

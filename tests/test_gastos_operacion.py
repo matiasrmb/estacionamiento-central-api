@@ -59,6 +59,15 @@ class FakeConnection:
         self.committed = True
 
 
+class MissingAuditConnection(FakeConnection):
+    def execute(self, statement, params=None):
+        sql = str(statement)
+        if "gastos_operacion_auditoria" in sql:
+            self.executed.append((sql, params))
+            raise RuntimeError("audit table missing")
+        return super().execute(statement, params)
+
+
 class GastosOperacionTests(unittest.TestCase):
     migrations_dir = Path(__file__).resolve().parents[1].joinpath("app", "db", "migrations")
 
@@ -178,6 +187,16 @@ class GastosOperacionTests(unittest.TestCase):
         update.assert_called_once_with(7, "Insumos", "Agua", 300, "admin")
         delete.assert_called_once_with(7, "admin")
 
+    def test_endpoint_maps_missing_audit_table_to_service_unavailable(self):
+        payload = GastoUpdateIn(categoria="Insumos", descripcion="Agua", monto=300, confirmado=True)
+
+        with patch.object(gastos, "editar_gasto", side_effect=gastos_repo.GastoAuditUnavailableError()):
+            with self.assertRaises(gastos.HTTPException) as raised:
+                gastos.editar_gasto_endpoint(7, payload, user={"sub": "admin"})
+
+        self.assertEqual(raised.exception.status_code, 503)
+        self.assertEqual(raised.exception.detail, "GASTOS_AUDIT_MIGRATION_REQUIRED")
+
     def test_repository_updates_pending_expense_and_inserts_audit_snapshot(self):
         conn = FakeConnection(rows=[{
             "id_gasto": 7,
@@ -242,6 +261,26 @@ class GastosOperacionTests(unittest.TestCase):
                 with self.assertRaises(gastos_repo.GastoCerradoError):
                     operation(conn)
                 self.assertFalse(conn.committed)
+
+    def test_repository_rejects_mutation_when_audit_table_is_missing_before_update(self):
+        conn = MissingAuditConnection(rows=[{
+            "id_gasto": 7,
+            "fecha_hora": datetime(2026, 7, 1, 9, 0),
+            "categoria": "Insumos",
+            "descripcion": "Agua",
+            "monto": 250,
+            "usuario": "operador",
+            "id_cierre": None,
+        }])
+
+        with patch.object(gastos_repo, "db_conn", return_value=FakeDbConn(conn)):
+            with self.assertRaises(gastos_repo.GastoAuditUnavailableError):
+                gastos_repo.editar_gasto(7, "Servicios", "Luz", 500, "admin")
+
+        sql = "\n".join(query for query, _ in conn.executed)
+        self.assertIn("gastos_operacion_auditoria", sql)
+        self.assertNotIn("UPDATE gastos_operacion", sql)
+        self.assertFalse(conn.committed)
 
 
 if __name__ == "__main__":

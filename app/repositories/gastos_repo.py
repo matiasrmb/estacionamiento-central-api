@@ -15,6 +15,10 @@ class GastoCerradoError(Exception):
     pass
 
 
+class GastoAuditUnavailableError(Exception):
+    pass
+
+
 def crear_gasto(categoria: str, descripcion: str, monto: int, usuario: str) -> Dict[str, Any]:
     fecha_hora = datetime.now()
     with db_conn() as conn:
@@ -67,6 +71,7 @@ def editar_gasto(id_gasto: int, categoria: str, descripcion: str, monto: int, us
             raise GastoNotFoundError()
         if gasto.get("id_cierre") is not None:
             raise GastoCerradoError()
+        _asegurar_auditoria_disponible(conn)
 
         actualizado = dict(gasto)
         actualizado.update({"categoria": categoria, "descripcion": descripcion, "monto": int(monto)})
@@ -91,6 +96,7 @@ def eliminar_gasto(id_gasto: int, usuario: str) -> Dict[str, Any]:
             raise GastoNotFoundError()
         if gasto.get("id_cierre") is not None:
             raise GastoCerradoError()
+        _asegurar_auditoria_disponible(conn)
 
         conn.execute(
             text("""
@@ -116,6 +122,13 @@ def _leer_gasto_para_actualizar(conn, id_gasto: int):
         {"id_gasto": id_gasto},
     ).mappings().first()
     return dict(row) if row is not None else None
+
+
+def _asegurar_auditoria_disponible(conn) -> None:
+    try:
+        conn.execute(text("SELECT 1 FROM gastos_operacion_auditoria LIMIT 1"))
+    except Exception as exc:
+        raise GastoAuditUnavailableError() from exc
 
 
 def _auditar_gasto(conn, id_gasto: int, accion: str, usuario: str, anterior, nuevo) -> None:

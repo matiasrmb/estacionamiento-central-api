@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.api.deps import require_role
 from app.repositories.gastos_repo import (
+    GastoAuditUnavailableError,
     GastoCerradoError,
     GastoNotFoundError,
     crear_gasto,
@@ -48,6 +49,8 @@ def editar_gasto_endpoint(id_gasto: int, payload: GastoUpdateIn, user=Depends(re
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="GASTO_NOT_FOUND")
     except GastoCerradoError:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="GASTO_ALREADY_CLOSED")
+    except GastoAuditUnavailableError:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="GASTOS_AUDIT_MIGRATION_REQUIRED")
 
 
 @router.delete("/{id_gasto}")
@@ -60,3 +63,5 @@ def eliminar_gasto_endpoint(id_gasto: int, payload: GastoDeleteIn, user=Depends(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="GASTO_NOT_FOUND")
     except GastoCerradoError:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="GASTO_ALREADY_CLOSED")
+    except GastoAuditUnavailableError:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="GASTOS_AUDIT_MIGRATION_REQUIRED")

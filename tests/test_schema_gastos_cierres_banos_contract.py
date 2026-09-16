@@ -9,8 +9,10 @@ from unittest.mock import patch
 from app.db.schema_inventory import gastos_cierres_banos_contract
 from app.db.schema_migration_preflight import evaluate_schema_migration_preflight
 from app.db.schema_migration_runner import (
-    MANAGED_MIGRATION_IDS, MIGRATION_013_ID,
-    apply_013_manage_gastos_cierres_banos_contract, main, plan_schema_migrations,
+    MANAGED_MIGRATION_IDS, MIGRATION_013_ID, MIGRATION_014_ID,
+    apply_013_manage_gastos_cierres_banos_contract,
+    apply_014_manage_gastos_auditoria,
+    main, plan_schema_migrations,
 )
 
 
@@ -222,9 +224,33 @@ class GastosCierresBanosContractTests(unittest.TestCase):
         self.assertEqual(json.loads(output.getvalue()), {"status": "noop"})
         apply.assert_called_once()
 
+    def test_014_manages_gastos_auditoria_table(self):
+        inventory = _inventory(recorded=True)
+        migration = _migration_014(inventory)
+        self.assertEqual(migration["status"], "pending")
+        self.assertIn("CREATE TABLE gastos_operacion_auditoria", migration["sql"][0])
+
+        connection = Connection()
+        with patch("app.db.schema_migration_runner.collect_read_only_schema_inventory_from_engine", return_value=inventory), patch("app.db.schema_migration_preflight.evaluate_schema_migration_preflight", return_value={"checks": []}):
+            result = apply_014_manage_gastos_auditoria(Engine(connection), backup_confirmed=True, dev_database_confirmed=True, expected_database="parking")
+        self.assertEqual(result["status"], "applied")
+        self.assertIn("CREATE TABLE gastos_operacion_auditoria", connection.statements[0][0])
+        self.assertEqual(connection.statements[-1][1], {"migration_id": MIGRATION_014_ID})
+
+        output = io.StringIO()
+        fake_database = types.SimpleNamespace(engine=Engine(connection))
+        with patch.dict("sys.modules", {"app.db.database": fake_database}), patch("app.db.schema_migration_runner.apply_014_manage_gastos_auditoria", return_value={"status": "noop"}) as apply, redirect_stdout(output):
+            self.assertEqual(main(["--apply-014-manage-gastos-auditoria", "--backup-confirmed", "--confirm-dev-db", "--expected-database", "parking"]), 0)
+        self.assertEqual(json.loads(output.getvalue()), {"status": "noop"})
+        apply.assert_called_once()
+
 
 def _migration(inventory):
     return next(item for item in plan_schema_migrations(inventory)["migrations"] if item["id"] == MIGRATION_013_ID)
+
+
+def _migration_014(inventory):
+    return next(item for item in plan_schema_migrations(inventory)["migrations"] if item["id"] == MIGRATION_014_ID)
 
 
 def _inventory(missing=(), recorded=False):

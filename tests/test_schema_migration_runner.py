@@ -133,6 +133,7 @@ class SchemaMigrationRunnerTests(unittest.TestCase):
             "011_manage_noches_contract",
             "012_manage_mensualidades_contract",
             "013_manage_gastos_cierres_banos_contract",
+            "014_manage_gastos_auditoria",
         ))
         self.assertEqual(
             [migration.migration_id for migration in MIGRATIONS],

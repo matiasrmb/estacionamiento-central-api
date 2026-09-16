@@ -61,7 +61,8 @@ MIGRATION_010_ID = "010_add_asistencias_device_sessions"
 MIGRATION_011_ID = "011_manage_noches_contract"
 MIGRATION_012_ID = "012_manage_mensualidades_contract"
 MIGRATION_013_ID = "013_manage_gastos_cierres_banos_contract"
-MANAGED_MIGRATION_IDS = (MIGRATION_001_ID, MIGRATION_002_ID, MIGRATION_003_ID, MIGRATION_004_ID, MIGRATION_005_ID, MIGRATION_006_ID, MIGRATION_007_ID, MIGRATION_008_ID, MIGRATION_009_ID, MIGRATION_010_ID, MIGRATION_011_ID, MIGRATION_012_ID, MIGRATION_013_ID)
+MIGRATION_014_ID = "014_manage_gastos_auditoria"
+MANAGED_MIGRATION_IDS = (MIGRATION_001_ID, MIGRATION_002_ID, MIGRATION_003_ID, MIGRATION_004_ID, MIGRATION_005_ID, MIGRATION_006_ID, MIGRATION_007_ID, MIGRATION_008_ID, MIGRATION_009_ID, MIGRATION_010_ID, MIGRATION_011_ID, MIGRATION_012_ID, MIGRATION_013_ID, MIGRATION_014_ID)
 MIGRATION_RECORD_SQL = "INSERT INTO schema_migrations (migration_id) VALUES (:migration_id)"
 MIGRATION_001_RECORD_SQL = MIGRATION_RECORD_SQL
 MIGRATION_002_SEED_SQL = (
@@ -194,6 +195,23 @@ MIGRATIONS: tuple[MigrationMetadata, ...] = (
         "Manage gastos, cierres, and bathroom-use contracts without historical SQL authority.",
         (),
     ),
+    MigrationMetadata(
+        MIGRATION_014_ID,
+        "Create the operational-expense audit table for admin edit/delete traceability.",
+        (
+            "CREATE TABLE gastos_operacion_auditoria (\n"
+            "    id_auditoria INT AUTO_INCREMENT PRIMARY KEY,\n"
+            "    id_gasto INT NOT NULL,\n"
+            "    accion VARCHAR(20) NOT NULL,\n"
+            "    usuario VARCHAR(50) NOT NULL,\n"
+            "    fecha_hora DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,\n"
+            "    snapshot_anterior TEXT NULL,\n"
+            "    snapshot_nuevo TEXT NULL,\n"
+            "    INDEX idx_gastos_operacion_auditoria_gasto (id_gasto),\n"
+            "    INDEX idx_gastos_operacion_auditoria_fecha (fecha_hora)\n"
+            ") ENGINE=InnoDB",
+        ),
+    ),
 )
 
 
@@ -215,6 +233,7 @@ def plan_schema_migrations(inventory: dict[str, Any]) -> dict[str, Any]:
         MIGRATION_011_ID: _migration_011_status(inventory, table_names, complete),
         MIGRATION_012_ID: _migration_012_status(inventory, table_names, complete),
         MIGRATION_013_ID: _migration_013_status(inventory, table_names, complete),
+        MIGRATION_014_ID: _migration_014_status(inventory, table_names, complete),
     }
     migrations = [
         {
@@ -351,6 +370,11 @@ def apply_013_manage_gastos_cierres_banos_contract(engine: Any, **kwargs: Any) -
     return _apply(engine, MIGRATION_013_ID, **kwargs)
 
 
+def apply_014_manage_gastos_auditoria(engine: Any, **kwargs: Any) -> dict[str, Any]:
+    """Apply only the managed operational-expense audit table."""
+    return _apply(engine, MIGRATION_014_ID, **kwargs)
+
+
 def _apply(
     engine: Any, migration_id: str, *, backup_confirmed: bool, dev_database_confirmed: bool,
     expected_database: str | None = None,
@@ -418,6 +442,8 @@ def _apply(
         return _apply_012(engine, migration["status"], migration["sql"], preflight)
     if migration_id == MIGRATION_013_ID:
         return _apply_013(engine, migration["status"], migration["sql"], preflight)
+    if migration_id == MIGRATION_014_ID:
+        return _apply_014(engine, migration["status"], migration["sql"], preflight)
     return _apply_006(engine, migration["status"], migration["sql"], preflight)
 
 
@@ -670,6 +696,24 @@ def _apply_013(engine: Any, status: str, statements: list[str], preflight: dict[
     except Exception:
         return _result(MIGRATION_013_ID, "failed_after_migration" if executed else "failed", executed, ["Migration 013 failed; retry only after a fresh inventory validates the full contract."], preflight)
     return _result(MIGRATION_013_ID, "applied", executed, [], preflight)
+
+
+def _apply_014(engine: Any, status: str, statements: list[str], preflight: dict[str, Any]) -> dict[str, Any]:
+    if status == "repair_required":
+        return _record(engine, MIGRATION_014_ID, "repaired", [], preflight)
+    if status != "pending":
+        return _result(MIGRATION_014_ID, "refused", [], ["Migration is not pending; no SQL was executed."], preflight)
+    executed = []
+    try:
+        with engine.begin() as conn:
+            for statement in statements[:-1]:
+                conn.execute(text(statement))
+                executed.append(_statement_type(statement))
+            conn.execute(text(MIGRATION_RECORD_SQL), {"migration_id": MIGRATION_014_ID})
+            executed.append("INSERT migration record")
+    except Exception:
+        return _result(MIGRATION_014_ID, "failed_after_migration" if executed else "failed", executed, ["Migration 014 failed; retry only after a fresh inventory validates the audit table."], preflight)
+    return _result(MIGRATION_014_ID, "applied", executed, [], preflight)
 
 
 def _record(engine: Any, migration_id: str, status: str, executed: list[str], preflight: dict[str, Any]) -> dict[str, Any]:
@@ -946,6 +990,20 @@ def _migration_013_status(inventory: dict[str, Any], tables: set[str] | None, co
     return "blocked_prerequisite" if contract["state"] == "blocked_prerequisite" else "invalid_contract"
 
 
+def _migration_014_status(inventory: dict[str, Any], tables: set[str] | None, complete: bool) -> str:
+    if not complete:
+        return "unknown"
+    if any(_migration_recorded(inventory, migration_id) is not True for migration_id in MANAGED_MIGRATION_IDS[:13]):
+        return "blocked_prerequisite"
+    recorded = _migration_recorded(inventory, MIGRATION_014_ID)
+    valid = _gastos_auditoria_contract_valid(inventory, tables)
+    if recorded is True:
+        return "applied" if valid else "inconsistent_state"
+    if valid:
+        return "repair_required"
+    return "pending" if "gastos_operacion_auditoria" not in tables else "invalid_contract"
+
+
 def _migration_recorded(inventory: dict[str, Any], migration_id: str) -> bool | None:
     snapshot = inventory.get("migration_snapshot")
     if not isinstance(snapshot, dict) or snapshot.get("available") is not True or not isinstance(snapshot.get("records"), list):
@@ -967,6 +1025,21 @@ def _table_names(inventory: dict[str, Any]) -> set[str] | None:
     return {str(row.get("table_name", "")).casefold() for row in tables if isinstance(row, dict)}
 
 
+def _gastos_auditoria_contract_valid(inventory: dict[str, Any], tables: set[str] | None) -> bool:
+    if tables is None or "gastos_operacion_auditoria" not in tables:
+        return False
+    columns = {
+        str(row.get("column_name", "")).casefold()
+        for row in inventory.get("columns", [])
+        if isinstance(row, dict) and str(row.get("table_name", "")).casefold() == "gastos_operacion_auditoria"
+    }
+    required = {
+        "id_auditoria", "id_gasto", "accion", "usuario", "fecha_hora",
+        "snapshot_anterior", "snapshot_nuevo",
+    }
+    return required.issubset(columns)
+
+
 def _planned_sql(migration: MigrationMetadata, status: str, tables: set[str] | None) -> list[str]:
     if status == "repair_required":
         return [MIGRATION_RECORD_SQL]
@@ -976,7 +1049,7 @@ def _planned_sql(migration: MigrationMetadata, status: str, tables: set[str] | N
         return [MIGRATION_002_SEED_SQL, MIGRATION_RECORD_SQL]
     if migration.migration_id == MIGRATION_002_ID:
         return [*migration.statements, MIGRATION_002_SEED_SQL, MIGRATION_RECORD_SQL]
-    if migration.migration_id in {MIGRATION_003_ID, MIGRATION_004_ID, MIGRATION_005_ID}:
+    if migration.migration_id in {MIGRATION_003_ID, MIGRATION_004_ID, MIGRATION_005_ID, MIGRATION_014_ID}:
         return [*migration.statements, MIGRATION_RECORD_SQL]
     return list(migration.statements)
 
@@ -1311,6 +1384,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--apply-011-manage-noches-contract", action="store_true")
     parser.add_argument("--apply-012-manage-mensualidades-contract", action="store_true")
     parser.add_argument("--apply-013-manage-gastos-cierres-banos-contract", action="store_true")
+    parser.add_argument("--apply-014-manage-gastos-auditoria", action="store_true")
     parser.add_argument("--confirm-dev-db", action="store_true")
     parser.add_argument("--profile", choices=("installer-production",))
     parser.add_argument("--environment")
@@ -1319,7 +1393,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--preflight-sha256")
     parser.add_argument("--expected-database")
     args = parser.parse_args(argv)
-    apply_flags = [args.apply_001_create_schema_migrations, args.apply_002_create_tipos_lavado, args.apply_003_widen_pagos_mensuales_metodo_pago, args.apply_004_add_operaciones_servicio_ingreso_generado_fk, args.apply_005_add_operaciones_servicio_tipo_vehiculo_lavado_fk, args.apply_006_create_lavados_and_ingresos_en_lavado, args.apply_007_migrate_wash_vehicle_type_pricing, args.apply_008_complete_operaciones_servicio_contract, args.apply_009_add_cierres_solo_lavado_totals, args.apply_010_add_asistencias_device_sessions, args.apply_011_manage_noches_contract, args.apply_012_manage_mensualidades_contract, args.apply_013_manage_gastos_cierres_banos_contract]
+    apply_flags = [args.apply_001_create_schema_migrations, args.apply_002_create_tipos_lavado, args.apply_003_widen_pagos_mensuales_metodo_pago, args.apply_004_add_operaciones_servicio_ingreso_generado_fk, args.apply_005_add_operaciones_servicio_tipo_vehiculo_lavado_fk, args.apply_006_create_lavados_and_ingresos_en_lavado, args.apply_007_migrate_wash_vehicle_type_pricing, args.apply_008_complete_operaciones_servicio_contract, args.apply_009_add_cierres_solo_lavado_totals, args.apply_010_add_asistencias_device_sessions, args.apply_011_manage_noches_contract, args.apply_012_manage_mensualidades_contract, args.apply_013_manage_gastos_cierres_banos_contract, args.apply_014_manage_gastos_auditoria]
     if args.dry_run and any(apply_flags) or sum(apply_flags) > 1:
         parser.error("choose exactly one of --dry-run or one explicit apply flag")
     if not args.dry_run and not any(apply_flags):
@@ -1368,6 +1442,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 else apply_012_manage_mensualidades_contract
                 if args.apply_012_manage_mensualidades_contract
                 else apply_013_manage_gastos_cierres_banos_contract
+                if args.apply_013_manage_gastos_cierres_banos_contract
+                else apply_014_manage_gastos_auditoria
             )
             apply_kwargs = {
                 "backup_confirmed": args.backup_confirmed,

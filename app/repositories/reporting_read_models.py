@@ -3,6 +3,10 @@ from typing import Any, Dict, Iterable, List
 
 
 METRIC_CATALOG_VERSION = "2026-09-29"
+TOTAL_PARKING_SPACES = 50
+COMPLETENESS_STATUSES = {"complete", "partial", "unavailable"}
+CANONICAL_EXPORT_FORMATS = {"pdf", "xlsx"}
+LEGACY_EXPORT_FORMATS = {"csv"}
 
 METRIC_CATALOG = [
     {
@@ -116,7 +120,7 @@ def build_reporting_summary(
         "metrics": {
             "operational_income_total": operational_income_total,
             "operational_expense_total": operational_expense_total,
-            "operational_net_total": operational_income_total - operational_expense_total,
+            "operational_net_total": operational_income_total + mensualidad_sales_total - operational_expense_total,
             "mensualidad_sales_total": mensualidad_sales_total,
             "vehicle_movement_count": len(movements_in_period),
         },
@@ -127,7 +131,44 @@ def build_reporting_summary(
     }
 
 
-def build_closed_report(closure, vehicle_movements, expenses=None, mensualidades=None) -> Dict[str, Any]:
+def build_capacity(active_monthly_customers=None) -> Dict[str, Any]:
+    if active_monthly_customers is None:
+        return {
+            "total_spaces": TOTAL_PARKING_SPACES,
+            "reserved_monthly_spaces": None,
+            "effective_transient_capacity": None,
+            "source_state": "unavailable",
+            "unavailable_inputs": ["active_monthly_customers"],
+        }
+
+    reserved = int(active_monthly_customers)
+    return {
+        "total_spaces": TOTAL_PARKING_SPACES,
+        "reserved_monthly_spaces": reserved,
+        "effective_transient_capacity": max(TOTAL_PARKING_SPACES - reserved, 0),
+        "source_state": "resolved",
+        "source": "vehiculos.tipo_cliente='mensual' AND activo=1",
+    }
+
+
+def build_historical_completeness(status="complete", missing_ranges=None, unavailable_inputs=None) -> Dict[str, Any]:
+    if status not in COMPLETENESS_STATUSES:
+        raise ValueError("UNSUPPORTED_COMPLETENESS_STATUS")
+    return {
+        "status": status,
+        "missing_ranges": list(missing_ranges or []),
+        "unavailable_inputs": list(unavailable_inputs or []),
+    }
+
+
+def build_closed_report(
+    closure,
+    vehicle_movements,
+    expenses=None,
+    mensualidades=None,
+    active_monthly_customers=None,
+    historical_completeness=None,
+) -> Dict[str, Any]:
     expenses = expenses or []
     period = {
         "id": f"closure:{closure['id']}",
@@ -139,9 +180,12 @@ def build_closed_report(closure, vehicle_movements, expenses=None, mensualidades
     closure_metrics = {
         "operational_income_total": int(closure.get("operational_income_total") or 0),
         "operational_expense_total": int(closure.get("operational_expense_total") or 0),
+        "mensualidad_sales_total": int(closure.get("mensualidad_sales_total") or 0),
     }
     closure_metrics["operational_net_total"] = (
-        closure_metrics["operational_income_total"] - closure_metrics["operational_expense_total"]
+        closure_metrics["operational_income_total"]
+        + closure_metrics["mensualidad_sales_total"]
+        - closure_metrics["operational_expense_total"]
     )
     operation_totals = summary["metrics"]
     discrepancy_metrics = {
@@ -155,6 +199,8 @@ def build_closed_report(closure, vehicle_movements, expenses=None, mensualidades
         "catalog_version": METRIC_CATALOG_VERSION,
         "closure_reference": {"id": closure["id"], "metrics": closure_metrics},
         "operation_totals": operation_totals,
+        "capacity": build_capacity(active_monthly_customers),
+        "historical_completeness": historical_completeness or build_historical_completeness(),
         "operation_drill_down": _operation_drill_down(vehicle_movements, expenses or [], period),
         "discrepancy": {
             "status": "none" if all(value == 0 for value in discrepancy_metrics.values()) else "delta",
@@ -165,18 +211,23 @@ def build_closed_report(closure, vehicle_movements, expenses=None, mensualidades
     }
 
 
-def build_audit_inventory(period_id: str) -> Dict[str, Any]:
+def build_audit_inventory(period_id: str, coverage=None) -> Dict[str, Any]:
+    coverage = coverage or {
+        "closures": "available",
+        "operational_rows": "available",
+        "payments": "available",
+        "expenses": "available",
+        "print_jobs": "partial",
+        "users": "available",
+        "operator_sessions": "partial",
+    }
+    available_sources = [source for source, state in coverage.items() if state in {"available", "partial"}]
+    unavailable_sources = [source for source, state in coverage.items() if state == "unavailable"]
     return {
         "period_id": period_id,
-        "available_sources": [
-            "closures",
-            "operational_rows",
-            "payments",
-            "expenses",
-            "print_jobs",
-            "users",
-            "operator_sessions",
-        ],
+        "coverage": [{"source": source, "state": state} for source, state in coverage.items()],
+        "available_sources": available_sources,
+        "unavailable_sources": unavailable_sources,
         "unavailable_history": ["before_first_closure", "after_current_rows"],
         "requires_event_sourcing": False,
     }
@@ -184,27 +235,34 @@ def build_audit_inventory(period_id: str) -> Dict[str, Any]:
 
 def build_report_export(report, export_format: str, generated_at: datetime) -> Dict[str, Any]:
     normalized_format = export_format.lower()
-    if normalized_format not in {"csv", "pdf"}:
+    if normalized_format not in CANONICAL_EXPORT_FORMATS | LEGACY_EXPORT_FORMATS:
         raise ValueError("UNSUPPORTED_EXPORT_FORMAT")
 
     metadata = {
         "report_id": report["report_id"],
+        "format": normalized_format,
         "period_start": report["period"]["start"],
         "period_end": report["period"]["end"],
         "closure_reference_id": report["closure_reference"]["id"],
+        "totals": report["closure_reference"]["metrics"].copy(),
+        "historical_completeness": report.get("historical_completeness", build_historical_completeness()),
         "generated_at": _iso(generated_at),
         "metric_catalog_version": report["catalog_version"],
         "filters": report.get("filters", {}),
         "source_state": report["source_state"],
         "template_version": "reporting-export-2026-09-29",
+        "compatibility": "legacy-only" if normalized_format == "csv" else "canonical",
     }
 
     if normalized_format == "csv":
         content = _render_csv_export(metadata, report)
         content_type = "text/csv"
-    else:
+    elif normalized_format == "pdf":
         content = _render_pdf_export(metadata, report)
         content_type = "application/pdf"
+    else:
+        content = _render_xlsx_export(metadata, report)
+        content_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
     return {"format": normalized_format, "content_type": content_type, "metadata": metadata, "content": content}
 
@@ -279,11 +337,30 @@ def _render_pdf_export(metadata, report):
             f"Metric Catalog Version: {metadata['metric_catalog_version']}",
             f"Source State: {metadata['source_state']}",
             f"Template Version: {metadata['template_version']}",
+            f"Completeness: {metadata['historical_completeness']['status']}",
             f"Operational Income Total: {metrics['operational_income_total']}",
             f"Operational Expense Total: {metrics['operational_expense_total']}",
+            f"Mensualidad Sales Total: {metrics['mensualidad_sales_total']}",
             f"Operational Net Total: {metrics['operational_net_total']}",
         ]
     )
+
+
+def _render_xlsx_export(metadata, report):
+    metrics = report["closure_reference"]["metrics"]
+    rows = [
+        ["report_id", metadata["report_id"]],
+        ["period_start", metadata["period_start"]],
+        ["period_end", metadata["period_end"]],
+        ["closure_reference_id", metadata["closure_reference_id"]],
+        ["format", metadata["format"]],
+        ["completeness", metadata["historical_completeness"]["status"]],
+        ["operational_income_total", metrics["operational_income_total"]],
+        ["operational_expense_total", metrics["operational_expense_total"]],
+        ["mensualidad_sales_total", metrics["mensualidad_sales_total"]],
+        ["operational_net_total", metrics["operational_net_total"]],
+    ]
+    return "\n".join(f"{key}\t{value}" for key, value in rows)
 
 
 def _iso(value):

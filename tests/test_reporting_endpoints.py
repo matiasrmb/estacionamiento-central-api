@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import patch
 
 from fastapi import HTTPException
+from starlette.requests import Request
 
 from app.api.v1.endpoints import reporting
 
@@ -13,6 +14,10 @@ def _allowed_roles(function):
         if hasattr(dependency, "allowed_roles"):
             return set(dependency.allowed_roles)
     return set()
+
+
+def _request(query_string=""):
+    return Request({"type": "http", "method": "GET", "path": "/", "query_string": query_string.encode()})
 
 
 class ReportingEndpointTests(unittest.TestCase):
@@ -65,6 +70,63 @@ class ReportingEndpointTests(unittest.TestCase):
 
     def test_audit_inventory_is_admin_only(self):
         self.assertEqual(_allowed_roles(reporting.get_audit_inventory), {"admin"})
+
+    def test_operations_report_is_admin_only(self):
+        self.assertEqual(_allowed_roles(reporting.get_operations_report), {"admin"})
+
+    @patch("app.api.v1.endpoints.reporting.list_persisted_operation_rows")
+    def test_operations_report_accepts_closure_period_and_delegates(self, list_operation_rows):
+        list_operation_rows.return_value = {
+            "period_id": "closure:18",
+            "filters": {"category": "vehicle_movement", "plate": "ABC123"},
+            "sort": {"field": "amount", "direction": "desc", "tie_breaker": "operation_id"},
+            "pagination": {"total": 1, "limit": 25, "offset": 0, "has_more": False, "next_offset": None},
+            "items": [],
+        }
+
+        result = reporting.get_operations_report(
+            _request("period_id=closure:18&category=vehicle_movement&plate=ABC123&sort=amount&direction=desc&limit=25&offset=0"),
+            period_id="closure:18",
+            category="vehicle_movement",
+            plate="ABC123",
+            sort="amount",
+            direction="desc",
+            limit="25",
+            offset="0",
+        )
+
+        self.assertEqual(result["period_id"], "closure:18")
+        list_operation_rows.assert_called_once_with(
+            18,
+            filters={"category": "vehicle_movement", "plate": "ABC123"},
+            sort={"field": "amount", "direction": "desc", "tie_breaker": "operation_id"},
+            pagination={"limit": 25, "offset": 0},
+        )
+
+    def test_operations_report_rejects_non_closure_period(self):
+        with self.assertRaises(HTTPException) as raised:
+            reporting.get_operations_report(_request("period_id=open:current"), period_id="open:current")
+
+        self.assertEqual(raised.exception.status_code, 422)
+        self.assertEqual(raised.exception.detail, "UNSUPPORTED_OPERATION_PERIOD")
+
+    def test_operations_report_rejects_unknown_query_key(self):
+        with self.assertRaises(HTTPException) as raised:
+            reporting.get_operations_report(_request("period_id=closure:18&ledger=true"), period_id="closure:18")
+
+        self.assertEqual(raised.exception.status_code, 422)
+        self.assertEqual(raised.exception.detail, "UNSUPPORTED_OPERATION_QUERY")
+
+    def test_operations_report_validation_errors_are_422(self):
+        with self.assertRaises(HTTPException) as raised:
+            reporting.get_operations_report(
+                _request("period_id=closure:18&sort=operator"),
+                period_id="closure:18",
+                sort="operator",
+            )
+
+        self.assertEqual(raised.exception.status_code, 422)
+        self.assertEqual(raised.exception.detail, "UNSUPPORTED_OPERATION_SORT")
 
     @patch("app.api.v1.endpoints.reporting.get_persisted_closed_report")
     @patch("app.api.v1.endpoints.reporting.build_report_export")

@@ -1,0 +1,67 @@
+schema: spec-driven
+
+project: estacionamiento-central-api
+artifact_store: hybrid
+
+context: |
+  Tech stack: Python FastAPI API with SQLAlchemy/PyMySQL persistence and Pydantic settings/schemas.
+  Architecture: FastAPI endpoint adapters call repository and service modules under app/; printer agent and service entrypoints are packaged separately with PyInstaller specs.
+  Testing: Standard-library unittest is the available repository test style; pytest was attempted for the active change but is unavailable in the current Python environment.
+  Style: Existing code mixes Spanish domain names with FastAPI/Python conventions; preserve current domain language and repository boundaries.
+
+strict_tdd: false
+strict_tdd_reason: No explicit workspace-level test command covers every in-scope project; project-local unittest commands are preserved below.
+
+testing:
+  detected: 2026-10-01
+  strict_tdd: false
+  projects:
+    - path: "."
+      stack: "Python FastAPI API; SQLAlchemy/PyMySQL; Pydantic; Uvicorn; PyInstaller service/agent packaging"
+      test_command: "python -m unittest discover tests"
+      framework: "unittest"
+      layers:
+        unit:
+          available: true
+          tool: "unittest"
+        integration:
+          available: true
+          tool: "unittest with patched dependencies and in-memory/sqlite-style repository tests"
+        e2e:
+          available: false
+          tool: ""
+      coverage:
+        available: false
+        command: ""
+      quality:
+        linter:
+          available: false
+          command: ""
+        type_checker:
+          available: false
+          command: ""
+        formatter:
+          available: false
+          command: ""
+
+rules:
+  proposal:
+    - Keep API-only changes scoped away from Desktop, Mobile, Installer, database service execution, and remote operations unless explicitly authorized.
+  specs:
+    - Use Given/When/Then scenarios and RFC 2119 keywords for requirements.
+  design:
+    - Document repository, endpoint, and read-model boundaries when API behavior changes.
+  tasks:
+    - Keep review workload under the configured 400 changed-line policy or recommend chained review slices.
+  apply:
+    guidelines:
+      - Follow existing FastAPI endpoint, repository, service, and unittest patterns.
+      - Do not touch printer_agent/run_agent_task.cmd unless explicitly requested; it may contain unrelated local changes.
+    tdd: false
+    test_command: "python -m unittest discover tests"
+  verify:
+    test_command: "python -m unittest discover tests"
+    build_command: ""
+    coverage_threshold: 0
+  archive:
+    - Merge only reviewed delta specs into openspec/specs/ and preserve the archived change folder as an audit trail.

@@ -4,6 +4,8 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from app.repositories.reporting_read_models import (
+    build_capacity,
+    build_historical_completeness,
     build_metric_catalog,
     build_operational_periods,
     build_reporting_summary,
@@ -63,7 +65,7 @@ class ReportingReadModelsTests(unittest.TestCase):
 
         self.assertEqual(summary["metrics"]["operational_income_total"], 4000)
         self.assertEqual(summary["metrics"]["operational_expense_total"], 150)
-        self.assertEqual(summary["metrics"]["operational_net_total"], 3850)
+        self.assertEqual(summary["metrics"]["operational_net_total"], 5850)
         self.assertEqual(summary["metrics"]["mensualidad_sales_total"], 2000)
         self.assertEqual(summary["metrics"]["vehicle_movement_count"], 400)
         self.assertEqual(summary["pagination"]["summary_row_count"], 400)
@@ -151,7 +153,35 @@ class ReportingReadModelsTests(unittest.TestCase):
         self.assertEqual(dashboard["period"]["id"], "open:7")
         self.assertEqual(dashboard["period"]["start"], "2026-09-28T09:30:00")
         self.assertEqual(dashboard["metrics"]["operational_income_total"], 1000)
-        self.assertEqual(dashboard["metrics"]["operational_net_total"], 850)
+        self.assertEqual(dashboard["metrics"]["operational_net_total"], 1050)
+
+    def test_capacity_resolves_active_monthly_reserved_spaces(self):
+        capacity = build_capacity(active_monthly_customers=12)
+
+        self.assertEqual(capacity["total_spaces"], 50)
+        self.assertEqual(capacity["reserved_monthly_spaces"], 12)
+        self.assertEqual(capacity["effective_transient_capacity"], 38)
+        self.assertEqual(capacity["source_state"], "resolved")
+
+    def test_capacity_marks_unavailable_without_active_monthly_source(self):
+        capacity = build_capacity()
+
+        self.assertEqual(capacity["total_spaces"], 50)
+        self.assertIsNone(capacity["effective_transient_capacity"])
+        self.assertEqual(capacity["source_state"], "unavailable")
+        self.assertEqual(capacity["unavailable_inputs"], ["active_monthly_customers"])
+
+    def test_historical_completeness_rejects_unknown_status(self):
+        partial = build_historical_completeness(
+            "partial",
+            missing_ranges=["before_first_closure"],
+            unavailable_inputs=["legacy_daily_rows"],
+        )
+
+        self.assertEqual(partial["status"], "partial")
+        self.assertEqual(partial["missing_ranges"], ["before_first_closure"])
+        with self.assertRaises(ValueError):
+            build_historical_completeness("unknown")
 
 
 if __name__ == "__main__":

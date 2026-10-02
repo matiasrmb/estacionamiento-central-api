@@ -5,7 +5,7 @@ from sqlalchemy import text
 
 from app.db.database import db_conn
 from app.repositories.cierres_repo import get_cierre_pendiente
-from app.repositories.reporting_read_models import METRIC_CATALOG_VERSION
+from app.repositories.reporting_read_models import METRIC_CATALOG_VERSION, build_audit_inventory
 
 
 def get_open_dashboard() -> Dict[str, Any]:
@@ -73,13 +73,14 @@ def get_closed_report(cierre_id: int) -> Dict[str, Any]:
             """),
             {"id_cierre": cierre_id, "start": closure["fecha_inicio"], "end": closure["fecha_cierre"]},
         ).mappings().one()
+        active_monthly_customers = _active_monthly_customers(conn)
 
     operation_income = sum(int(rows[name] or 0) for name in ("parking_income", "bathroom_income", "wash_income", "night_income"))
     operation_expenses = int(rows["expenses"] or 0)
     operation_totals = {
         "operational_income_total": operation_income,
         "operational_expense_total": operation_expenses,
-        "operational_net_total": operation_income - operation_expenses,
+        "operational_net_total": operation_income + int(rows["mensualidades"] or 0) - operation_expenses,
         "mensualidad_sales_total": int(rows["mensualidades"] or 0),
         "vehicle_movement_count": int(rows["vehicle_count"] or 0),
     }
@@ -87,6 +88,7 @@ def get_closed_report(cierre_id: int) -> Dict[str, Any]:
     closure_metrics = {
         "operational_income_total": closure_income,
         "operational_expense_total": int(closure["total_gastos"] or 0),
+        "mensualidad_sales_total": int(closure["total_mensualidades_monto"] or 0),
         "operational_net_total": int(closure["total_neto"] or 0),
     }
     discrepancy = {name: operation_totals[name] - closure_metrics[name] for name in closure_metrics}
@@ -96,6 +98,14 @@ def get_closed_report(cierre_id: int) -> Dict[str, Any]:
         "catalog_version": METRIC_CATALOG_VERSION,
         "closure_reference": {"id": cierre_id, "metrics": closure_metrics},
         "operation_totals": operation_totals,
+        "capacity": {
+            "total_spaces": 50,
+            "reserved_monthly_spaces": active_monthly_customers,
+            "effective_transient_capacity": max(50 - active_monthly_customers, 0),
+            "source_state": "resolved",
+            "source": "vehiculos.tipo_cliente='mensual' AND activo=1",
+        },
+        "historical_completeness": {"status": "complete", "missing_ranges": [], "unavailable_inputs": []},
         "operation_drill_down": {
             "href": f"/api/v1/reporting/reports/operations?period_id=closure:{cierre_id}",
             "period_id": f"closure:{cierre_id}",
@@ -109,6 +119,20 @@ def get_closed_report(cierre_id: int) -> Dict[str, Any]:
     }
 
 
+def get_audit_inventory(period_id: str) -> Dict[str, Any]:
+    with db_conn() as conn:
+        coverage = {
+            "closures": _source_state(conn, "cierres_diarios"),
+            "operational_rows": _source_state(conn, "ingresos"),
+            "payments": _source_state(conn, "pagos_mensuales"),
+            "expenses": _source_state(conn, "gastos_operacion"),
+            "print_jobs": _source_state(conn, "trabajos_impresion"),
+            "users": _source_state(conn, "usuarios"),
+            "operator_sessions": _source_state(conn, "asistencias"),
+        }
+    return build_audit_inventory(period_id, coverage)
+
+
 def _summary(period_id, start, end, state, income, expenses, mensualidades, vehicle_count):
     return {
         "period": _period(period_id, start, end, state),
@@ -117,7 +141,7 @@ def _summary(period_id, start, end, state, income, expenses, mensualidades, vehi
         "metrics": {
             "operational_income_total": income,
             "operational_expense_total": expenses,
-            "operational_net_total": income - expenses,
+            "operational_net_total": income + mensualidades - expenses,
             "mensualidad_sales_total": mensualidades,
             "vehicle_movement_count": vehicle_count,
         },
@@ -131,3 +155,25 @@ def _period(period_id, start, end, state):
 
 def _iso(value):
     return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+
+def _active_monthly_customers(conn) -> int:
+    return int(
+        conn.execute(
+            text("""
+                SELECT COUNT(DISTINCT v.id_vehiculo)
+                FROM vehiculos v
+                WHERE v.tipo_cliente = 'mensual'
+                  AND v.activo = 1
+            """)
+        ).scalar()
+        or 0
+    )
+
+
+def _source_state(conn, table_name: str) -> str:
+    try:
+        count = conn.execute(text(f"SELECT COUNT(*) FROM {table_name}")).scalar() or 0
+    except Exception:
+        return "unavailable"
+    return "available" if int(count) > 0 else "partial"

@@ -7,8 +7,13 @@ from app.repositories.reporting_read_models import (
     build_capacity,
     build_historical_completeness,
     build_metric_catalog,
+    build_operation_pagination_metadata,
     build_operational_periods,
     build_reporting_summary,
+    serialize_operation_row,
+    validate_operation_filters,
+    validate_operation_pagination,
+    validate_operation_sort,
 )
 
 
@@ -182,6 +187,110 @@ class ReportingReadModelsTests(unittest.TestCase):
         self.assertEqual(partial["missing_ranges"], ["before_first_closure"])
         with self.assertRaises(ValueError):
             build_historical_completeness("unknown")
+
+    def test_operation_pagination_metadata_reports_next_page(self):
+        pagination = build_operation_pagination_metadata(total=25, limit=10, offset=0)
+
+        self.assertEqual(
+            pagination,
+            {
+                "total": 25,
+                "limit": 10,
+                "offset": 0,
+                "has_more": True,
+                "next_offset": 10,
+            },
+        )
+
+    def test_operation_pagination_metadata_reports_final_page(self):
+        pagination = build_operation_pagination_metadata(total=25, limit=10, offset=20)
+
+        self.assertEqual(pagination["total"], 25)
+        self.assertEqual(pagination["limit"], 10)
+        self.assertEqual(pagination["offset"], 20)
+        self.assertFalse(pagination["has_more"])
+        self.assertIsNone(pagination["next_offset"])
+
+    def test_operation_pagination_rejects_out_of_bounds_values(self):
+        self.assertEqual(validate_operation_pagination(limit=None, offset=None), {"limit": 100, "offset": 0})
+        self.assertEqual(validate_operation_pagination(limit="200", offset="5"), {"limit": 200, "offset": 5})
+
+        invalid_cases = [
+            {"limit": "0", "offset": "0"},
+            {"limit": "201", "offset": "0"},
+            {"limit": "abc", "offset": "0"},
+            {"limit": "10", "offset": "-1"},
+            {"limit": "10", "offset": "abc"},
+        ]
+        for values in invalid_cases:
+            with self.subTest(values=values):
+                with self.assertRaises(ValueError):
+                    validate_operation_pagination(**values)
+
+    def test_operation_filters_accept_only_documented_keys_and_values(self):
+        filters = validate_operation_filters(
+            {
+                "category": "vehicle_movement",
+                "operator": "operator-a",
+                "plate": "ABC123",
+            }
+        )
+
+        self.assertEqual(filters["category"], "vehicle_movement")
+        self.assertEqual(filters["operator"], "operator-a")
+        self.assertEqual(filters["plate"], "ABC123")
+
+        invalid_cases = [
+            {"unknown": "value"},
+            {"category": "unsupported"},
+            {"operator": ""},
+            {"plate": "   "},
+        ]
+        for filters in invalid_cases:
+            with self.subTest(filters=filters):
+                with self.assertRaises(ValueError):
+                    validate_operation_filters(filters)
+
+    def test_operation_sort_accepts_allow_list_and_tie_breaker(self):
+        self.assertEqual(
+            validate_operation_sort(sort=None, direction=None),
+            {"field": "occurred_at", "direction": "asc", "tie_breaker": "operation_id"},
+        )
+        self.assertEqual(
+            validate_operation_sort(sort="amount", direction="desc"),
+            {"field": "amount", "direction": "desc", "tie_breaker": "operation_id"},
+        )
+
+        invalid_cases = [
+            {"sort": "operator", "direction": "asc"},
+            {"sort": "amount", "direction": "sideways"},
+        ]
+        for values in invalid_cases:
+            with self.subTest(values=values):
+                with self.assertRaises(ValueError):
+                    validate_operation_sort(**values)
+
+    def test_operation_row_serialization_uses_stable_operation_identity(self):
+        row = serialize_operation_row(
+            {
+                "source": "vehicle_movement",
+                "source_id": 123,
+                "occurred_at": datetime(2026, 9, 28, 10, 30),
+                "amount": "1500",
+                "category": "vehicle_movement",
+                "operator": "operator-a",
+                "plate": "ABC123",
+                "description": "Vehicle exit",
+            }
+        )
+
+        self.assertEqual(row["operation_id"], "vehicle_movement:123")
+        self.assertEqual(row["occurred_at"], "2026-09-28T10:30:00")
+        self.assertEqual(row["amount"], 1500)
+        self.assertEqual(row["category"], "vehicle_movement")
+        self.assertEqual(row["operator"], "operator-a")
+        self.assertEqual(row["plate"], "ABC123")
+        self.assertEqual(row["description"], "Vehicle exit")
 
 
 if __name__ == "__main__":

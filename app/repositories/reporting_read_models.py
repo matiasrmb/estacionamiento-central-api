@@ -7,6 +7,12 @@ TOTAL_PARKING_SPACES = 50
 COMPLETENESS_STATUSES = {"complete", "partial", "unavailable"}
 CANONICAL_EXPORT_FORMATS = {"pdf", "xlsx"}
 LEGACY_EXPORT_FORMATS = {"csv"}
+DEFAULT_OPERATION_LIMIT = 100
+MAX_OPERATION_LIMIT = 200
+ALLOWED_OPERATION_FILTERS = {"category", "operator", "plate"}
+ALLOWED_OPERATION_CATEGORIES = {"vehicle_movement", "operational_expense", "mensualidad_sale"}
+ALLOWED_OPERATION_SORTS = {"occurred_at", "amount", "category"}
+ALLOWED_SORT_DIRECTIONS = {"asc", "desc"}
 
 METRIC_CATALOG = [
     {
@@ -161,6 +167,78 @@ def build_historical_completeness(status="complete", missing_ranges=None, unavai
     }
 
 
+def validate_operation_filters(filters=None) -> Dict[str, str]:
+    filters = filters or {}
+    validated = {}
+
+    for key, value in filters.items():
+        if key not in ALLOWED_OPERATION_FILTERS:
+            raise ValueError("UNSUPPORTED_OPERATION_FILTER")
+        normalized_value = str(value).strip() if value is not None else ""
+        if not normalized_value:
+            raise ValueError("INVALID_OPERATION_FILTER_VALUE")
+        if key == "category" and normalized_value not in ALLOWED_OPERATION_CATEGORIES:
+            raise ValueError("INVALID_OPERATION_FILTER_VALUE")
+        validated[key] = normalized_value
+
+    return validated
+
+
+def validate_operation_sort(sort=None, direction=None) -> Dict[str, str]:
+    normalized_sort = (sort or "occurred_at").strip()
+    normalized_direction = (direction or "asc").strip().lower()
+
+    if normalized_sort not in ALLOWED_OPERATION_SORTS:
+        raise ValueError("UNSUPPORTED_OPERATION_SORT")
+    if normalized_direction not in ALLOWED_SORT_DIRECTIONS:
+        raise ValueError("UNSUPPORTED_OPERATION_SORT_DIRECTION")
+
+    return {
+        "field": normalized_sort,
+        "direction": normalized_direction,
+        "tie_breaker": "operation_id",
+    }
+
+
+def validate_operation_pagination(limit=None, offset=None) -> Dict[str, int]:
+    parsed_limit = _parse_non_negative_int(limit, DEFAULT_OPERATION_LIMIT, "INVALID_OPERATION_LIMIT")
+    parsed_offset = _parse_non_negative_int(offset, 0, "INVALID_OPERATION_OFFSET")
+
+    if parsed_limit < 1 or parsed_limit > MAX_OPERATION_LIMIT:
+        raise ValueError("INVALID_OPERATION_LIMIT")
+
+    return {"limit": parsed_limit, "offset": parsed_offset}
+
+
+def build_operation_pagination_metadata(total: int, limit: int, offset: int) -> Dict[str, Any]:
+    next_offset = offset + limit
+    has_more = next_offset < total
+
+    return {
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "has_more": has_more,
+        "next_offset": next_offset if has_more else None,
+    }
+
+
+def serialize_operation_row(row) -> Dict[str, Any]:
+    source = row.get("source") or row.get("category")
+    source_id = row.get("source_id") or row.get("id")
+    operation_id = row.get("operation_id") or f"{source}:{source_id}"
+
+    return {
+        "operation_id": operation_id,
+        "occurred_at": _iso(row.get("occurred_at")),
+        "amount": int(row.get("amount") or 0),
+        "category": row.get("category"),
+        "operator": row.get("operator"),
+        "plate": row.get("plate"),
+        "description": row.get("description"),
+    }
+
+
 def build_closed_report(
     closure,
     vehicle_movements,
@@ -295,6 +373,18 @@ def _rows_in_operator_session(rows, session):
 
 def _sum_amount(rows):
     return sum(int(row.get("amount") or 0) for row in rows)
+
+
+def _parse_non_negative_int(value, default, error_code):
+    if value is None:
+        return default
+    try:
+        parsed_value = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(error_code)
+    if parsed_value < 0:
+        raise ValueError(error_code)
+    return parsed_value
 
 
 def _operation_drill_down(vehicle_movements, expenses, period):

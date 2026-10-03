@@ -5,7 +5,24 @@ from sqlalchemy import text
 
 from app.db.database import db_conn
 from app.repositories.cierres_repo import get_cierre_pendiente
-from app.repositories.reporting_read_models import METRIC_CATALOG_VERSION, build_audit_inventory
+from app.repositories.reporting_read_models import (
+    METRIC_CATALOG_VERSION,
+    build_audit_inventory,
+    build_operation_pagination_metadata,
+    serialize_operation_row,
+)
+
+
+OPERATION_FILTER_SQL = {
+    "category": "category = :category",
+    "operator": "operator = :operator",
+    "plate": "plate = :plate",
+}
+OPERATION_SORT_SQL = {
+    "occurred_at": "occurred_at",
+    "amount": "amount",
+    "category": "category",
+}
 
 
 def get_open_dashboard() -> Dict[str, Any]:
@@ -133,6 +150,49 @@ def get_audit_inventory(period_id: str) -> Dict[str, Any]:
     return build_audit_inventory(period_id, coverage)
 
 
+def list_operation_rows(cierre_id: int, filters: Dict[str, str], sort: Dict[str, str], pagination: Dict[str, int]) -> Dict[str, Any]:
+    with db_conn() as conn:
+        closure = _get_closure_window(conn, cierre_id)
+        params = {
+            "id_cierre": cierre_id,
+            "start": closure["fecha_inicio"],
+            "end": closure["fecha_cierre"],
+            "limit": pagination["limit"],
+            "offset": pagination["offset"],
+        }
+        where_sql = _operation_filter_sql(filters, params)
+        base_sql = _operation_rows_base_sql()
+
+        total = int(
+            conn.execute(
+                text(f"SELECT COUNT(*) FROM ({base_sql}) operation_rows WHERE {where_sql}"),
+                params,
+            ).scalar()
+            or 0
+        )
+
+        rows = conn.execute(
+            text(
+                f"""
+                SELECT source, source_id, occurred_at, amount, category, operator, plate, description
+                FROM ({base_sql}) operation_rows
+                WHERE {where_sql}
+                ORDER BY {_operation_order_sql(sort)}
+                LIMIT :limit OFFSET :offset
+                """
+            ),
+            params,
+        ).mappings().all()
+
+    return {
+        "period_id": f"closure:{cierre_id}",
+        "filters": dict(filters),
+        "sort": dict(sort),
+        "pagination": build_operation_pagination_metadata(total, pagination["limit"], pagination["offset"]),
+        "items": [serialize_operation_row(row) for row in rows],
+    }
+
+
 def _summary(period_id, start, end, state, income, expenses, mensualidades, vehicle_count):
     return {
         "period": _period(period_id, start, end, state),
@@ -169,6 +229,83 @@ def _active_monthly_customers(conn) -> int:
         ).scalar()
         or 0
     )
+
+
+def _get_closure_window(conn, cierre_id: int):
+    closure = conn.execute(
+        text("""
+            SELECT id_cierre, fecha_inicio, fecha_cierre
+            FROM cierres_diarios
+            WHERE id_cierre = :id_cierre
+        """),
+        {"id_cierre": cierre_id},
+    ).mappings().first()
+    if closure is None:
+        raise LookupError("CLOSURE_NOT_FOUND")
+    return closure
+
+
+def _operation_filter_sql(filters: Dict[str, str], params: Dict[str, Any]) -> str:
+    clauses = ["occurred_at >= :start", "occurred_at <= :end"]
+    for key, value in filters.items():
+        clauses.append(OPERATION_FILTER_SQL[key])
+        params[key] = value
+    return " AND ".join(clauses)
+
+
+def _operation_order_sql(sort: Dict[str, str]) -> str:
+    field = OPERATION_SORT_SQL[sort["field"]]
+    direction = sort["direction"].upper()
+    return f"{field} {direction}, operation_id ASC"
+
+
+def _operation_rows_base_sql() -> str:
+    return """
+        SELECT
+            'vehicle_movement' AS source,
+            i.id_ingreso AS source_id,
+            CONCAT('vehicle_movement:', i.id_ingreso) AS operation_id,
+            i.fecha_hora_salida AS occurred_at,
+            COALESCE(i.tarifa_aplicada, 0) AS amount,
+            'vehicle_movement' AS category,
+            i.usuario AS operator,
+            v.patente AS plate,
+            'Vehicle exit' AS description
+        FROM ingresos i
+        JOIN vehiculos v ON v.id_vehiculo = i.id_vehiculo
+        WHERE i.fecha_hora_salida IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM ingresos_eliminados ie
+              WHERE ie.id_ingreso_original = i.id_ingreso
+          )
+        UNION ALL
+        SELECT
+            'operational_expense' AS source,
+            g.id_gasto AS source_id,
+            CONCAT('operational_expense:', g.id_gasto) AS operation_id,
+            g.fecha_hora AS occurred_at,
+            COALESCE(g.monto, 0) AS amount,
+            'operational_expense' AS category,
+            g.usuario AS operator,
+            NULL AS plate,
+            g.descripcion AS description
+        FROM gastos_operacion g
+        WHERE g.id_cierre = :id_cierre
+        UNION ALL
+        SELECT
+            'mensualidad_sale' AS source,
+            p.id_pago_mensual AS source_id,
+            CONCAT('mensualidad_sale:', p.id_pago_mensual) AS operation_id,
+            p.fecha_pago AS occurred_at,
+            COALESCE(p.monto_snapshot, 0) AS amount,
+            'mensualidad_sale' AS category,
+            p.usuario AS operator,
+            v.patente AS plate,
+            p.observacion AS description
+        FROM pagos_mensuales p
+        JOIN vehiculos v ON v.id_vehiculo = p.id_vehiculo
+        WHERE p.id_cierre = :id_cierre
+    """
 
 
 def _source_state(conn, table_name: str) -> str:

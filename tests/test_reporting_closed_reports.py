@@ -98,6 +98,99 @@ class ReportingClosedReportsTests(unittest.TestCase):
         self.assertEqual(report["capacity"]["reserved_monthly_spaces"], 7)
         self.assertEqual(report["capacity"]["effective_transient_capacity"], 43)
 
+    @patch("app.repositories.reporting_repo.db_conn")
+    def test_repository_operation_rows_lookup_closure_and_return_metadata(self, db_conn):
+        from app.repositories.reporting_repo import list_operation_rows
+
+        closure_result = MagicMock()
+        closure_result.mappings.return_value.first.return_value = {
+            "id_cierre": 18,
+            "fecha_inicio": datetime(2026, 9, 28, 9, 30),
+            "fecha_cierre": datetime(2026, 9, 29, 2, 0),
+        }
+        count_result = MagicMock()
+        count_result.scalar.return_value = 3
+        page_result = MagicMock()
+        page_result.mappings.return_value.all.return_value = [
+            {
+                "source": "vehicle_movement",
+                "source_id": 10,
+                "occurred_at": datetime(2026, 9, 28, 12, 0),
+                "amount": 1500,
+                "category": "vehicle_movement",
+                "operator": "operator-a",
+                "plate": "ABC123",
+                "description": "Vehicle exit",
+            }
+        ]
+        conn = MagicMock()
+        conn.execute.side_effect = [closure_result, count_result, page_result]
+        db_conn.return_value = nullcontext(conn)
+
+        result = list_operation_rows(
+            18,
+            filters={"category": "vehicle_movement", "operator": "operator-a", "plate": "ABC123"},
+            sort={"field": "amount", "direction": "desc", "tie_breaker": "operation_id"},
+            pagination={"limit": 2, "offset": 0},
+        )
+
+        self.assertEqual(result["period_id"], "closure:18")
+        self.assertEqual(result["filters"]["plate"], "ABC123")
+        self.assertEqual(result["pagination"], {"total": 3, "limit": 2, "offset": 0, "has_more": True, "next_offset": 2})
+        self.assertEqual(result["items"][0]["operation_id"], "vehicle_movement:10")
+        sql_text = "\n".join(str(call.args[0]) for call in conn.execute.call_args_list)
+        self.assertIn("WHERE id_cierre = :id_cierre", sql_text)
+        self.assertIn("operation_id ASC", sql_text)
+        self.assertIn("LIMIT :limit OFFSET :offset", sql_text)
+        params = conn.execute.call_args_list[-1].args[1]
+        self.assertEqual(params["id_cierre"], 18)
+        self.assertEqual(params["category"], "vehicle_movement")
+        self.assertEqual(params["operator"], "operator-a")
+        self.assertEqual(params["plate"], "ABC123")
+        self.assertEqual(params["limit"], 2)
+        self.assertEqual(params["offset"], 0)
+
+    @patch("app.repositories.reporting_repo.db_conn")
+    def test_repository_operation_rows_reports_final_page(self, db_conn):
+        from app.repositories.reporting_repo import list_operation_rows
+
+        closure_result = MagicMock()
+        closure_result.mappings.return_value.first.return_value = {
+            "id_cierre": 18,
+            "fecha_inicio": datetime(2026, 9, 28, 9, 30),
+            "fecha_cierre": datetime(2026, 9, 29, 2, 0),
+        }
+        count_result = MagicMock()
+        count_result.scalar.return_value = 3
+        page_result = MagicMock()
+        page_result.mappings.return_value.all.return_value = []
+        conn = MagicMock()
+        conn.execute.side_effect = [closure_result, count_result, page_result]
+        db_conn.return_value = nullcontext(conn)
+
+        result = list_operation_rows(
+            18,
+            filters={},
+            sort={"field": "occurred_at", "direction": "asc", "tie_breaker": "operation_id"},
+            pagination={"limit": 2, "offset": 2},
+        )
+
+        self.assertFalse(result["pagination"]["has_more"])
+        self.assertIsNone(result["pagination"]["next_offset"])
+
+    @patch("app.repositories.reporting_repo.db_conn")
+    def test_repository_operation_rows_missing_closure_raises_lookup_error(self, db_conn):
+        from app.repositories.reporting_repo import list_operation_rows
+
+        closure_result = MagicMock()
+        closure_result.mappings.return_value.first.return_value = None
+        conn = MagicMock()
+        conn.execute.return_value = closure_result
+        db_conn.return_value = nullcontext(conn)
+
+        with self.assertRaises(LookupError):
+            list_operation_rows(999, filters={}, sort={"field": "occurred_at", "direction": "asc"}, pagination={"limit": 10, "offset": 0})
+
 
 if __name__ == "__main__":
     unittest.main()

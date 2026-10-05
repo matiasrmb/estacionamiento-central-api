@@ -5,6 +5,23 @@ from typing import Any, Dict, Iterable, List
 METRIC_CATALOG_VERSION = "2026-09-29"
 TOTAL_PARKING_SPACES = 50
 COMPLETENESS_STATUSES = {"complete", "partial", "unavailable"}
+COVERAGE_AVAILABLE = "available"
+COVERAGE_PARTIAL = "partial"
+COVERAGE_UNAVAILABLE = "unavailable"
+COVERAGE_STATES = {COVERAGE_AVAILABLE, COVERAGE_PARTIAL, COVERAGE_UNAVAILABLE}
+PLATE_HISTORY_SOURCES = (
+    "parking",
+    "solo_wash",
+    "monthly_payment",
+    "night_charge",
+    "closure",
+    "logical_deletion",
+)
+AUDIT_INVENTORY_UNSUPPORTED_BEHAVIORS = [
+    "persisted_anomaly_records",
+    "event_sourced_history",
+    "transversal_audit_log",
+]
 CANONICAL_EXPORT_FORMATS = {"pdf", "xlsx"}
 LEGACY_EXPORT_FORMATS = {"csv"}
 
@@ -161,6 +178,36 @@ def build_historical_completeness(status="complete", missing_ranges=None, unavai
     }
 
 
+def build_plate_history_response(plate, bounds, rows=None, coverage=None) -> Dict[str, Any]:
+    rows = rows or []
+    coverage = coverage or {}
+    timeline = [_build_plate_timeline_row(plate, row) for row in rows]
+    timeline.sort(key=_plate_timeline_sort_key)
+    source_coverage = [
+        {"source": source, "state": state}
+        for source, state in sorted(coverage.items())
+    ]
+    completeness = _plate_history_completeness(source_coverage)
+
+    return {
+        "plate": str(plate or "").upper().replace(" ", "").replace("-", ""),
+        "bounds": {
+            "start": _iso(bounds["start"]),
+            "end": _iso(bounds["end"]),
+            "limit": bounds.get("limit", 500),
+        },
+        "timeline": timeline,
+        "anomaly_summary": _plate_history_anomaly_summary(source_coverage),
+        "statistics": {
+            "timeline_row_count": len(timeline),
+            "total_amount": _sum_amount(timeline),
+            "sources_with_rows": sorted({row["source"] for row in timeline}),
+        },
+        "source_coverage": source_coverage,
+        "historical_completeness": completeness,
+    }
+
+
 def build_closed_report(
     closure,
     vehicle_movements,
@@ -213,16 +260,22 @@ def build_closed_report(
 
 def build_audit_inventory(period_id: str, coverage=None) -> Dict[str, Any]:
     coverage = coverage or {
-        "closures": "available",
-        "operational_rows": "available",
-        "payments": "available",
-        "expenses": "available",
-        "print_jobs": "partial",
-        "users": "available",
-        "operator_sessions": "partial",
+        "closures": COVERAGE_AVAILABLE,
+        "operational_rows": COVERAGE_AVAILABLE,
+        "payments": COVERAGE_AVAILABLE,
+        "expenses": COVERAGE_AVAILABLE,
+        "print_jobs": COVERAGE_PARTIAL,
+        "users": COVERAGE_AVAILABLE,
+        "operator_sessions": COVERAGE_PARTIAL,
+        "parking": COVERAGE_AVAILABLE,
+        "solo_wash": COVERAGE_AVAILABLE,
+        "monthly_payment": COVERAGE_AVAILABLE,
+        "night_charge": COVERAGE_AVAILABLE,
+        "closure": COVERAGE_AVAILABLE,
+        "logical_deletion": COVERAGE_AVAILABLE,
     }
-    available_sources = [source for source, state in coverage.items() if state in {"available", "partial"}]
-    unavailable_sources = [source for source, state in coverage.items() if state == "unavailable"]
+    available_sources = [source for source, state in coverage.items() if state in {COVERAGE_AVAILABLE, COVERAGE_PARTIAL}]
+    unavailable_sources = [source for source, state in coverage.items() if state == COVERAGE_UNAVAILABLE]
     return {
         "period_id": period_id,
         "coverage": [{"source": source, "state": state} for source, state in coverage.items()],
@@ -230,6 +283,7 @@ def build_audit_inventory(period_id: str, coverage=None) -> Dict[str, Any]:
         "unavailable_sources": unavailable_sources,
         "unavailable_history": ["before_first_closure", "after_current_rows"],
         "requires_event_sourcing": False,
+        "unsupported_behaviors": list(AUDIT_INVENTORY_UNSUPPORTED_BEHAVIORS),
     }
 
 
@@ -310,6 +364,52 @@ def _operation_drill_down(vehicle_movements, expenses, period):
         item["occurred_at"] = _iso(item.get("occurred_at"))
         items.append(item)
     return items
+
+
+def _build_plate_timeline_row(plate, row):
+    item = {
+        "source": row["source"],
+        "plate": str(row.get("plate") or plate or "").upper().replace(" ", "").replace("-", ""),
+        "occurred_at": _iso(row.get("occurred_at")),
+        "period": row.get("period"),
+        "amount": int(row.get("amount") or 0) if row.get("amount") is not None else None,
+        "closure_id": row.get("closure_id"),
+    }
+    if "id" in row:
+        item["id"] = row["id"]
+    return item
+
+
+def _plate_timeline_sort_key(row):
+    business_time = row.get("occurred_at") or row.get("period") or ""
+    return (business_time, row.get("source") or "", row.get("id") or 0)
+
+
+def _plate_history_completeness(source_coverage):
+    partial_sources = [item["source"] for item in source_coverage if item["state"] == COVERAGE_PARTIAL]
+    unavailable_sources = [item["source"] for item in source_coverage if item["state"] == COVERAGE_UNAVAILABLE]
+    if unavailable_sources:
+        status = "unavailable"
+    elif partial_sources:
+        status = "partial"
+    else:
+        status = "complete"
+    return build_historical_completeness(
+        status=status,
+        missing_ranges=partial_sources,
+        unavailable_inputs=unavailable_sources,
+    )
+
+
+def _plate_history_anomaly_summary(source_coverage):
+    anomalies = []
+    partial_sources = [item["source"] for item in source_coverage if item["state"] == COVERAGE_PARTIAL]
+    unavailable_sources = [item["source"] for item in source_coverage if item["state"] == COVERAGE_UNAVAILABLE]
+    if partial_sources:
+        anomalies.append({"code": "source_partial", "sources": partial_sources, "severity": "info"})
+    if unavailable_sources:
+        anomalies.append({"code": "source_unavailable", "sources": unavailable_sources, "severity": "info"})
+    return anomalies
 
 
 def _render_csv_export(metadata, report):

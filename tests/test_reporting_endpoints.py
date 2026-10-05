@@ -1,5 +1,6 @@
 import inspect
 import unittest
+from datetime import datetime
 from unittest.mock import patch
 
 from fastapi import HTTPException
@@ -65,6 +66,87 @@ class ReportingEndpointTests(unittest.TestCase):
 
     def test_audit_inventory_is_admin_only(self):
         self.assertEqual(_allowed_roles(reporting.get_audit_inventory), {"admin"})
+
+    def test_plate_history_is_admin_only(self):
+        self.assertEqual(_allowed_roles(reporting.get_plate_history), {"admin"})
+
+    def test_plate_history_rejects_invalid_plate_before_repository_access(self):
+        with patch("app.api.v1.endpoints.reporting.get_persisted_plate_history") as get_plate_history:
+            with self.assertRaises(HTTPException) as raised:
+                reporting.get_plate_history("not-a-plate", start="2026-01-01T00:00:00", end="2026-01-02T00:00:00")
+
+        self.assertEqual(raised.exception.status_code, 422)
+        self.assertEqual(raised.exception.detail, "INVALID_PLATE")
+        get_plate_history.assert_not_called()
+
+    def test_plate_history_rejects_missing_or_invalid_bounds_before_repository_access(self):
+        invalid_cases = [
+            {"start": "", "end": "2026-01-02T00:00:00", "detail": "MISSING_HISTORY_BOUNDS"},
+            {"start": "2026-01-02T00:00:00", "end": "2026-01-01T00:00:00", "detail": "INVALID_HISTORY_BOUNDS"},
+            {"start": "not-a-date", "end": "2026-01-02T00:00:00", "detail": "INVALID_HISTORY_BOUNDS"},
+        ]
+
+        for case in invalid_cases:
+            with self.subTest(case=case):
+                with patch("app.api.v1.endpoints.reporting.get_persisted_plate_history") as get_plate_history:
+                    with self.assertRaises(HTTPException) as raised:
+                        reporting.get_plate_history("AB123CD", start=case["start"], end=case["end"])
+
+                self.assertEqual(raised.exception.status_code, 422)
+                self.assertEqual(raised.exception.detail, case["detail"])
+                get_plate_history.assert_not_called()
+
+    def test_plate_history_rejects_excessive_window_before_repository_access(self):
+        with patch("app.api.v1.endpoints.reporting.get_persisted_plate_history") as get_plate_history:
+            with self.assertRaises(HTTPException) as raised:
+                reporting.get_plate_history("AB123CD", start="2026-01-01T00:00:00", end="2027-01-03T00:00:00")
+
+        self.assertEqual(raised.exception.status_code, 422)
+        self.assertEqual(raised.exception.detail, "HISTORY_WINDOW_TOO_LARGE")
+        get_plate_history.assert_not_called()
+
+    def test_plate_history_rejects_limit_outside_allowed_range_before_repository_access(self):
+        for limit in (0, 501):
+            with self.subTest(limit=limit):
+                with patch("app.api.v1.endpoints.reporting.get_persisted_plate_history") as get_plate_history:
+                    with self.assertRaises(HTTPException) as raised:
+                        reporting.get_plate_history(
+                            "AB123CD",
+                            start="2026-01-01T00:00:00",
+                            end="2026-01-02T00:00:00",
+                            limit=limit,
+                        )
+
+                self.assertEqual(raised.exception.status_code, 422)
+                self.assertEqual(raised.exception.detail, "INVALID_HISTORY_LIMIT")
+                get_plate_history.assert_not_called()
+
+    @patch("app.api.v1.endpoints.reporting.get_persisted_plate_history")
+    def test_plate_history_delegates_normalized_plate_parsed_bounds_and_limit(self, get_plate_history):
+        get_plate_history.return_value = {"plate": "AB123CD", "timeline": []}
+
+        result = reporting.get_plate_history(
+            "ab 123 cd",
+            start="2026-01-01T00:00:00",
+            end="2026-01-02T00:00:00",
+            limit=25,
+        )
+
+        self.assertEqual(result, {"plate": "AB123CD", "timeline": []})
+        get_plate_history.assert_called_once_with(
+            "AB123CD",
+            start=datetime(2026, 1, 1, 0, 0),
+            end=datetime(2026, 1, 2, 0, 0),
+            limit=25,
+        )
+
+    @patch("app.api.v1.endpoints.reporting.get_persisted_plate_history", side_effect=ValueError("INVALID_SOURCE_BOUNDS"))
+    def test_plate_history_repository_value_error_is_422(self, _get_plate_history):
+        with self.assertRaises(HTTPException) as raised:
+            reporting.get_plate_history("AB123CD", start="2026-01-01T00:00:00", end="2026-01-02T00:00:00")
+
+        self.assertEqual(raised.exception.status_code, 422)
+        self.assertEqual(raised.exception.detail, "INVALID_SOURCE_BOUNDS")
 
     @patch("app.api.v1.endpoints.reporting.get_persisted_closed_report")
     @patch("app.api.v1.endpoints.reporting.build_report_export")

@@ -3,7 +3,10 @@ from contextlib import nullcontext
 import unittest
 from unittest.mock import MagicMock, patch
 
-from app.repositories.reporting_read_models import build_audit_inventory, build_closed_report
+from app.repositories.reporting_read_models import (
+    build_audit_inventory,
+    build_closed_report,
+)
 
 
 class ReportingClosedReportsTests(unittest.TestCase):
@@ -62,6 +65,27 @@ class ReportingClosedReportsTests(unittest.TestCase):
         self.assertFalse(inventory["requires_event_sourcing"])
 
     @patch("app.repositories.reporting_repo.db_conn")
+    def test_repository_audit_inventory_exposes_plate_history_source_states(self, db_conn):
+        from app.repositories.reporting_repo import get_audit_inventory
+
+        db_conn.return_value = nullcontext(
+            _AuditInventoryConnection(
+                unavailable_tables={"ingresos_eliminados"},
+                empty_tables={"operaciones_servicio"},
+            )
+        )
+
+        inventory = get_audit_inventory("closure:44")
+
+        coverage = {item["source"]: item["state"] for item in inventory["coverage"]}
+        self.assertEqual(coverage["parking"], "available")
+        self.assertEqual(coverage["solo_wash"], "partial")
+        self.assertEqual(coverage["monthly_payment"], "available")
+        self.assertEqual(coverage["night_charge"], "available")
+        self.assertEqual(coverage["closure"], "available")
+        self.assertEqual(coverage["logical_deletion"], "unavailable")
+
+    @patch("app.repositories.reporting_repo.db_conn")
     def test_repository_closed_report_includes_mensualidades_and_active_monthly_capacity(self, db_conn):
         from app.repositories.reporting_repo import get_closed_report
 
@@ -97,6 +121,26 @@ class ReportingClosedReportsTests(unittest.TestCase):
         self.assertEqual(report["operation_totals"]["mensualidad_sales_total"], 300)
         self.assertEqual(report["capacity"]["reserved_monthly_spaces"], 7)
         self.assertEqual(report["capacity"]["effective_transient_capacity"], 43)
+
+class _AuditInventoryConnection:
+    def __init__(self, unavailable_tables=None, empty_tables=None):
+        self.unavailable_tables = set(unavailable_tables or [])
+        self.empty_tables = set(empty_tables or [])
+
+    def execute(self, statement):
+        sql = str(statement)
+        table_name = sql.rsplit("FROM ", 1)[1].strip()
+        if table_name in self.unavailable_tables:
+            raise RuntimeError("missing table")
+        return _AuditInventoryResult(0 if table_name in self.empty_tables else 1)
+
+
+class _AuditInventoryResult:
+    def __init__(self, count):
+        self.count = count
+
+    def scalar(self):
+        return self.count
 
 
 if __name__ == "__main__":

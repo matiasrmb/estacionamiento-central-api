@@ -5,7 +5,118 @@ from sqlalchemy import text
 
 from app.db.database import db_conn
 from app.repositories.cierres_repo import get_cierre_pendiente
-from app.repositories.reporting_read_models import METRIC_CATALOG_VERSION, build_audit_inventory
+from app.repositories.reporting_read_models import (
+    COVERAGE_AVAILABLE,
+    COVERAGE_PARTIAL,
+    COVERAGE_UNAVAILABLE,
+    METRIC_CATALOG_VERSION,
+    PLATE_HISTORY_SOURCES,
+    build_audit_inventory,
+    build_plate_history_response,
+)
+
+
+PLATE_HISTORY_SOURCE_QUERIES = dict(zip(PLATE_HISTORY_SOURCES, (
+    """
+        SELECT i.id_ingreso AS id,
+               v.patente AS plate,
+               i.fecha_hora_salida AS occurred_at,
+               i.tarifa_aplicada AS amount,
+               NULL AS closure_id
+        FROM ingresos i
+        JOIN vehiculos v ON v.id_vehiculo = i.id_vehiculo
+        WHERE v.patente = :plate
+          AND i.fecha_hora_salida >= :start
+          AND i.fecha_hora_salida <= :end
+          AND i.fecha_hora_salida IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM ingresos_eliminados ie
+              WHERE ie.id_ingreso_original = i.id_ingreso
+          )
+        ORDER BY i.fecha_hora_salida ASC, i.id_ingreso ASC
+        LIMIT :limit
+    """,
+    """
+        SELECT o.id_operacion_servicio AS id,
+               o.patente AS plate,
+               o.fecha_hora_fin AS occurred_at,
+               o.valor_lavado_snapshot AS amount,
+               NULL AS closure_id
+        FROM operaciones_servicio o
+        WHERE o.patente = :plate
+          AND o.fecha_hora_fin >= :start
+          AND o.fecha_hora_fin <= :end
+          AND o.estado = 'FINALIZADO_COBRADO'
+        ORDER BY o.fecha_hora_fin ASC, o.id_operacion_servicio ASC
+        LIMIT :limit
+    """,
+    """
+        SELECT p.id_pago_mensual AS id,
+               v.patente AS plate,
+               p.fecha_pago AS occurred_at,
+               p.periodo AS period,
+               p.monto_snapshot AS amount,
+               p.id_cierre AS closure_id
+        FROM pagos_mensuales p
+        JOIN vehiculos v ON v.id_vehiculo = p.id_vehiculo
+        WHERE v.patente = :plate
+          AND p.fecha_pago >= :start
+          AND p.fecha_pago <= :end
+        ORDER BY p.fecha_pago ASC, p.id_pago_mensual ASC
+        LIMIT :limit
+    """,
+    """
+        SELECT n.id_cobro_noche AS id,
+               v.patente AS plate,
+               n.fecha_hora_pago AS occurred_at,
+               n.monto_snapshot AS amount,
+               n.id_cierre AS closure_id
+        FROM cobros_noches n
+        JOIN ingresos i ON i.id_ingreso = n.id_ingreso
+        JOIN vehiculos v ON v.id_vehiculo = i.id_vehiculo
+        WHERE v.patente = :plate
+          AND n.fecha_hora_pago >= :start
+          AND n.fecha_hora_pago <= :end
+          AND n.estado = 'PAGADO'
+        ORDER BY n.fecha_hora_pago ASC, n.id_cobro_noche ASC
+        LIMIT :limit
+    """,
+    """
+        SELECT c.id_cierre AS id,
+               :plate AS plate,
+               c.fecha_cierre AS occurred_at,
+               c.id_cierre AS closure_id
+        FROM cierres_diarios c
+        WHERE c.fecha_cierre >= :start
+          AND c.fecha_cierre <= :end
+          AND EXISTS (
+              SELECT 1
+              FROM ingresos i
+              JOIN vehiculos v ON v.id_vehiculo = i.id_vehiculo
+              WHERE v.patente = :plate
+                AND i.fecha_hora_salida >= c.fecha_inicio
+                AND i.fecha_hora_salida <= c.fecha_cierre
+          )
+        ORDER BY c.fecha_cierre ASC, c.id_cierre ASC
+        LIMIT :limit
+    """,
+    """
+        SELECT ie.id_ingreso_original AS id,
+               v.patente AS plate,
+               COALESCE(i.fecha_hora_salida, i.fecha_hora_ingreso) AS occurred_at,
+               i.tarifa_aplicada AS amount,
+               NULL AS closure_id
+        FROM ingresos_eliminados ie
+        JOIN ingresos i ON i.id_ingreso = ie.id_ingreso_original
+        JOIN vehiculos v ON v.id_vehiculo = i.id_vehiculo
+        WHERE v.patente = :plate
+          AND COALESCE(i.fecha_hora_salida, i.fecha_hora_ingreso) >= :start
+          AND COALESCE(i.fecha_hora_salida, i.fecha_hora_ingreso) <= :end
+        ORDER BY COALESCE(i.fecha_hora_salida, i.fecha_hora_ingreso) ASC,
+                 ie.id_ingreso_original ASC
+        LIMIT :limit
+    """,
+)))
 
 
 def get_open_dashboard() -> Dict[str, Any]:
@@ -129,8 +240,42 @@ def get_audit_inventory(period_id: str) -> Dict[str, Any]:
             "print_jobs": _source_state(conn, "trabajos_impresion"),
             "users": _source_state(conn, "usuarios"),
             "operator_sessions": _source_state(conn, "asistencias"),
+            "parking": _source_state(conn, "ingresos"),
+            "solo_wash": _source_state(conn, "operaciones_servicio"),
+            "monthly_payment": _source_state(conn, "pagos_mensuales"),
+            "night_charge": _source_state(conn, "cobros_noches"),
+            "closure": _source_state(conn, "cierres_diarios"),
+            "logical_deletion": _source_state(conn, "ingresos_eliminados"),
         }
     return build_audit_inventory(period_id, coverage)
+
+
+def get_plate_history(plate: str, start: datetime, end: datetime, limit: int = 500) -> Dict[str, Any]:
+    if start >= end:
+        raise ValueError("INVALID_HISTORY_BOUNDS")
+    if not 1 <= int(limit) <= 500:
+        raise ValueError("INVALID_HISTORY_LIMIT")
+
+    rows = []
+    coverage = {}
+    params = {"plate": plate, "start": start, "end": end, "limit": int(limit)}
+    with db_conn() as conn:
+        for source, query in PLATE_HISTORY_SOURCE_QUERIES.items():
+            try:
+                source_rows = [dict(row) for row in conn.execute(text(query), params).mappings().all()]
+            except Exception:
+                coverage[source] = COVERAGE_UNAVAILABLE
+                continue
+            coverage[source] = COVERAGE_AVAILABLE
+            rows.extend(_plate_history_rows(source, source_rows))
+
+    rows.sort(key=_plate_history_sort_key)
+    return build_plate_history_response(
+        plate,
+        {"start": start, "end": end, "limit": int(limit)},
+        rows=rows[: int(limit)],
+        coverage=coverage,
+    )
 
 
 def _summary(period_id, start, end, state, income, expenses, mensualidades, vehicle_count):
@@ -171,9 +316,30 @@ def _active_monthly_customers(conn) -> int:
     )
 
 
+def _plate_history_rows(source, source_rows):
+    rows = []
+    for row in source_rows:
+        item = {
+            "source": source,
+            "id": row.get("id"),
+            "plate": row.get("plate"),
+            "occurred_at": row.get("occurred_at"),
+            "period": row.get("period"),
+            "amount": row.get("amount"),
+            "closure_id": row.get("closure_id"),
+        }
+        rows.append(item)
+    return rows
+
+
+def _plate_history_sort_key(row):
+    business_time = row.get("occurred_at") or row.get("period") or ""
+    return (str(business_time), row.get("source") or "", row.get("id") or 0)
+
+
 def _source_state(conn, table_name: str) -> str:
     try:
         count = conn.execute(text(f"SELECT COUNT(*) FROM {table_name}")).scalar() or 0
     except Exception:
-        return "unavailable"
-    return "available" if int(count) > 0 else "partial"
+        return COVERAGE_UNAVAILABLE
+    return COVERAGE_AVAILABLE if int(count) > 0 else COVERAGE_PARTIAL

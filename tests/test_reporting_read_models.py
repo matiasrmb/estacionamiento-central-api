@@ -4,6 +4,9 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from app.repositories.reporting_read_models import (
+    PLATE_HISTORY_SOURCES,
+    build_audit_inventory,
+    build_plate_history_response,
     build_capacity,
     build_historical_completeness,
     build_metric_catalog,
@@ -182,6 +185,222 @@ class ReportingReadModelsTests(unittest.TestCase):
         self.assertEqual(partial["missing_ranges"], ["before_first_closure"])
         with self.assertRaises(ValueError):
             build_historical_completeness("unknown")
+
+    def test_audit_inventory_exposes_plate_history_source_coverage(self):
+        inventory = build_audit_inventory(period_id="closure:44")
+
+        coverage = {item["source"]: item["state"] for item in inventory["coverage"]}
+        for source in PLATE_HISTORY_SOURCES:
+            self.assertIn(source, coverage)
+            self.assertEqual(coverage[source], "available")
+
+    def test_audit_inventory_marks_unavailable_plate_history_sources(self):
+        inventory = build_audit_inventory(
+            period_id="closure:44",
+            coverage={
+                "parking": "available",
+                "solo_wash": "partial",
+                "monthly_payment": "available",
+                "night_charge": "unavailable",
+                "closure": "available",
+                "logical_deletion": "unavailable",
+            },
+        )
+
+        coverage = {item["source"]: item["state"] for item in inventory["coverage"]}
+        self.assertEqual(coverage["solo_wash"], "partial")
+        self.assertEqual(coverage["night_charge"], "unavailable")
+        self.assertEqual(coverage["logical_deletion"], "unavailable")
+        self.assertIn("solo_wash", inventory["available_sources"])
+        self.assertIn("night_charge", inventory["unavailable_sources"])
+        self.assertIn("logical_deletion", inventory["unavailable_sources"])
+
+    def test_audit_inventory_keeps_persisted_anomalies_and_event_sourcing_out_of_scope(self):
+        inventory = build_audit_inventory(period_id="closure:44")
+
+        self.assertFalse(inventory["requires_event_sourcing"])
+        self.assertEqual(
+            inventory["unsupported_behaviors"],
+            [
+                "persisted_anomaly_records",
+                "event_sourced_history",
+                "transversal_audit_log",
+            ],
+        )
+
+    def test_plate_history_orders_timeline_and_preserves_source_labels(self):
+        response = build_plate_history_response(
+            plate="ab 123 cd",
+            bounds={"start": datetime(2026, 1, 1), "end": datetime(2026, 1, 2), "limit": 500},
+            rows=[
+                {
+                    "id": 2,
+                    "source": "solo_wash",
+                    "occurred_at": datetime(2026, 1, 1, 10, 0),
+                    "amount": 200,
+                },
+                {
+                    "id": 3,
+                    "source": "parking",
+                    "occurred_at": datetime(2026, 1, 1, 10, 0),
+                    "amount": 1000,
+                    "closure_id": 18,
+                },
+                {
+                    "id": 1,
+                    "source": "monthly_payment",
+                    "period": "2026-01",
+                    "amount": 3000,
+                },
+            ],
+            coverage={
+                "parking": "available",
+                "solo_wash": "available",
+                "monthly_payment": "available",
+                "night_charge": "unavailable",
+            },
+        )
+
+        self.assertEqual(response["plate"], "AB123CD")
+        self.assertEqual(
+            [(row["source"], row.get("id")) for row in response["timeline"]],
+            [("monthly_payment", 1), ("parking", 3), ("solo_wash", 2)],
+        )
+        self.assertEqual(response["timeline"][1]["occurred_at"], "2026-01-01T10:00:00")
+        self.assertEqual(response["timeline"][1]["closure_id"], 18)
+
+    def test_plate_history_statistics_coverage_and_weakest_completeness(self):
+        response = build_plate_history_response(
+            plate="AB123CD",
+            bounds={"start": datetime(2026, 1, 1), "end": datetime(2026, 1, 2), "limit": 500},
+            rows=[
+                {"source": "parking", "occurred_at": datetime(2026, 1, 1, 10, 0), "amount": 1000},
+                {"source": "monthly_payment", "period": "2026-01", "amount": 3000},
+            ],
+            coverage={"parking": "available", "monthly_payment": "partial", "night_charge": "unavailable"},
+        )
+
+        self.assertEqual(response["statistics"]["timeline_row_count"], 2)
+        self.assertEqual(response["statistics"]["total_amount"], 4000)
+        self.assertEqual(response["statistics"]["sources_with_rows"], ["monthly_payment", "parking"])
+        self.assertEqual(
+            response["source_coverage"],
+            [
+                {"source": "monthly_payment", "state": "partial"},
+                {"source": "night_charge", "state": "unavailable"},
+                {"source": "parking", "state": "available"},
+            ],
+        )
+        self.assertEqual(response["historical_completeness"]["status"], "unavailable")
+        self.assertEqual(response["historical_completeness"]["unavailable_inputs"], ["night_charge"])
+        self.assertEqual(
+            response["anomaly_summary"],
+            [
+                {"code": "source_partial", "sources": ["monthly_payment"], "severity": "info"},
+                {"code": "source_unavailable", "sources": ["night_charge"], "severity": "info"},
+            ],
+        )
+
+    @patch("app.repositories.reporting_repo.db_conn")
+    def test_plate_history_repository_returns_source_rows_without_fabricating_missing_evidence(self, db_conn):
+        from app.repositories.reporting_repo import get_plate_history
+
+        conn = _PlateHistoryConnection(
+            {
+                "FROM cierres_diarios": [],
+                "FROM ingresos i": [
+                    {
+                        "id": 10,
+                        "plate": "AB123CD",
+                        "occurred_at": datetime(2026, 1, 1, 10, 0),
+                        "amount": 1000,
+                        "closure_id": 18,
+                    }
+                ],
+                "FROM operaciones_servicio": [],
+                "FROM pagos_mensuales": [
+                    {
+                        "id": 20,
+                        "plate": "AB123CD",
+                        "occurred_at": datetime(2026, 1, 1, 9, 0),
+                        "period": "2026-01",
+                        "amount": 3000,
+                    }
+                ],
+                "FROM cobros_noches": [],
+                "FROM ingresos_eliminados": [],
+            }
+        )
+        db_conn.return_value = nullcontext(conn)
+
+        response = get_plate_history("AB123CD", datetime(2026, 1, 1), datetime(2026, 1, 2), limit=500)
+
+        self.assertEqual(response["plate"], "AB123CD")
+        self.assertEqual(response["statistics"]["timeline_row_count"], 2)
+        self.assertEqual(response["statistics"]["sources_with_rows"], ["monthly_payment", "parking"])
+        self.assertEqual({item["source"]: item["state"] for item in response["source_coverage"]}, {
+            "parking": "available",
+            "solo_wash": "available",
+            "monthly_payment": "available",
+            "night_charge": "available",
+            "closure": "available",
+            "logical_deletion": "available",
+        })
+        self.assertNotIn("night_charge", response["statistics"]["sources_with_rows"])
+        self.assertEqual(response["historical_completeness"]["status"], "complete")
+
+    @patch("app.repositories.reporting_repo.db_conn")
+    def test_plate_history_repository_marks_unavailable_sources_without_fabricated_rows(self, db_conn):
+        from app.repositories.reporting_repo import get_plate_history
+
+        conn = _PlateHistoryConnection(
+            {
+                "FROM ingresos i": [],
+                "FROM operaciones_servicio": [],
+                "FROM pagos_mensuales": [],
+                "FROM cobros_noches": RuntimeError("missing table"),
+                "FROM cierres_diarios": [],
+                "FROM ingresos_eliminados": RuntimeError("missing table"),
+            }
+        )
+        db_conn.return_value = nullcontext(conn)
+
+        response = get_plate_history("AB123CD", datetime(2026, 1, 1), datetime(2026, 1, 2), limit=500)
+
+        coverage = {item["source"]: item["state"] for item in response["source_coverage"]}
+        self.assertEqual(coverage["night_charge"], "unavailable")
+        self.assertEqual(coverage["logical_deletion"], "unavailable")
+        self.assertEqual(response["timeline"], [])
+        self.assertEqual(response["historical_completeness"]["status"], "unavailable")
+        self.assertEqual(
+            response["historical_completeness"]["unavailable_inputs"],
+            ["logical_deletion", "night_charge"],
+        )
+
+
+class _PlateHistoryConnection:
+    def __init__(self, results_by_fragment):
+        self.results_by_fragment = results_by_fragment
+
+    def execute(self, statement, _params=None):
+        sql = str(statement)
+        for fragment, result in self.results_by_fragment.items():
+            if fragment in sql:
+                if isinstance(result, Exception):
+                    raise result
+                return _PlateHistoryResult(result)
+        raise AssertionError(f"Unexpected SQL: {sql}")
+
+
+class _PlateHistoryResult:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def mappings(self):
+        return self
+
+    def all(self):
+        return self.rows
 
 
 if __name__ == "__main__":

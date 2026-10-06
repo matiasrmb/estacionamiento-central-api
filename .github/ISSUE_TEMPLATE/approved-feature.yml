@@ -1,0 +1,65 @@
+name: Approved feature
+description: Track approved feature work before implementation or PR submission.
+title: "feat: "
+labels:
+  - type:feature
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for feature work that is approved for implementation. Every PR must link an approved issue.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: Describe the user-facing or operational outcome.
+      placeholder: What are we adding or changing?
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: List what is included in this issue.
+      placeholder: |
+        - Backend/API changes
+        - Tests
+        - Documentation or specs
+    validations:
+      required: true
+
+  - type: textarea
+    id: out-of-scope
+    attributes:
+      label: Out of scope
+      description: List boundaries that must not be changed.
+      placeholder: |
+        - Unrelated modules
+        - Remote/deployment work
+    validations:
+      required: true
+
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification
+      description: List the commands or evidence expected before closing.
+      placeholder: |
+        - python -m unittest discover tests
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: approval
+    attributes:
+      label: Approval
+      description: Maintainer approval is required before implementation or PR submission.
+      options:
+        - label: This issue is approved for implementation.
+          required: true
+        - label: The resulting PR must link this issue and use exactly one type:* label.
+          required: true
+    validations:
+      required: true

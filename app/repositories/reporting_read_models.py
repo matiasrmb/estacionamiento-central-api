@@ -40,6 +40,19 @@ CANONICAL_METRIC_ALIASES = {
     NET_REVENUE_TOTAL: OPERATIONAL_NET_TOTAL_ALIAS,
     MONTHLY_PAYMENTS_COLLECTED_TOTAL: MENSUALIDAD_SALES_TOTAL_ALIAS,
 }
+OPERATION_FILTER_KEYS = {"category", "operator", "plate"}
+OPERATION_CATEGORIES = {
+    "parking",
+    "bathroom",
+    "solo_wash",
+    "night_charge",
+    "monthly_payment",
+    "expense",
+}
+OPERATION_SORT_FIELDS = {"occurred_at", "amount", "category"}
+OPERATION_SORT_DIRECTIONS = {"asc", "desc"}
+DEFAULT_OPERATION_PAGE_LIMIT = 100
+MAX_OPERATION_PAGE_LIMIT = 200
 
 METRIC_CATALOG = [
     {
@@ -242,6 +255,83 @@ def build_plate_history_response(plate, bounds, rows=None, coverage=None) -> Dic
         },
         "source_coverage": source_coverage,
         "historical_completeness": completeness,
+    }
+
+
+def validate_operation_filters(filters: Dict[str, Any]) -> Dict[str, str]:
+    normalized = {}
+    for key, value in (filters or {}).items():
+        if key not in OPERATION_FILTER_KEYS:
+            raise ValueError("UNSUPPORTED_OPERATION_FILTER")
+        if value is None or str(value).strip() == "":
+            raise ValueError("INVALID_OPERATION_FILTER")
+
+        normalized_value = str(value).strip()
+        if key == "category" and normalized_value not in OPERATION_CATEGORIES:
+            raise ValueError("UNSUPPORTED_OPERATION_CATEGORY")
+        if key == "plate":
+            normalized_value = normalized_value.upper().replace(" ", "").replace("-", "")
+        normalized[key] = normalized_value
+    return normalized
+
+
+def validate_operation_sort(sort=None, direction=None) -> Dict[str, str]:
+    field = str(sort or "occurred_at").strip()
+    normalized_direction = str(direction or "asc").strip().lower()
+    if field not in OPERATION_SORT_FIELDS:
+        raise ValueError("UNSUPPORTED_OPERATION_SORT")
+    if normalized_direction not in OPERATION_SORT_DIRECTIONS:
+        raise ValueError("UNSUPPORTED_OPERATION_SORT_DIRECTION")
+    return {"field": field, "direction": normalized_direction, "tie_breaker": "operation_id"}
+
+
+def validate_operation_pagination(limit=None, offset=None) -> Dict[str, int]:
+    try:
+        normalized_limit = DEFAULT_OPERATION_PAGE_LIMIT if limit is None else int(limit)
+        normalized_offset = 0 if offset is None else int(offset)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("INVALID_OPERATION_PAGINATION") from exc
+
+    if not 1 <= normalized_limit <= MAX_OPERATION_PAGE_LIMIT or normalized_offset < 0:
+        raise ValueError("INVALID_OPERATION_PAGINATION")
+    return {"limit": normalized_limit, "offset": normalized_offset}
+
+
+def build_operation_pagination_metadata(total: int, limit: int, offset: int) -> Dict[str, Any]:
+    next_offset = offset + limit
+    has_more = next_offset < int(total)
+    return {
+        "total": int(total),
+        "limit": int(limit),
+        "offset": int(offset),
+        "has_more": has_more,
+        "next_offset": next_offset if has_more else None,
+    }
+
+
+def serialize_operation_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    source = row.get("source")
+    source_id = row.get("source_id")
+    return {
+        "operation_id": f"{source}:{source_id}",
+        "source": source,
+        "source_id": source_id,
+        "occurred_at": _iso(row.get("occurred_at")),
+        "amount": int(row.get("amount") or 0),
+        "category": row.get("category"),
+        "operator": row.get("operator"),
+        "plate": row.get("plate"),
+        "description": row.get("description"),
+    }
+
+
+def build_operation_rows_response(period_id, filters, sort, pagination, total, rows) -> Dict[str, Any]:
+    return {
+        "period_id": period_id,
+        "filters": dict(filters),
+        "sort": dict(sort),
+        "pagination": build_operation_pagination_metadata(total, pagination["limit"], pagination["offset"]),
+        "items": [serialize_operation_row(row) for row in rows],
     }
 
 

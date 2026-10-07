@@ -13,9 +13,11 @@ from app.repositories.reporting_read_models import (
     METRIC_CATALOG_VERSION,
     MONTHLY_PAYMENTS_COLLECTED_TOTAL,
     NET_REVENUE_TOTAL,
+    OPERATION_CATEGORIES,
     OPERATIONAL_EXPENSE_TOTAL,
     PLATE_HISTORY_SOURCES,
     VEHICLE_MOVEMENT_COUNT,
+    build_operation_rows_response,
     build_audit_inventory,
     build_capacity,
     build_historical_capacity_completeness,
@@ -125,6 +127,16 @@ PLATE_HISTORY_SOURCE_QUERIES = dict(zip(PLATE_HISTORY_SOURCES, (
         LIMIT :limit
     """,
 )))
+OPERATION_FILTER_SQL = {
+    "category": "category = :category",
+    "operator": "operator = :operator",
+    "plate": "plate = :plate",
+}
+OPERATION_SORT_SQL = {
+    "occurred_at": "occurred_at",
+    "amount": "amount",
+    "category": "category",
+}
 
 
 def get_open_dashboard() -> Dict[str, Any]:
@@ -285,6 +297,59 @@ def get_plate_history(plate: str, start: datetime, end: datetime, limit: int = 5
     )
 
 
+def get_closed_period_operation_rows(
+    cierre_id: int,
+    filters: Dict[str, str],
+    sort: Dict[str, str],
+    pagination: Dict[str, int],
+) -> Dict[str, Any]:
+    with db_conn() as conn:
+        closure = _get_closure_window(conn, cierre_id)
+        params = {
+            "id_cierre": cierre_id,
+            "start": closure["fecha_inicio"],
+            "end": closure["fecha_cierre"],
+            "limit": pagination["limit"],
+            "offset": pagination["offset"],
+        }
+        where_sql = _operation_filter_sql(filters, params)
+        base_sql = _operation_rows_base_sql()
+        total = int(
+            conn.execute(
+                text(f"SELECT COUNT(*) FROM ({base_sql}) operation_rows WHERE {where_sql}"),
+                params,
+            ).scalar()
+            or 0
+        )
+        rows = [
+            dict(row)
+            for row in conn.execute(
+                text(
+                    f"""
+                    SELECT source, source_id, occurred_at, amount, category, operator, plate, description
+                    FROM ({base_sql}) operation_rows
+                    WHERE {where_sql}
+                    ORDER BY {_operation_order_sql(sort)}
+                    LIMIT :limit OFFSET :offset
+                    """
+                ),
+                params,
+            ).mappings().all()
+        ]
+
+    return build_operation_rows_response(
+        f"closure:{cierre_id}",
+        filters,
+        sort,
+        pagination,
+        total,
+        rows,
+    )
+
+
+list_operation_rows = get_closed_period_operation_rows
+
+
 def _summary(period_id, start, end, state, income, expenses, mensualidades, vehicle_count):
     metrics = _with_legacy_metric_aliases({
         COLLECTED_SOURCES_TOTAL: income,
@@ -322,6 +387,137 @@ def _active_monthly_customers(conn) -> int:
         ).scalar()
         or 0
     )
+
+
+def _get_closure_window(conn, cierre_id: int):
+    closure = conn.execute(
+        text("""
+            SELECT id_cierre, fecha_inicio, fecha_cierre
+            FROM cierres_diarios
+            WHERE id_cierre = :id_cierre
+        """),
+        {"id_cierre": cierre_id},
+    ).mappings().first()
+    if closure is None:
+        raise LookupError("CLOSURE_NOT_FOUND")
+    return closure
+
+
+def _operation_filter_sql(filters: Dict[str, str], params: Dict[str, Any]) -> str:
+    clauses = ["occurred_at >= :start", "occurred_at <= :end"]
+    for key, value in filters.items():
+        if key not in OPERATION_FILTER_SQL:
+            raise ValueError("UNSUPPORTED_OPERATION_FILTER")
+        clauses.append(OPERATION_FILTER_SQL[key])
+        params[key] = value
+    return " AND ".join(clauses)
+
+
+def _operation_order_sql(sort: Dict[str, str]) -> str:
+    field = OPERATION_SORT_SQL.get(sort["field"])
+    direction = sort["direction"].upper()
+    if field is None or direction not in {"ASC", "DESC"}:
+        raise ValueError("UNSUPPORTED_OPERATION_SORT")
+    return f"{field} {direction}, source ASC, source_id ASC"
+
+
+def _operation_rows_base_sql() -> str:
+    category_selects = " UNION ALL ".join(_operation_category_select(category) for category in sorted(OPERATION_CATEGORIES))
+    return category_selects
+
+
+def _operation_category_select(category: str) -> str:
+    return {
+        "parking": """
+            SELECT
+                'parking' AS source,
+                i.id_ingreso AS source_id,
+                i.fecha_hora_salida AS occurred_at,
+                COALESCE(i.tarifa_aplicada, 0) AS amount,
+                'parking' AS category,
+                i.usuario AS operator,
+                v.patente AS plate,
+                'Parking exit' AS description
+            FROM ingresos i
+            JOIN vehiculos v ON v.id_vehiculo = i.id_vehiculo
+            WHERE i.fecha_hora_salida IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM ingresos_eliminados ie
+                  WHERE ie.id_ingreso_original = i.id_ingreso
+              )
+        """,
+        "bathroom": """
+            SELECT
+                'bathroom' AS source,
+                b.id AS source_id,
+                b.fecha_hora AS occurred_at,
+                COALESCE(b.monto, 0) AS amount,
+                'bathroom' AS category,
+                b.usuario AS operator,
+                NULL AS plate,
+                'Bathroom use' AS description
+            FROM usos_bano b
+            WHERE b.id_cierre = :id_cierre
+        """,
+        "solo_wash": """
+            SELECT
+                'solo_wash' AS source,
+                o.id_operacion_servicio AS source_id,
+                o.fecha_hora_fin AS occurred_at,
+                COALESCE(o.valor_lavado_snapshot, 0) AS amount,
+                'solo_wash' AS category,
+                o.usuario_fin AS operator,
+                o.patente AS plate,
+                o.tipo_vehiculo_lavado_snapshot AS description
+            FROM operaciones_servicio o
+            WHERE o.fecha_hora_fin IS NOT NULL
+              AND o.estado = 'FINALIZADO_COBRADO'
+              AND o.id_ingreso_generado IS NULL
+        """,
+        "night_charge": """
+            SELECT
+                'night_charge' AS source,
+                n.id_cobro_noche AS source_id,
+                n.fecha_hora_pago AS occurred_at,
+                COALESCE(n.monto_snapshot, 0) AS amount,
+                'night_charge' AS category,
+                n.usuario AS operator,
+                v.patente AS plate,
+                'Night charge' AS description
+            FROM cobros_noches n
+            JOIN ingresos i ON i.id_ingreso = n.id_ingreso
+            JOIN vehiculos v ON v.id_vehiculo = i.id_vehiculo
+            WHERE n.id_cierre = :id_cierre
+              AND n.estado = 'PAGADO'
+        """,
+        "monthly_payment": """
+            SELECT
+                'monthly_payment' AS source,
+                p.id_pago_mensual AS source_id,
+                p.fecha_pago AS occurred_at,
+                COALESCE(p.monto_snapshot, 0) AS amount,
+                'monthly_payment' AS category,
+                p.usuario AS operator,
+                v.patente AS plate,
+                p.observacion AS description
+            FROM pagos_mensuales p
+            JOIN vehiculos v ON v.id_vehiculo = p.id_vehiculo
+            WHERE p.id_cierre = :id_cierre
+        """,
+        "expense": """
+            SELECT
+                'expense' AS source,
+                g.id_gasto AS source_id,
+                g.fecha_hora AS occurred_at,
+                COALESCE(g.monto, 0) AS amount,
+                'expense' AS category,
+                g.usuario AS operator,
+                NULL AS plate,
+                g.descripcion AS description
+            FROM gastos_operacion g
+            WHERE g.id_cierre = :id_cierre
+        """,
+    }[category]
 
 
 def _plate_history_rows(source, source_rows):

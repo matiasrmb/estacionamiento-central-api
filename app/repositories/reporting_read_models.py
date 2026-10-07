@@ -3,8 +3,10 @@ from typing import Any, Dict, Iterable, List
 
 
 METRIC_CATALOG_VERSION = "2026-09-29"
-TOTAL_PARKING_SPACES = 50
+DEFAULT_TOTAL_PARKING_SPACES = 50
+TOTAL_PARKING_SPACES = DEFAULT_TOTAL_PARKING_SPACES
 COMPLETENESS_STATUSES = {"complete", "partial", "unavailable"}
+HISTORICAL_CAPACITY_LIMITATION = "historical-capacity-limited"
 COVERAGE_AVAILABLE = "available"
 COVERAGE_PARTIAL = "partial"
 COVERAGE_UNAVAILABLE = "unavailable"
@@ -18,38 +20,57 @@ PLATE_HISTORY_SOURCES = (
     "logical_deletion",
 )
 AUDIT_INVENTORY_UNSUPPORTED_BEHAVIORS = [
+    "formal_accounting_ledger_storage",
     "persisted_anomaly_records",
     "event_sourced_history",
     "transversal_audit_log",
 ]
 CANONICAL_EXPORT_FORMATS = {"pdf", "xlsx"}
 LEGACY_EXPORT_FORMATS = {"csv"}
+COLLECTED_SOURCES_TOTAL = "collected_sources_total"
+OPERATIONAL_EXPENSE_TOTAL = "operational_expense_total"
+NET_REVENUE_TOTAL = "net_revenue_total"
+MONTHLY_PAYMENTS_COLLECTED_TOTAL = "monthly_payments_collected_total"
+VEHICLE_MOVEMENT_COUNT = "vehicle_movement_count"
+OPERATIONAL_INCOME_TOTAL_ALIAS = "operational_income_total"
+OPERATIONAL_NET_TOTAL_ALIAS = "operational_net_total"
+MENSUALIDAD_SALES_TOTAL_ALIAS = "mensualidad_sales_total"
+CANONICAL_METRIC_ALIASES = {
+    COLLECTED_SOURCES_TOTAL: OPERATIONAL_INCOME_TOTAL_ALIAS,
+    NET_REVENUE_TOTAL: OPERATIONAL_NET_TOTAL_ALIAS,
+    MONTHLY_PAYMENTS_COLLECTED_TOTAL: MENSUALIDAD_SALES_TOTAL_ALIAS,
+}
 
 METRIC_CATALOG = [
     {
-        "name": "operational_income_total",
+        "name": COLLECTED_SOURCES_TOTAL,
         "meaning": "Payments collected from operational sources",
         "sign": "positive",
+        "aliases": [OPERATIONAL_INCOME_TOTAL_ALIAS],
     },
     {
-        "name": "operational_expense_total",
+        "name": OPERATIONAL_EXPENSE_TOTAL,
         "meaning": "Operational expenses",
         "sign": "positive_expense_negative_result",
+        "aliases": [],
     },
     {
-        "name": "operational_net_total",
+        "name": NET_REVENUE_TOTAL,
         "meaning": "Income minus expenses",
         "sign": "signed",
+        "aliases": [OPERATIONAL_NET_TOTAL_ALIAS],
     },
     {
-        "name": "mensualidad_sales_total",
-        "meaning": "Commercial mensualidad activity",
+        "name": MONTHLY_PAYMENTS_COLLECTED_TOTAL,
+        "meaning": "Monthly payments collected in the reporting period",
         "sign": "positive",
+        "aliases": [MENSUALIDAD_SALES_TOTAL_ALIAS],
     },
     {
-        "name": "vehicle_movement_count",
+        "name": VEHICLE_MOVEMENT_COUNT,
         "meaning": "Vehicle entries/exits in the period",
         "sign": "count",
+        "aliases": [],
     },
 ]
 
@@ -121,9 +142,14 @@ def build_reporting_summary(
         expenses_in_period = _rows_in_operator_session(expenses_in_period, selected_session)
         mensualidades_in_period = _rows_in_operator_session(mensualidades_in_period, selected_session)
 
-    operational_income_total = _sum_amount(movements_in_period)
+    collected_sources_total = _sum_amount(movements_in_period)
     operational_expense_total = _sum_amount(expenses_in_period)
-    mensualidad_sales_total = _sum_amount(mensualidades_in_period)
+    monthly_payments_collected_total = _sum_amount(mensualidades_in_period)
+    net_revenue_total = (
+        collected_sources_total
+        + monthly_payments_collected_total
+        - operational_expense_total
+    )
 
     return {
         "period": {
@@ -134,13 +160,15 @@ def build_reporting_summary(
         },
         "catalog_version": METRIC_CATALOG_VERSION,
         "filters": {"operator_session_id": operator_session_id},
-        "metrics": {
-            "operational_income_total": operational_income_total,
-            "operational_expense_total": operational_expense_total,
-            "operational_net_total": operational_income_total + mensualidad_sales_total - operational_expense_total,
-            "mensualidad_sales_total": mensualidad_sales_total,
-            "vehicle_movement_count": len(movements_in_period),
-        },
+        "metrics": _with_legacy_metric_aliases(
+            {
+                COLLECTED_SOURCES_TOTAL: collected_sources_total,
+                OPERATIONAL_EXPENSE_TOTAL: operational_expense_total,
+                NET_REVENUE_TOTAL: net_revenue_total,
+                MONTHLY_PAYMENTS_COLLECTED_TOTAL: monthly_payments_collected_total,
+                VEHICLE_MOVEMENT_COUNT: len(movements_in_period),
+            }
+        ),
         "pagination": {
             "summary_row_count": len(movements_in_period),
             "summary_is_complete": True,
@@ -148,10 +176,11 @@ def build_reporting_summary(
     }
 
 
-def build_capacity(active_monthly_customers=None) -> Dict[str, Any]:
+def build_capacity(active_monthly_customers=None, total_spaces=None) -> Dict[str, Any]:
+    configured_total = _configured_total_spaces(total_spaces)
     if active_monthly_customers is None:
         return {
-            "total_spaces": TOTAL_PARKING_SPACES,
+            "total_spaces": configured_total,
             "reserved_monthly_spaces": None,
             "effective_transient_capacity": None,
             "source_state": "unavailable",
@@ -160,9 +189,9 @@ def build_capacity(active_monthly_customers=None) -> Dict[str, Any]:
 
     reserved = int(active_monthly_customers)
     return {
-        "total_spaces": TOTAL_PARKING_SPACES,
+        "total_spaces": configured_total,
         "reserved_monthly_spaces": reserved,
-        "effective_transient_capacity": max(TOTAL_PARKING_SPACES - reserved, 0),
+        "effective_transient_capacity": max(configured_total - reserved, 0),
         "source_state": "resolved",
         "source": "vehiculos.tipo_cliente='mensual' AND activo=1",
     }
@@ -176,6 +205,14 @@ def build_historical_completeness(status="complete", missing_ranges=None, unavai
         "missing_ranges": list(missing_ranges or []),
         "unavailable_inputs": list(unavailable_inputs or []),
     }
+
+
+def build_historical_capacity_completeness(missing_ranges=None) -> Dict[str, Any]:
+    return build_historical_completeness(
+        status="partial",
+        missing_ranges=missing_ranges,
+        unavailable_inputs=[HISTORICAL_CAPACITY_LIMITATION],
+    )
 
 
 def build_plate_history_response(plate, bounds, rows=None, coverage=None) -> Dict[str, Any]:
@@ -224,21 +261,35 @@ def build_closed_report(
         "state": "closed",
     }
     summary = build_reporting_summary(period, vehicle_movements, expenses, mensualidades)
-    closure_metrics = {
-        "operational_income_total": int(closure.get("operational_income_total") or 0),
-        "operational_expense_total": int(closure.get("operational_expense_total") or 0),
-        "mensualidad_sales_total": int(closure.get("mensualidad_sales_total") or 0),
-    }
-    closure_metrics["operational_net_total"] = (
-        closure_metrics["operational_income_total"]
-        + closure_metrics["mensualidad_sales_total"]
-        - closure_metrics["operational_expense_total"]
+    collected_sources_total = int(
+        closure.get(COLLECTED_SOURCES_TOTAL)
+        or closure.get(OPERATIONAL_INCOME_TOTAL_ALIAS)
+        or 0
+    )
+    operational_expense_total = int(closure.get(OPERATIONAL_EXPENSE_TOTAL) or 0)
+    monthly_payments_collected_total = int(
+        closure.get(MONTHLY_PAYMENTS_COLLECTED_TOTAL)
+        or closure.get(MENSUALIDAD_SALES_TOTAL_ALIAS)
+        or 0
+    )
+    closure_metrics = _with_legacy_metric_aliases(
+        {
+            COLLECTED_SOURCES_TOTAL: collected_sources_total,
+            OPERATIONAL_EXPENSE_TOTAL: operational_expense_total,
+            MONTHLY_PAYMENTS_COLLECTED_TOTAL: monthly_payments_collected_total,
+            NET_REVENUE_TOTAL: (
+                collected_sources_total
+                + monthly_payments_collected_total
+                - operational_expense_total
+            ),
+        }
     )
     operation_totals = summary["metrics"]
     discrepancy_metrics = {
         name: operation_totals.get(name, 0) - closure_metrics.get(name, 0)
-        for name in ("operational_income_total", "operational_expense_total", "operational_net_total")
+        for name in (COLLECTED_SOURCES_TOTAL, OPERATIONAL_EXPENSE_TOTAL, NET_REVENUE_TOTAL)
     }
+    discrepancy_metrics = _with_legacy_metric_aliases(discrepancy_metrics)
 
     return {
         "report_id": f"closed:{closure['id']}",
@@ -247,7 +298,12 @@ def build_closed_report(
         "closure_reference": {"id": closure["id"], "metrics": closure_metrics},
         "operation_totals": operation_totals,
         "capacity": build_capacity(active_monthly_customers),
-        "historical_completeness": historical_completeness or build_historical_completeness(),
+        "historical_completeness": historical_completeness
+        or (
+            build_historical_capacity_completeness()
+            if active_monthly_customers is None
+            else build_historical_completeness()
+        ),
         "operation_drill_down": _operation_drill_down(vehicle_movements, expenses or [], period),
         "discrepancy": {
             "status": "none" if all(value == 0 for value in discrepancy_metrics.values()) else "delta",
@@ -263,6 +319,7 @@ def build_audit_inventory(period_id: str, coverage=None) -> Dict[str, Any]:
         "closures": COVERAGE_AVAILABLE,
         "operational_rows": COVERAGE_AVAILABLE,
         "payments": COVERAGE_AVAILABLE,
+        "expense": COVERAGE_AVAILABLE,
         "expenses": COVERAGE_AVAILABLE,
         "print_jobs": COVERAGE_PARTIAL,
         "users": COVERAGE_AVAILABLE,
@@ -274,15 +331,32 @@ def build_audit_inventory(period_id: str, coverage=None) -> Dict[str, Any]:
         "closure": COVERAGE_AVAILABLE,
         "logical_deletion": COVERAGE_AVAILABLE,
     }
-    available_sources = [source for source, state in coverage.items() if state in {COVERAGE_AVAILABLE, COVERAGE_PARTIAL}]
-    unavailable_sources = [source for source, state in coverage.items() if state == COVERAGE_UNAVAILABLE]
+    coverage_items = [
+        _build_audit_coverage_item(source, state)
+        for source, state in sorted(coverage.items())
+    ]
+    available_sources = [
+        item["source"]
+        for item in coverage_items
+        if item["state"] in {COVERAGE_AVAILABLE, COVERAGE_PARTIAL}
+    ]
+    partial_sources = [item["source"] for item in coverage_items if item["state"] == COVERAGE_PARTIAL]
+    unavailable_sources = [item["source"] for item in coverage_items if item["state"] == COVERAGE_UNAVAILABLE]
+    affected_scopes = {
+        item["source"]: "historical_evidence"
+        for item in coverage_items
+        if item["state"] in {COVERAGE_PARTIAL, COVERAGE_UNAVAILABLE}
+    }
     return {
         "period_id": period_id,
-        "coverage": [{"source": source, "state": state} for source, state in coverage.items()],
+        "coverage": coverage_items,
         "available_sources": available_sources,
+        "partial_sources": partial_sources,
         "unavailable_sources": unavailable_sources,
+        "affected_scopes": affected_scopes,
         "unavailable_history": ["before_first_closure", "after_current_rows"],
         "requires_event_sourcing": False,
+        "supports_persisted_anomalies": False,
         "unsupported_behaviors": list(AUDIT_INVENTORY_UNSUPPORTED_BEHAVIORS),
     }
 
@@ -306,6 +380,9 @@ def build_report_export(report, export_format: str, generated_at: datetime) -> D
         "source_state": report["source_state"],
         "template_version": "reporting-export-2026-09-29",
         "compatibility": "legacy-only" if normalized_format == "csv" else "canonical",
+        "canonical_contract": normalized_format in CANONICAL_EXPORT_FORMATS,
+        "canonical_source": "api-report-fields",
+        "delivery_blocking": False,
     }
 
     if normalized_format == "csv":
@@ -327,6 +404,20 @@ def _rows_in_period(rows: Iterable[Dict[str, Any]], period: Dict[str, Any]) -> L
         for row in rows
         if period["start"] <= row["occurred_at"] < period["end"]
     ]
+
+
+def _with_legacy_metric_aliases(metrics: Dict[str, Any]) -> Dict[str, Any]:
+    aliased_metrics = metrics.copy()
+    for canonical_name, alias_name in CANONICAL_METRIC_ALIASES.items():
+        if canonical_name in aliased_metrics:
+            aliased_metrics[alias_name] = aliased_metrics[canonical_name]
+    return aliased_metrics
+
+
+def _configured_total_spaces(total_spaces) -> int:
+    if total_spaces is None:
+        return DEFAULT_TOTAL_PARKING_SPACES
+    return max(int(total_spaces), 0)
 
 
 def _find_operator_session(operator_sessions, operator_session_id):
@@ -438,6 +529,7 @@ def _render_pdf_export(metadata, report):
             f"Source State: {metadata['source_state']}",
             f"Template Version: {metadata['template_version']}",
             f"Completeness: {metadata['historical_completeness']['status']}",
+            f"Delivery Blocking: {metadata['delivery_blocking']}",
             f"Operational Income Total: {metrics['operational_income_total']}",
             f"Operational Expense Total: {metrics['operational_expense_total']}",
             f"Mensualidad Sales Total: {metrics['mensualidad_sales_total']}",
@@ -455,12 +547,22 @@ def _render_xlsx_export(metadata, report):
         ["closure_reference_id", metadata["closure_reference_id"]],
         ["format", metadata["format"]],
         ["completeness", metadata["historical_completeness"]["status"]],
+        ["delivery_blocking", metadata["delivery_blocking"]],
         ["operational_income_total", metrics["operational_income_total"]],
         ["operational_expense_total", metrics["operational_expense_total"]],
         ["mensualidad_sales_total", metrics["mensualidad_sales_total"]],
         ["operational_net_total", metrics["operational_net_total"]],
     ]
     return "\n".join(f"{key}\t{value}" for key, value in rows)
+
+
+def _build_audit_coverage_item(source, state):
+    if state not in COVERAGE_STATES:
+        raise ValueError("UNSUPPORTED_COVERAGE_STATE")
+    return {
+        "source": source,
+        "state": state,
+    }
 
 
 def _iso(value):

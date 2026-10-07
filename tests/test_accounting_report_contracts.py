@@ -71,6 +71,28 @@ class AccountingReportContractsTests(unittest.TestCase):
         self.assertEqual(summary["total_general"], 5300)
         self.assertEqual(summary["total_gastos"], 500)
         self.assertEqual(summary["total_neto"], 4800)
+        self.assertEqual(summary["collected_sources_total"], 3300)
+        self.assertEqual(summary["monthly_payments_collected_total"], 2000)
+        self.assertEqual(summary["operational_expense_total"], 500)
+        self.assertEqual(summary["net_revenue_total"], 4800)
+        self.assertEqual(summary["operational_income_total"], 3300)
+        self.assertEqual(summary["mensualidad_sales_total"], 2000)
+        self.assertEqual(summary["operational_net_total"], 4800)
+
+    def test_report_totals_include_charged_solo_wash_and_exclude_active_wash(self):
+        summary = build_report_totals(
+            parking_movements=[],
+            bathroom_uses=[],
+            wash_only_operations=[
+                {"estado": "FINALIZADO_COBRADO", "valor_lavado_snapshot": 800},
+                {"estado": "ACTIVO", "valor_lavado_snapshot": 900},
+            ],
+        )
+
+        self.assertEqual(summary["total_lavados_solos"], 1)
+        self.assertEqual(summary["total_lavados_solos_monto"], 800)
+        self.assertEqual(summary["collected_sources_total"], 800)
+        self.assertEqual(summary["net_revenue_total"], 800)
 
 
 if __name__ == "__main__":

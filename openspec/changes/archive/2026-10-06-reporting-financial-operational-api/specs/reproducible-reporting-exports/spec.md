@@ -1,10 +1,6 @@
-# Reproducible Reporting Exports Specification
+# Delta for Reproducible Reporting Exports
 
-## Purpose
-
-Define API-only export behavior for reproducible closed reports. This spec MUST NOT require Desktop, Mobile, or Installer implementation.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Closed-report export formats
 
@@ -23,27 +19,6 @@ PDF and XLSX exports for closed reports SHOULD remain roadmap-compatible and non
 - GIVEN canonical API reporting is ready but PDF or XLSX export work is not
 - WHEN this derivative is delivered
 - THEN canonical reporting MUST NOT be blocked by missing PDF or XLSX work
-
-### Requirement: Reproducible metadata
-
-Exports MUST include enough metadata to compare two exports of the same closed report without relying on client UI state.
-
-#### Scenario: Repeat export of same closure
-
-- GIVEN canonical source data for a closed report has not changed
-- WHEN the same PDF or XLSX export is generated again
-- THEN report identity, closure period, totals, and completeness metadata MUST match
-
-### Requirement: Completeness visibility in exports
-
-Exports MUST carry `complete`, `partial`, or `unavailable` historical completeness and MUST NOT imply partial data is complete.
-
-#### Scenario: Partial report export
-
-- GIVEN a report has partial historical completeness
-- WHEN an export is generated
-- THEN the export metadata MUST state `partial`
-- AND unavailable inputs MUST remain visible to consumers
 
 ### Requirement: CSV compatibility decision gate
 

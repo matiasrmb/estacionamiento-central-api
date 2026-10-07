@@ -4,11 +4,14 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from app.repositories.reporting_read_models import (
+    CANONICAL_METRIC_ALIASES,
+    HISTORICAL_CAPACITY_LIMITATION,
     PLATE_HISTORY_SOURCES,
     build_audit_inventory,
     build_plate_history_response,
     build_capacity,
     build_historical_completeness,
+    build_historical_capacity_completeness,
     build_metric_catalog,
     build_operational_periods,
     build_reporting_summary,
@@ -21,13 +24,35 @@ class ReportingReadModelsTests(unittest.TestCase):
 
         self.assertEqual(catalog["version"], "2026-09-29")
         metrics = {metric["name"]: metric for metric in catalog["metrics"]}
-        self.assertEqual(metrics["operational_income_total"]["sign"], "positive")
+        self.assertEqual(metrics["collected_sources_total"]["sign"], "positive")
         self.assertEqual(metrics["operational_expense_total"]["sign"], "positive_expense_negative_result")
-        self.assertEqual(metrics["operational_net_total"]["sign"], "signed")
-        self.assertEqual(metrics["mensualidad_sales_total"]["sign"], "positive")
+        self.assertEqual(metrics["net_revenue_total"]["sign"], "signed")
+        self.assertEqual(metrics["monthly_payments_collected_total"]["sign"], "positive")
         self.assertEqual(metrics["vehicle_movement_count"]["sign"], "count")
+        self.assertEqual(metrics["collected_sources_total"]["aliases"], ["operational_income_total"])
+        self.assertEqual(metrics["net_revenue_total"]["aliases"], ["operational_net_total"])
+        self.assertEqual(metrics["monthly_payments_collected_total"]["aliases"], ["mensualidad_sales_total"])
         self.assertNotIn("taxes", metrics)
         self.assertNotIn("commissions", metrics)
+
+    def test_legacy_metric_aliases_match_canonical_values(self):
+        period = {
+            "id": "closure:20:21",
+            "start": datetime(2026, 9, 28, 9, 30),
+            "end": datetime(2026, 9, 28, 19, 30),
+            "state": "closed",
+        }
+
+        summary = build_reporting_summary(
+            period=period,
+            vehicle_movements=[{"occurred_at": datetime(2026, 9, 28, 11, 0), "amount": 1000}],
+            expenses=[{"occurred_at": datetime(2026, 9, 28, 12, 0), "amount": 100}],
+            mensualidades=[{"occurred_at": datetime(2026, 9, 28, 13, 0), "amount": 250}],
+        )
+
+        metrics = summary["metrics"]
+        for canonical_name, alias_name in CANONICAL_METRIC_ALIASES.items():
+            self.assertEqual(metrics[alias_name], metrics[canonical_name])
 
     def test_reporting_summary_calculates_net_and_complete_400_row_count(self):
         movements = [
@@ -66,11 +91,14 @@ class ReportingReadModelsTests(unittest.TestCase):
             mensualidades=mensualidades,
         )
 
-        self.assertEqual(summary["metrics"]["operational_income_total"], 4000)
+        self.assertEqual(summary["metrics"]["collected_sources_total"], 4000)
         self.assertEqual(summary["metrics"]["operational_expense_total"], 150)
+        self.assertEqual(summary["metrics"]["net_revenue_total"], 5850)
+        self.assertEqual(summary["metrics"]["monthly_payments_collected_total"], 2000)
+        self.assertEqual(summary["metrics"]["vehicle_movement_count"], 400)
+        self.assertEqual(summary["metrics"]["operational_income_total"], 4000)
         self.assertEqual(summary["metrics"]["operational_net_total"], 5850)
         self.assertEqual(summary["metrics"]["mensualidad_sales_total"], 2000)
-        self.assertEqual(summary["metrics"]["vehicle_movement_count"], 400)
         self.assertEqual(summary["pagination"]["summary_row_count"], 400)
 
     def test_operational_periods_are_closure_to_closure_and_can_cross_midnight(self):
@@ -166,6 +194,15 @@ class ReportingReadModelsTests(unittest.TestCase):
         self.assertEqual(capacity["effective_transient_capacity"], 38)
         self.assertEqual(capacity["source_state"], "resolved")
 
+    def test_capacity_uses_configured_total_spaces_with_default_50(self):
+        default_capacity = build_capacity(active_monthly_customers=5)
+        configured_capacity = build_capacity(active_monthly_customers=5, total_spaces=72)
+
+        self.assertEqual(default_capacity["total_spaces"], 50)
+        self.assertEqual(default_capacity["effective_transient_capacity"], 45)
+        self.assertEqual(configured_capacity["total_spaces"], 72)
+        self.assertEqual(configured_capacity["effective_transient_capacity"], 67)
+
     def test_capacity_marks_unavailable_without_active_monthly_source(self):
         capacity = build_capacity()
 
@@ -186,6 +223,12 @@ class ReportingReadModelsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             build_historical_completeness("unknown")
 
+    def test_historical_capacity_completeness_marks_capacity_limitation(self):
+        completeness = build_historical_capacity_completeness()
+
+        self.assertEqual(completeness["status"], "partial")
+        self.assertIn(HISTORICAL_CAPACITY_LIMITATION, completeness["unavailable_inputs"])
+
     def test_audit_inventory_exposes_plate_history_source_coverage(self):
         inventory = build_audit_inventory(period_id="closure:44")
 
@@ -193,6 +236,23 @@ class ReportingReadModelsTests(unittest.TestCase):
         for source in PLATE_HISTORY_SOURCES:
             self.assertIn(source, coverage)
             self.assertEqual(coverage[source], "available")
+
+    def test_audit_inventory_exposes_existing_financial_operational_sources(self):
+        inventory = build_audit_inventory(period_id="closure:44")
+
+        coverage = {item["source"]: item["state"] for item in inventory["coverage"]}
+        for source in (
+            "parking",
+            "solo_wash",
+            "monthly_payment",
+            "night_charge",
+            "closure",
+            "expense",
+            "logical_deletion",
+        ):
+            self.assertIn(source, coverage)
+            self.assertEqual(coverage[source], "available")
+        self.assertNotIn("transversal_audit_log", coverage)
 
     def test_audit_inventory_marks_unavailable_plate_history_sources(self):
         inventory = build_audit_inventory(
@@ -215,13 +275,40 @@ class ReportingReadModelsTests(unittest.TestCase):
         self.assertIn("night_charge", inventory["unavailable_sources"])
         self.assertIn("logical_deletion", inventory["unavailable_sources"])
 
+    def test_audit_inventory_marks_partial_unavailable_scope_deterministically(self):
+        coverage = {
+            "night_charge": "unavailable",
+            "parking": "available",
+            "solo_wash": "partial",
+            "closure": "available",
+        }
+
+        first = build_audit_inventory(period_id="closure:44", coverage=coverage)
+        second = build_audit_inventory(period_id="closure:44", coverage=dict(reversed(list(coverage.items()))))
+
+        self.assertEqual(first["coverage"], second["coverage"])
+        self.assertEqual(first["coverage"], [
+            {"source": "closure", "state": "available"},
+            {"source": "night_charge", "state": "unavailable"},
+            {"source": "parking", "state": "available"},
+            {"source": "solo_wash", "state": "partial"},
+        ])
+        self.assertEqual(first["affected_scopes"], {
+            "night_charge": "historical_evidence",
+            "solo_wash": "historical_evidence",
+        })
+        self.assertEqual(first["partial_sources"], ["solo_wash"])
+        self.assertEqual(first["unavailable_sources"], ["night_charge"])
+
     def test_audit_inventory_keeps_persisted_anomalies_and_event_sourcing_out_of_scope(self):
         inventory = build_audit_inventory(period_id="closure:44")
 
         self.assertFalse(inventory["requires_event_sourcing"])
+        self.assertFalse(inventory["supports_persisted_anomalies"])
         self.assertEqual(
             inventory["unsupported_behaviors"],
             [
+                "formal_accounting_ledger_storage",
                 "persisted_anomaly_records",
                 "event_sourced_history",
                 "transversal_audit_log",

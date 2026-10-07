@@ -32,7 +32,8 @@ class ReportingClosedReportsTests(unittest.TestCase):
         self.assertEqual(report["operation_totals"]["operational_net_total"], 900)
         self.assertEqual(report["closure_reference"]["metrics"]["operational_net_total"], 1150)
         self.assertEqual(report["capacity"]["source_state"], "unavailable")
-        self.assertEqual(report["historical_completeness"]["status"], "complete")
+        self.assertEqual(report["historical_completeness"]["status"], "partial")
+        self.assertIn("historical-capacity-limited", report["historical_completeness"]["unavailable_inputs"])
         self.assertEqual(report["operation_drill_down"][0]["canonical_category"], "vehicle_movement")
         self.assertEqual(report["discrepancy"]["status"], "delta")
 
@@ -118,9 +119,68 @@ class ReportingClosedReportsTests(unittest.TestCase):
         report = get_closed_report(80)
 
         self.assertEqual(report["operation_totals"]["operational_net_total"], 1400)
+        self.assertEqual(report["operation_totals"]["net_revenue_total"], 1400)
         self.assertEqual(report["operation_totals"]["mensualidad_sales_total"], 300)
+        self.assertEqual(report["operation_totals"]["monthly_payments_collected_total"], 300)
+        self.assertEqual(report["operation_totals"]["collected_sources_total"], 1200)
+        self.assertEqual(report["closure_reference"]["metrics"]["collected_sources_total"], 1200)
         self.assertEqual(report["capacity"]["reserved_monthly_spaces"], 7)
         self.assertEqual(report["capacity"]["effective_transient_capacity"], 43)
+
+    @patch("app.repositories.reporting_repo.db_conn")
+    def test_repository_closed_report_unknown_closure_fails_safely(self, db_conn):
+        from app.repositories.reporting_repo import get_closed_report
+
+        closure_result = MagicMock()
+        closure_result.mappings.return_value.first.return_value = None
+        conn = MagicMock()
+        conn.execute.return_value = closure_result
+        db_conn.return_value = nullcontext(conn)
+
+        with self.assertRaisesRegex(LookupError, "CLOSURE_NOT_FOUND"):
+            get_closed_report(999)
+
+        conn.execute.assert_called_once()
+
+    @patch("app.repositories.reporting_repo.db_conn")
+    def test_repository_closed_report_uses_closure_timing_and_excludes_active_washes(self, db_conn):
+        from app.repositories.reporting_repo import get_closed_report
+
+        closure_result = MagicMock()
+        closure_result.mappings.return_value.first.return_value = {
+            "id_cierre": 81,
+            "fecha_inicio": datetime(2026, 9, 28, 9, 30),
+            "fecha_cierre": datetime(2026, 9, 29, 2, 0),
+            "total_general": 1800,
+            "total_mensualidades_monto": 500,
+            "total_gastos": 200,
+            "total_neto": 1600,
+        }
+        totals_result = MagicMock()
+        totals_result.mappings.return_value.one.return_value = {
+            "vehicle_count": 1,
+            "parking_income": 1000,
+            "bathroom_income": 100,
+            "wash_income": 200,
+            "night_income": 0,
+            "expenses": 200,
+            "mensualidades": 500,
+        }
+        active_monthly_result = MagicMock()
+        active_monthly_result.scalar.return_value = 3
+        conn = MagicMock()
+        conn.execute.side_effect = [closure_result, totals_result, active_monthly_result]
+        db_conn.return_value = nullcontext(conn)
+
+        report = get_closed_report(81)
+        totals_sql = str(conn.execute.call_args_list[1].args[0])
+
+        self.assertIn("p.id_cierre = :id_cierre", totals_sql)
+        self.assertIn("o.estado = 'FINALIZADO_COBRADO'", totals_sql)
+        self.assertIn("o.id_ingreso_generado IS NULL", totals_sql)
+        self.assertEqual(report["operation_totals"]["collected_sources_total"], 1300)
+        self.assertEqual(report["operation_totals"]["monthly_payments_collected_total"], 500)
+        self.assertEqual(report["operation_totals"]["net_revenue_total"], 1600)
 
 class _AuditInventoryConnection:
     def __init__(self, unavailable_tables=None, empty_tables=None):

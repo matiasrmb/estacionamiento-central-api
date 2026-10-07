@@ -4,6 +4,7 @@ from datetime import datetime
 from unittest.mock import patch
 
 from fastapi import HTTPException
+from starlette.requests import Request
 
 from app.api.v1.endpoints import reporting
 
@@ -14,6 +15,10 @@ def _allowed_roles(function):
         if hasattr(dependency, "allowed_roles"):
             return set(dependency.allowed_roles)
     return set()
+
+
+def _request(query_string=""):
+    return Request({"type": "http", "method": "GET", "path": "/", "query_string": query_string.encode()})
 
 
 class ReportingEndpointTests(unittest.TestCase):
@@ -71,6 +76,82 @@ class ReportingEndpointTests(unittest.TestCase):
 
     def test_plate_history_is_admin_only(self):
         self.assertEqual(_allowed_roles(reporting.get_plate_history), {"admin"})
+
+    def test_operations_report_is_admin_only(self):
+        self.assertEqual(_allowed_roles(reporting.get_operations_report), {"admin"})
+
+    @patch("app.api.v1.endpoints.reporting.list_persisted_operation_rows")
+    def test_operations_report_accepts_closure_period_and_delegates(self, list_operation_rows):
+        list_operation_rows.return_value = {
+            "period_id": "closure:18",
+            "filters": {"category": "parking", "plate": "ABC123"},
+            "sort": {"field": "amount", "direction": "desc", "tie_breaker": "operation_id"},
+            "pagination": {"total": 1, "limit": 25, "offset": 0, "has_more": False, "next_offset": None},
+            "items": [],
+        }
+
+        result = reporting.get_operations_report(
+            _request("period_id=closure:18&category=parking&plate=AB123CD&sort=amount&direction=desc&limit=25&offset=0"),
+            period_id="closure:18",
+            category="parking",
+            plate="AB123CD",
+            sort="amount",
+            direction="desc",
+            limit="25",
+            offset="0",
+        )
+
+        self.assertEqual(result["period_id"], "closure:18")
+        list_operation_rows.assert_called_once_with(
+            18,
+            filters={"category": "parking", "plate": "AB123CD"},
+            sort={"field": "amount", "direction": "desc", "tie_breaker": "operation_id"},
+            pagination={"limit": 25, "offset": 0},
+        )
+
+    def test_operations_report_rejects_unsupported_period_before_repository_access(self):
+        for period_id in ("current", "open:7", "closure:0", "closure:not-a-number", "18"):
+            with self.subTest(period_id=period_id):
+                with patch("app.api.v1.endpoints.reporting.list_persisted_operation_rows") as list_operation_rows:
+                    with self.assertRaises(HTTPException) as raised:
+                        reporting.get_operations_report(_request(f"period_id={period_id}"), period_id=period_id)
+
+                self.assertEqual(raised.exception.status_code, 422)
+                self.assertEqual(raised.exception.detail, "UNSUPPORTED_OPERATION_PERIOD")
+                list_operation_rows.assert_not_called()
+
+    def test_operations_report_rejects_unknown_query_key_before_repository_access(self):
+        with patch("app.api.v1.endpoints.reporting.list_persisted_operation_rows") as list_operation_rows:
+            with self.assertRaises(HTTPException) as raised:
+                reporting.get_operations_report(
+                    _request("period_id=closure:18&ledger=true"),
+                    period_id="closure:18",
+                )
+
+        self.assertEqual(raised.exception.status_code, 422)
+        self.assertEqual(raised.exception.detail, "UNSUPPORTED_OPERATION_QUERY")
+        list_operation_rows.assert_not_called()
+
+    def test_operations_report_validation_errors_are_422_before_repository_access(self):
+        with patch("app.api.v1.endpoints.reporting.list_persisted_operation_rows") as list_operation_rows:
+            with self.assertRaises(HTTPException) as raised:
+                reporting.get_operations_report(
+                    _request("period_id=closure:18&sort=operator"),
+                    period_id="closure:18",
+                    sort="operator",
+                )
+
+        self.assertEqual(raised.exception.status_code, 422)
+        self.assertEqual(raised.exception.detail, "UNSUPPORTED_OPERATION_SORT")
+        list_operation_rows.assert_not_called()
+
+    @patch("app.api.v1.endpoints.reporting.list_persisted_operation_rows", side_effect=LookupError("CLOSURE_NOT_FOUND"))
+    def test_operations_report_missing_closure_is_404(self, _list_operation_rows):
+        with self.assertRaises(HTTPException) as raised:
+            reporting.get_operations_report(_request("period_id=closure:999"), period_id="closure:999")
+
+        self.assertEqual(raised.exception.status_code, 404)
+        self.assertEqual(raised.exception.detail, "CLOSURE_NOT_FOUND")
 
     def test_plate_history_rejects_invalid_plate_before_repository_access(self):
         with patch("app.api.v1.endpoints.reporting.get_persisted_plate_history") as get_plate_history:

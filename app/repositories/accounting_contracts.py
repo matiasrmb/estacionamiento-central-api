@@ -1,3 +1,12 @@
+from app.repositories.reporting_read_models import (
+    COLLECTED_SOURCES_TOTAL,
+    MONTHLY_PAYMENTS_COLLECTED_TOTAL,
+    NET_REVENUE_TOTAL,
+    OPERATIONAL_EXPENSE_TOTAL,
+    _with_legacy_metric_aliases,
+)
+
+
 CHARGED_WASH_ONLY_STATES = {"FINALIZADO_COBRADO"}
 
 
@@ -83,7 +92,7 @@ def build_report_totals(
         + total_mensualidades_monto
         + total_noches_monto
     )
-    return {
+    return _with_legacy_metric_aliases({
         "total_recaudado": total_recaudado,
         "total_movimientos": len(parking_movements) + len(bathroom_uses) + len(charged_wash_only) + len(monthly_payments) + len(night_charges) + len(expenses or []),
         "total_banos": len(bathroom_uses),
@@ -97,7 +106,11 @@ def build_report_totals(
         "total_general": total_general,
         "total_gastos": total_gastos,
         "total_neto": total_general - total_gastos,
-    }
+        COLLECTED_SOURCES_TOTAL: total_recaudado + total_banos_monto + total_lavados_solos_monto + total_noches_monto,
+        OPERATIONAL_EXPENSE_TOTAL: total_gastos,
+        MONTHLY_PAYMENTS_COLLECTED_TOTAL: total_mensualidades_monto,
+        NET_REVENUE_TOTAL: total_general - total_gastos,
+    })
 
 
 def _sum_amount(rows, key):

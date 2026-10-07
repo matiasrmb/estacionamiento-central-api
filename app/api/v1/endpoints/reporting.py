@@ -45,6 +45,7 @@ def get_closed_report(closure_id: int, _user=Depends(require_role("admin"))):
 
 @router.get("/audit-inventory")
 def get_audit_inventory(period_id: str = "current", _user=Depends(require_role("admin"))):
+    validate_reporting_period_id(period_id)
     return get_persisted_audit_inventory(period_id)
 
 
@@ -78,6 +79,20 @@ def validate_plate_history_request(plate: str, start: str, end: str, limit: int)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     return normalized_plate, {"start": bounds["start"], "end": bounds["end"], "limit": int(limit)}
+
+
+def validate_reporting_period_id(period_id: str):
+    if period_id == "current":
+        return
+    if not period_id or ":" not in period_id:
+        raise HTTPException(status_code=422, detail="INVALID_PERIOD_ID")
+
+    prefix, value = period_id.split(":", 1)
+    if prefix == "closure" and value.isdigit() and int(value) > 0:
+        return
+    if prefix == "open" and (value == "initial" or (value.isdigit() and int(value) > 0)):
+        return
+    raise HTTPException(status_code=422, detail="INVALID_PERIOD_ID")
 
 
 def _parse_plate_history_bounds(start: str, end: str):

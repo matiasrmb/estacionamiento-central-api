@@ -6,13 +6,21 @@ from sqlalchemy import text
 from app.db.database import db_conn
 from app.repositories.cierres_repo import get_cierre_pendiente
 from app.repositories.reporting_read_models import (
+    COLLECTED_SOURCES_TOTAL,
     COVERAGE_AVAILABLE,
     COVERAGE_PARTIAL,
     COVERAGE_UNAVAILABLE,
     METRIC_CATALOG_VERSION,
+    MONTHLY_PAYMENTS_COLLECTED_TOTAL,
+    NET_REVENUE_TOTAL,
+    OPERATIONAL_EXPENSE_TOTAL,
     PLATE_HISTORY_SOURCES,
+    VEHICLE_MOVEMENT_COUNT,
     build_audit_inventory,
+    build_capacity,
+    build_historical_capacity_completeness,
     build_plate_history_response,
+    _with_legacy_metric_aliases,
 )
 
 
@@ -186,37 +194,36 @@ def get_closed_report(cierre_id: int) -> Dict[str, Any]:
         ).mappings().one()
         active_monthly_customers = _active_monthly_customers(conn)
 
-    operation_income = sum(int(rows[name] or 0) for name in ("parking_income", "bathroom_income", "wash_income", "night_income"))
+    collected_sources_total = sum(int(rows[name] or 0) for name in ("parking_income", "bathroom_income", "wash_income", "night_income"))
+    monthly_payments_collected_total = int(rows["mensualidades"] or 0)
     operation_expenses = int(rows["expenses"] or 0)
-    operation_totals = {
-        "operational_income_total": operation_income,
-        "operational_expense_total": operation_expenses,
-        "operational_net_total": operation_income + int(rows["mensualidades"] or 0) - operation_expenses,
-        "mensualidad_sales_total": int(rows["mensualidades"] or 0),
-        "vehicle_movement_count": int(rows["vehicle_count"] or 0),
-    }
+    operation_totals = _with_legacy_metric_aliases({
+        COLLECTED_SOURCES_TOTAL: collected_sources_total,
+        OPERATIONAL_EXPENSE_TOTAL: operation_expenses,
+        NET_REVENUE_TOTAL: collected_sources_total + monthly_payments_collected_total - operation_expenses,
+        MONTHLY_PAYMENTS_COLLECTED_TOTAL: monthly_payments_collected_total,
+        VEHICLE_MOVEMENT_COUNT: int(rows["vehicle_count"] or 0),
+    })
     closure_income = int(closure["total_general"] or 0) - int(closure["total_mensualidades_monto"] or 0)
-    closure_metrics = {
-        "operational_income_total": closure_income,
-        "operational_expense_total": int(closure["total_gastos"] or 0),
-        "mensualidad_sales_total": int(closure["total_mensualidades_monto"] or 0),
-        "operational_net_total": int(closure["total_neto"] or 0),
+    closure_metrics = _with_legacy_metric_aliases({
+        COLLECTED_SOURCES_TOTAL: closure_income,
+        OPERATIONAL_EXPENSE_TOTAL: int(closure["total_gastos"] or 0),
+        MONTHLY_PAYMENTS_COLLECTED_TOTAL: int(closure["total_mensualidades_monto"] or 0),
+        NET_REVENUE_TOTAL: int(closure["total_neto"] or 0),
+    })
+    discrepancy = {
+        name: operation_totals[name] - closure_metrics[name]
+        for name in (COLLECTED_SOURCES_TOTAL, OPERATIONAL_EXPENSE_TOTAL, NET_REVENUE_TOTAL)
     }
-    discrepancy = {name: operation_totals[name] - closure_metrics[name] for name in closure_metrics}
+    discrepancy = _with_legacy_metric_aliases(discrepancy)
     return {
         "report_id": f"closed:{cierre_id}",
         "period": _period(f"closure:{cierre_id}", closure["fecha_inicio"], closure["fecha_cierre"], "closed"),
         "catalog_version": METRIC_CATALOG_VERSION,
         "closure_reference": {"id": cierre_id, "metrics": closure_metrics},
         "operation_totals": operation_totals,
-        "capacity": {
-            "total_spaces": 50,
-            "reserved_monthly_spaces": active_monthly_customers,
-            "effective_transient_capacity": max(50 - active_monthly_customers, 0),
-            "source_state": "resolved",
-            "source": "vehiculos.tipo_cliente='mensual' AND activo=1",
-        },
-        "historical_completeness": {"status": "complete", "missing_ranges": [], "unavailable_inputs": []},
+        "capacity": build_capacity(active_monthly_customers),
+        "historical_completeness": build_historical_capacity_completeness(),
         "operation_drill_down": {
             "href": f"/api/v1/reporting/reports/operations?period_id=closure:{cierre_id}",
             "period_id": f"closure:{cierre_id}",
@@ -279,17 +286,18 @@ def get_plate_history(plate: str, start: datetime, end: datetime, limit: int = 5
 
 
 def _summary(period_id, start, end, state, income, expenses, mensualidades, vehicle_count):
+    metrics = _with_legacy_metric_aliases({
+        COLLECTED_SOURCES_TOTAL: income,
+        OPERATIONAL_EXPENSE_TOTAL: expenses,
+        NET_REVENUE_TOTAL: income + mensualidades - expenses,
+        MONTHLY_PAYMENTS_COLLECTED_TOTAL: mensualidades,
+        VEHICLE_MOVEMENT_COUNT: vehicle_count,
+    })
     return {
         "period": _period(period_id, start, end, state),
         "catalog_version": METRIC_CATALOG_VERSION,
         "filters": {"operator_session_id": None},
-        "metrics": {
-            "operational_income_total": income,
-            "operational_expense_total": expenses,
-            "operational_net_total": income + mensualidades - expenses,
-            "mensualidad_sales_total": mensualidades,
-            "vehicle_movement_count": vehicle_count,
-        },
+        "metrics": metrics,
         "pagination": {"summary_row_count": vehicle_count, "summary_is_complete": True},
     }
 

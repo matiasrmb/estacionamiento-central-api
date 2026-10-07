@@ -12,11 +12,14 @@ class ReportingExportTests(unittest.TestCase):
 
         self.assertEqual(export["content_type"], "text/csv")
         self.assertEqual(export["metadata"]["compatibility"], "legacy-only")
+        self.assertFalse(export["metadata"]["canonical_contract"])
+        self.assertEqual(export["metadata"]["canonical_source"], "api-report-fields")
         self.assertIn("report_id,closed:50", export["content"])
         self.assertIn("closure_reference_id,50", export["content"])
         self.assertIn("generated_at,2026-09-29T03:00:00", export["content"])
         self.assertIn("metric_catalog_version,2026-09-29", export["content"])
         self.assertIn("source_state,closed_snapshot_with_operational_drill_down", export["content"])
+        self.assertIn("canonical_contract,False", export["content"])
 
     def test_pdf_export_has_stable_closed_report_content(self):
         report = _closed_report()
@@ -27,10 +30,13 @@ class ReportingExportTests(unittest.TestCase):
 
         self.assertEqual(first["content_type"], "application/pdf")
         self.assertEqual(first["metadata"]["compatibility"], "canonical")
+        self.assertTrue(first["metadata"]["canonical_contract"])
+        self.assertEqual(first["metadata"]["delivery_blocking"], False)
         self.assertEqual(first["content"], second["content"])
         self.assertIn("Report ID: closed:50", first["content"])
         self.assertIn("Closure Reference ID: 50", first["content"])
         self.assertIn("Operational Income Total: 1000", first["content"])
+        self.assertIn("Delivery Blocking: False", first["content"])
 
     def test_xlsx_export_has_same_identity_totals_and_completeness_metadata(self):
         report = _closed_report(
@@ -51,7 +57,9 @@ class ReportingExportTests(unittest.TestCase):
         self.assertEqual(export["metadata"]["report_id"], "closed:50")
         self.assertEqual(export["metadata"]["historical_completeness"]["status"], "partial")
         self.assertEqual(export["metadata"]["totals"]["operational_net_total"], 900)
+        self.assertEqual(export["metadata"]["delivery_blocking"], False)
         self.assertIn("completeness\tpartial", export["content"])
+        self.assertIn("delivery_blocking\tFalse", export["content"])
 
     def test_export_rejects_unsupported_format(self):
         with self.assertRaises(ValueError) as raised:

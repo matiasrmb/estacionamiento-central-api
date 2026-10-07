@@ -21,11 +21,13 @@ class ReportingEndpointTests(unittest.TestCase):
         self.assertEqual(_allowed_roles(reporting.get_dashboard), {"admin"})
 
     def test_unsupported_dashboard_filter_is_rejected(self):
-        with self.assertRaises(HTTPException) as raised:
-            reporting.get_dashboard(unsupported_filter="ledger_balance")
+        with patch("app.api.v1.endpoints.reporting.get_open_dashboard") as get_open_dashboard:
+            with self.assertRaises(HTTPException) as raised:
+                reporting.get_dashboard(unsupported_filter="ledger_balance")
 
         self.assertEqual(raised.exception.status_code, 422)
         self.assertEqual(raised.exception.detail, "UNSUPPORTED_REPORTING_FILTER")
+        get_open_dashboard.assert_not_called()
 
     def test_auditor_role_does_not_grant_reporting_access(self):
         self.assertEqual(_allowed_roles(reporting.get_dashboard), {"admin"})
@@ -188,6 +190,19 @@ class ReportingEndpointTests(unittest.TestCase):
 
         self.assertEqual(result["period_id"], "closure:18")
         get_audit_inventory.assert_called_once_with("closure:18")
+
+    def test_audit_inventory_rejects_malformed_period_before_repository_access(self):
+        malformed_periods = ["", "18", "closure:", "closure:not-a-number", "open:", "open:not-a-number"]
+
+        for period_id in malformed_periods:
+            with self.subTest(period_id=period_id):
+                with patch("app.api.v1.endpoints.reporting.get_persisted_audit_inventory") as get_audit_inventory:
+                    with self.assertRaises(HTTPException) as raised:
+                        reporting.get_audit_inventory(period_id=period_id)
+
+                self.assertEqual(raised.exception.status_code, 422)
+                self.assertEqual(raised.exception.detail, "INVALID_PERIOD_ID")
+                get_audit_inventory.assert_not_called()
 
 
 if __name__ == "__main__":
